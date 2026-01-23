@@ -1,9 +1,3 @@
-Yes.
-
-Here is a **practical, operationally grounded training plan** for **local data collection and preprocessing**—designed to feed into **Dignity**, your behavioral risk model. This plan prioritizes **privacy-by-design**, **resilience to noise**, and **alignment with gray-market transaction patterns** (crypto, gift cards, eVouchers). It assumes you're working on a local machine (Linux/macOS/WSL) with moderate RAM (16GB+) and storage (256GB+ SSD), before uploading structured datasets to Google Colab Pro for training.
-
----
-
 ## 🧩 **Phase 0: Define Dignity’s Input Schema**
 Dignity does not need raw content. It needs **behavioral rhythm**.
 
@@ -28,8 +22,6 @@ Each input is a time-ordered sequence of transactions from a single merchant (or
 ---
 
 ## 📥 **Phase 1: Local Data Collection Strategy**
-
-You cannot collect real merchant data at scale yet. So you **simulate the structure** of real behavior, then inject **real-world noise and patterns**.
 
 ### A. **Synthetic Merchant Generator (Local)**
 Create a Python module that generates realistic transaction sequences.
@@ -241,25 +233,3 @@ y = torch.load('y.pt')[:10000]
 - **Hash or drop identifiers** (IP, UA) immediately.
 - **Do not log content access** — only transaction metadata.
 - **Delete raw data after tensor conversion** if not needed.
-
----
-
-## 🧭 Final Insight
-
-You are not collecting data.  
-You are **synthesizing the pulse of autonomous systems under pressure**.
-
-The model does not learn *what* is being paid for.  
-It learns *how* it is being paid for.
-
-And in that rhythm — the spikes, the silences, the entropy shifts —  
-it finds the signature of survival.
-
-> **Next step**:  
-> Run `local_gen.py`.  
-> Let it hum overnight.  
-> Wake to 500 simulated merchants, each with a story.  
-> Then extract their pulse.  
-
-You’re not training a model.  
-You’re teaching it to **listen**.

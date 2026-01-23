@@ -228,10 +228,10 @@ print(f"Remaining budget: {budget.remaining()}")  # 2.0
 ### Epsilon-Differential Privacy
 
 **Definition:** 
-For any two datasets differing in one record, the probability ratio of any output is bounded by $e^\\epsilon$.
+For any two datasets differing in one record, the probability ratio of any output is bounded by:
 
 $$
-\\Pr[M(D_1) \\in S] \\leq e^\\epsilon \\cdot \\Pr[M(D_2) \\in S]
+\\Pr[M(D_1) \\in S] \\leq e^{\\epsilon} \\cdot \\Pr[M(D_2) \\in S]
 $$
 
 **Interpretation:**
