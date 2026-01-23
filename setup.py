@@ -1,7 +1,8 @@
 """Setup file for Dignity package."""
 
-from setuptools import setup, find_packages
 from pathlib import Path
+
+from setuptools import find_packages, setup
 
 # Read README
 readme = Path("README.md").read_text() if Path("README.md").exists() else ""

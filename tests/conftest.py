@@ -1,14 +1,14 @@
 """Pytest configuration and fixtures for Dignity tests."""
 
+import numpy as np
 import pytest
 import torch
-import numpy as np
 
 
 @pytest.fixture
 def device():
     """Get available device."""
-    return torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    return torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
 @pytest.fixture

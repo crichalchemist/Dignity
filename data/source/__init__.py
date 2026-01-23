@@ -1,5 +1,6 @@
 """Data source interfaces."""
-from .synthetic import SyntheticGenerator
+
 from .crypto import CryptoSource
+from .synthetic import SyntheticGenerator
 
 __all__ = ["SyntheticGenerator", "CryptoSource"]
