@@ -18,9 +18,6 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-# Import fundamental data fixtures
-pytest_plugins = ["tests.fixtures.fundamental_data_fixtures"]
-
 
 def pytest_collection_modifyitems(config, items):
     """Apply per-test timeouts based on markers.
