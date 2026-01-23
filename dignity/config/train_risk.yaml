@@ -1,0 +1,40 @@
+# Risk Scoring Configuration
+# Optimized for transaction risk assessment
+
+model:
+  task: risk
+  input_size: 9
+  hidden_size: 256
+  n_layers: 2
+  dropout: 0.2  # Higher dropout for risk task
+  cnn_kernel_size: 3
+
+data:
+  source: synthetic
+  seq_len: 100
+  batch_size: 64
+  test_size: 0.2
+  num_workers: 4
+  features:
+    - volume
+    - fee_rate
+    - tx_count
+    - volatility
+    - price_change
+    - momentum
+    - directional_change
+    - volume_volatility
+    - regime
+
+train:
+  epochs: 100  # More epochs for risk task
+  lr: 0.0001  # Lower LR for stability
+  weight_decay: 0.0001  # Stronger regularization
+  use_amp: true
+  gradient_clip: 0.5
+  checkpoint_dir: ./checkpoints/risk
+  log_interval: 10
+  save_interval: 10
+
+device: cuda
+seed: 42

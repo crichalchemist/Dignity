@@ -1,0 +1,37 @@
+# Colab-Optimized Configuration
+# For Google Colab T4/A100 GPUs with limited runtime
+
+model:
+  task: risk
+  input_size: 9
+  hidden_size: 128  # Smaller for faster training
+  n_layers: 2
+  dropout: 0.15
+  cnn_kernel_size: 3
+
+data:
+  source: synthetic
+  seq_len: 50  # Shorter sequences
+  batch_size: 128  # Larger batches for GPU utilization
+  test_size: 0.15
+  num_workers: 2
+  features:
+    - volume
+    - fee_rate
+    - tx_count
+    - volatility
+    - price_change
+    - momentum
+
+train:
+  epochs: 30  # Fewer epochs for Colab
+  lr: 0.001  # Higher LR for faster convergence
+  weight_decay: 0.00001
+  use_amp: true
+  gradient_clip: 1.0
+  checkpoint_dir: /content/drive/MyDrive/dignity/checkpoints
+  log_interval: 5
+  save_interval: 10
+
+device: cuda
+seed: 42

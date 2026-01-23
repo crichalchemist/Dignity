@@ -1,0 +1,69 @@
+[tool.ruff]
+# Exclude external/vendored code
+extend-exclude = ["models/timesFM", ".venvx", "build", "dist"]
+
+# Python version target
+target-version = "py310"
+
+# Line length (match Black default)
+line-length = 100
+
+[tool.ruff.lint]
+# Enable rule categories
+select = [
+    "E", # pycodestyle errors
+    "W", # pycodestyle warnings
+    "F", # pyflakes
+    "I", # isort (import sorting)
+    "N", # pep8-naming
+    "UP", # pyupgrade (modernize Python syntax)
+    "B", # flake8-bugbear (likely bugs)
+    "C4", # flake8-comprehensions
+    "SIM", # flake8-simplify
+]
+
+# Ignore specific rules
+ignore = [
+    "E501", # Line too long (handled by formatter)
+    "B008", # Do not perform function calls in argument defaults (common in dataclasses)
+    "B904", # Within except clause, raise exceptions with raise ... from err
+    "SIM108", # Use ternary operator (sometimes reduces readability)
+]
+
+# Allow unused variables prefixed with underscore
+dummy-variable-rgx = "^(_+|(_+[a-zA-Z0-9_]*[a-zA-Z0-9]+?))$"
+
+[tool.ruff.lint.per-file-ignores]
+# Test files can have longer lines and unused imports
+"tests/**/*.py" = ["E402", "F401", "F811"]
+# Scripts can have uppercase constants in function scope
+"scripts/**/*.py" = ["N806"]
+
+# E402: Module imports after sys.path manipulation (intentional pattern for Colab compatibility)
+"data/**/*.py" = ["E402"]
+"train/**/*.py" = ["E402"]
+"eval/**/*.py" = ["E402"]
+"rl/**/*.py" = ["E402"]
+"run/**/*.py" = ["E402"]
+"notebooks/**/*.py" = ["E402"]
+
+# N812: Allow PyTorch convention (torch.nn.functional as F)
+"models/**/*.py" = ["N812"]
+
+# N806: Allow uppercase class names in GDELT downloader
+"data/downloaders/gdelt.py" = ["N806"]
+
+[tool.ruff.lint.isort]
+# Import sorting configuration
+known-first-party = ["config", "features", "models", "train", "execution", "risk", "utils"]
+section-order = ["future", "standard-library", "third-party", "first-party", "local-folder"]
+
+[tool.ruff.format]
+# Use double quotes for strings
+quote-style = "double"
+# Indent with spaces
+indent-style = "space"
+# Respect magic trailing comma
+skip-magic-trailing-comma = false
+# Auto-detect line ending
+line-ending = "auto"

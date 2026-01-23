@@ -1,0 +1,40 @@
+# Forecasting Configuration
+# Optimized for time-series prediction
+
+model:
+  task: forecast
+  input_size: 9
+  hidden_size: 512  # Larger for forecasting
+  n_layers: 3  # Deeper for temporal patterns
+  dropout: 0.1
+  cnn_kernel_size: 5  # Larger receptive field
+
+data:
+  source: synthetic
+  seq_len: 200  # Longer sequences for forecasting
+  batch_size: 32  # Smaller batch for memory
+  test_size: 0.2
+  num_workers: 4
+  features:
+    - volume
+    - price
+    - fee_rate
+    - tx_count
+    - volatility
+    - price_change
+    - momentum
+    - directional_change
+    - volume_volatility
+
+train:
+  epochs: 75
+  lr: 0.0005
+  weight_decay: 0.00001
+  use_amp: true
+  gradient_clip: 1.0
+  checkpoint_dir: ./checkpoints/forecast
+  log_interval: 10
+  save_interval: 5
+
+device: cuda
+seed: 42

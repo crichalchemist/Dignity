@@ -1,0 +1,47 @@
+# Core ML/Data Science (Colab-compatible versions)
+# Constrained to work with Colab's pre-installed packages (tensorflow, numba, opencv)
+torch>=2.1.0
+pandas==2.2.2  # Match google-colab exact requirement
+numpy>=1.26.0,<2.0  # Stay on numpy 1.x for compatibility with scipy/sklearn
+scikit-learn>=1.3.0,<2.0  # Lock to 1.x for stability
+scipy>=1.10.0,<2.0  # Lock to 1.x for stability
+
+# Data fetching and processing
+requests>=2.31.0
+beautifulsoup4>=4.12.0
+fredapi>=0.5.1
+histdata>=1.1
+yfinance>=0.2.50
+
+# Fundamental data sources (standard pip packages)
+fred>=1.1.4  # Federal Reserve Economic Data API wrapper
+comtradeapicall>=1.3.0  # UN Comtrade API wrapper
+ratelimit>=2.2.1  # Rate limiting for API calls (required by fred package)
+# ECB shocks: Vendored in data/vendors/ecb_shocks/ (CSV data only)
+
+# ML and NLP
+datasets>=2.19.0
+transformers>=4.40.0
+peft>=0.13.2
+bitsandbytes>=0.44.0
+
+# Testing and code quality
+pytest>=7.4.0
+pytest-cov>=4.1.0
+pytest-mock>=3.12.0
+hypothesis>=6.92.0
+testcontainers>=4.6.0
+ruff>=0.6.0
+
+# Trading and backtesting
+backtesting>=0.3.2
+
+# Web and visualization
+jinja2>=3.1
+streamlit>=1.28.0
+plotly>=5.17.0
+flask>=3.0.0
+flask-cors>=4.0.0
+
+# System utilities
+psutil>=5.9.0
