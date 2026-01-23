@@ -228,9 +228,9 @@ Expected: `2 passed`
 """Configuration management."""
 import yaml
 from pathlib import Path
-from typing import Dict, Any
+from typing import Any
 
-def load_config(path: str) -> Dict[str, Any]:
+def load_config(path: str) -> dict[str, Any]:
     """
     Load YAML configuration file.
     
@@ -249,7 +249,7 @@ def load_config(path: str) -> Dict[str, Any]:
     
     return config
 
-def merge_configs(base: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, Any]:
+def merge_configs(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
     """
     Merge override config into base config.
     

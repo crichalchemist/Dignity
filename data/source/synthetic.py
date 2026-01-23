@@ -146,7 +146,7 @@ class SyntheticGenerator:
 
         # Convert to DataFrame
         all_data = []
-        for seq, label in zip(sequences, labels):
+        for seq, label in zip(sequences, labels, strict=True):
             for t in range(seq_len):
                 all_data.append(
                     {

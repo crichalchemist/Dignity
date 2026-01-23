@@ -55,6 +55,9 @@ def train_epoch(
         # Forward pass with AMP
         with autocast(enabled=use_amp):
             predictions, _ = model(x)
+            # Squeeze predictions if they have an extra dimension
+            if predictions.dim() > y.dim():
+                predictions = predictions.squeeze(-1)
             loss = criterion(predictions, y) if y is not None else predictions.mean()
 
         # Backward pass
@@ -119,6 +122,9 @@ def validate_epoch(
 
             # Compute loss
             if y is not None:
+                # Squeeze predictions if they have an extra dimension
+                if predictions.dim() > y.dim():
+                    predictions = predictions.squeeze(-1)
                 loss = criterion(predictions, y)
                 total_loss += loss.item()
 
