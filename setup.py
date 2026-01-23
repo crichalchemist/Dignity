@@ -35,8 +35,8 @@ setup(
     },
     entry_points={
         "console_scripts": [
-            "dignity-train=dignity.train.cli:main",
-            "dignity-export=dignity.export.to_onnx:main",
+            "dignity-train=train.cli:main",
+            "dignity-export=export.to_onnx:main",
         ],
     },
     classifiers=[

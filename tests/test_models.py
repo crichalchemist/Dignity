@@ -2,14 +2,14 @@
 
 import pytest
 import torch
-from dignity.models.backbone.cnn1d import CNN1D
-from dignity.models.backbone.lstm import StackedLSTM
-from dignity.models.backbone.attention import AdditiveAttention
-from dignity.models.backbone.hybrid import DignityBackbone
-from dignity.models.head.risk import RiskHead
-from dignity.models.head.forecast import ForecastHead
-from dignity.models.head.policy import PolicyHead
-from dignity.models.dignity import Dignity
+from models.backbone.cnn1d import CNN1D
+from models.backbone.lstm import StackedLSTM
+from models.backbone.attention import AdditiveAttention
+from models.backbone.hybrid import DignityBackbone
+from models.head.risk import RiskHead
+from models.head.forecast import ForecastHead
+from models.head.policy import PolicyHead
+from models.dignity import Dignity
 
 
 class TestBackboneComponents:

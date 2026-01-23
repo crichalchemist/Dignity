@@ -3,9 +3,9 @@
 import pytest
 import numpy as np
 import pandas as pd
-from dignity.data.source.synthetic import SyntheticGenerator
-from dignity.data.pipeline import TransactionPipeline
-from dignity.data.loader import TransactionDataset, create_dataloader
+from data.source.synthetic import SyntheticGenerator
+from data.pipeline import TransactionPipeline
+from data.loader import TransactionDataset, create_dataloader
 
 
 class TestSyntheticGenerator:

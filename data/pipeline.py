@@ -4,7 +4,7 @@ import numpy as np
 import pandas as pd
 from sklearn.preprocessing import RobustScaler
 from typing import Tuple, Optional, Dict
-from ..core.signals import SignalProcessor
+from core.signals import SignalProcessor
 
 
 class TransactionPipeline:

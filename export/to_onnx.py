@@ -224,8 +224,8 @@ def benchmark_onnx_inference(onnx_path: str,
 
 if __name__ == '__main__':
     import argparse
-    from dignity.models.dignity import Dignity
-    from dignity.core.config import DignityConfig
+    from models.dignity import Dignity
+    from core.config import DignityConfig
     
     parser = argparse.ArgumentParser(description="Export Dignity model to ONNX")
     parser.add_argument('--checkpoint', type=str, required=True,

@@ -3,9 +3,9 @@
 import pytest
 import numpy as np
 import pandas as pd
-from dignity.core.signals import SignalProcessor
-from dignity.core.privacy import PrivacyManager
-from dignity.core.config import DignityConfig
+from core.signals import SignalProcessor
+from core.privacy import PrivacyManager
+from core.config import DignityConfig
 
 
 class TestSignalProcessor:

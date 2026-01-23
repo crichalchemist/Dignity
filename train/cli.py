@@ -7,14 +7,14 @@ from pathlib import Path
 import sys
 
 # Add parent directory to path
-sys.path.insert(0, str(Path(__file__).parent.parent.parent))
+sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from dignity.core.config import DignityConfig
-from dignity.models.dignity import Dignity
-from dignity.data.source.synthetic import SyntheticGenerator
-from dignity.data.pipeline import TransactionPipeline
-from dignity.data.loader import create_dataloader
-from dignity.train.engine import train_epoch, validate_epoch, save_checkpoint
+from core.config import DignityConfig
+from models.dignity import Dignity
+from data.source.synthetic import SyntheticGenerator
+from data.pipeline import TransactionPipeline
+from data.loader import create_dataloader
+from train.engine import train_epoch, validate_epoch, save_checkpoint
 
 
 def main():
