@@ -67,3 +67,4 @@ Thumbs.db
 Sequence/
 # Cloned Sequence repo (reference only)
 Sequence/
+.internal/

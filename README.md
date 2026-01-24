@@ -5,18 +5,18 @@
 [![Tests](https://img.shields.io/badge/tests-31%20passing-brightgreen.svg)]()
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
-**Dignity** is a streamlined, production-ready framework for modeling transactional behavior patterns with privacy-preserving operations. Built from a focused refactoring of research code, it provides modular components for signal processing, data pipelines, and neural architectures optimized for deployment.
+**Dignity** is a privacy-preserving deep learning framework for modeling transactional behavior patterns. It provides modular components for signal processing, data pipelines, and neural architectures with built-in privacy safeguards including differential privacy and secure data handling.
 
 ## Overview
 
-Dignity Core implements a minimal, deniable approach to sequence modeling:
+Dignity Core implements privacy-first sequence modeling:
 
 - **Privacy-Preserving**: Built-in hashing, anonymization, quantization, and differential privacy operations
 - **Signal Processing**: Volatility, entropy, momentum, and regime detection utilities
 - **Modular Architecture**: Clean separation between data pipeline, model components, and training infrastructure
 - **Deployable**: ONNX export with verification and benchmarking for production inference
 - **Task-Agnostic**: Configurable for risk scoring, forecasting, or policy learning (RL)
-- **Lightweight**: ~2,800 lines of focused code vs. bloated research prototypes
+- **Lightweight**: Focused, production-ready codebase
 
 ## Key Features
 
