@@ -84,6 +84,16 @@ class SequenceWindowDataset(Dataset):
         """Return the number of windows."""
         return self.num_windows
     
+    def __repr__(self) -> str:
+        """Return a string representation of the dataset."""
+        return (
+            f"{self.__class__.__name__}("
+            f"data_shape={self.data.shape}, "
+            f"sequence_length={self.sequence_length}, "
+            f"stride={self.stride}, "
+            f"num_windows={self.num_windows})"
+        )
+    
     def __getitem__(self, idx: int) -> torch.Tensor:
         """
         Get a window by index.
@@ -109,5 +119,5 @@ class SequenceWindowDataset(Dataset):
         # Slice the window and convert to tensor
         window = self.data[start_idx:end_idx, :]
         
-        # Convert to Float32 tensor
-        return torch.from_numpy(window).float()
+        # Convert to Float32 tensor (shares memory when possible)
+        return torch.as_tensor(window, dtype=torch.float32)
