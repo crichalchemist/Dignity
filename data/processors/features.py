@@ -77,6 +77,17 @@ class FeatureEngineer:
         if volume_cols is None:
             volume_cols = ['volume']
 
+        # Input validation
+        if len(df) == 0:
+            raise ValueError("Input DataFrame is empty")
+
+        # Check for non-positive prices (would break log returns)
+        if isinstance(df.columns, pd.MultiIndex):
+            for (source, feature) in df.columns:
+                if feature in price_cols:
+                    if (df[(source, feature)] <= 0).any():
+                        raise ValueError(f"Non-positive prices found in {source}/{feature}")
+
         # Start with copy of input
         result = df.copy()
 
@@ -85,6 +96,10 @@ class FeatureEngineer:
             raise ValueError("Input DataFrame must have multi-level columns (source, feature)")
 
         sources = df.columns.get_level_values(0).unique()
+
+        # Only support single price column to avoid silent data loss
+        if len(price_cols) > 1:
+            raise ValueError(f"Only single price column supported, got {len(price_cols)}: {price_cols}")
 
         # Compute features for each source
         for source in sources:
@@ -151,8 +166,8 @@ class FeatureEngineer:
             Rolling standard deviation of returns
         """
         volatility = returns.rolling(window=window, min_periods=1).std()
-        # Forward-fill NaN values
-        return volatility.ffill().fillna(0)
+        # Forward-fill NaN values, use small positive value instead of 0
+        return volatility.ffill().fillna(1e-6)
 
     def _compute_rsi(self, prices: pd.Series, period: int = 14) -> pd.Series:
         """
@@ -180,12 +195,13 @@ class FeatureEngineer:
         avg_gains = gains.ewm(span=period, min_periods=period, adjust=False).mean()
         avg_losses = losses.ewm(span=period, min_periods=period, adjust=False).mean()
 
-        # Calculate RS and RSI
-        rs = avg_gains / avg_losses
-        rsi = 100 - (100 / (1 + rs))
-
-        # Handle division by zero (when avg_losses = 0)
-        rsi = rsi.fillna(100)  # If no losses, RSI = 100
+        # Calculate RS and RSI using safe division
+        # If avg_losses = 0, RSI = 100 (no losses means strongest uptrend)
+        rs = np.where(avg_losses != 0, avg_gains / avg_losses, 0)
+        rsi = np.where(avg_losses != 0, 100 - (100 / (1 + rs)), 100)
+        
+        # Convert back to Series to preserve pandas functionality
+        rsi = pd.Series(rsi, index=prices.index)
 
         # Forward-fill initial NaN values
         return rsi.ffill().fillna(50)  # Default to neutral 50

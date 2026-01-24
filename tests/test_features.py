@@ -382,9 +382,10 @@ class TestFeatureEngineer:
         returns = features[('TEST', 'returns')]
         assert (returns == 0).all()
 
-        # Volatility should be 0 (no variation)
+        # Volatility should be very small (near 0)
+        # We use 1e-6 as fallback instead of 0 to avoid division issues
         volatility = features[('TEST', 'volatility')]
-        assert (volatility == 0).all()
+        assert (volatility <= 1e-5).all()  # Allow for small positive values
 
         # RSI should be neutral (50) or 100 (no losses)
         rsi = features[('TEST', 'rsi')]
@@ -418,3 +419,85 @@ class TestFeatureEngineer:
         # Check result is valid
         assert len(features) == len(aligned)
         assert not features[('BTC/USDT', 'returns')].isna().any()
+
+    def test_empty_dataframe_raises_error(self):
+        """Test that empty DataFrame raises ValueError."""
+        # Create DataFrame with correct structure but no rows
+        df = pd.DataFrame(
+            columns=pd.MultiIndex.from_tuples([('TEST', 'close'), ('TEST', 'volume')])
+        )
+
+        engineer = FeatureEngineer()
+        with pytest.raises(ValueError, match="Input DataFrame is empty"):
+            engineer.compute_all_features(df)
+
+    def test_non_positive_prices_raises_error(self):
+        """Test that non-positive prices raise ValueError."""
+        timestamps = pd.date_range('2024-01-01', periods=100, freq='1min')
+        timestamps_ms = (timestamps.astype(np.int64) // 10**6).values
+
+        # Create DataFrame with negative prices
+        df = pd.DataFrame({
+            ('TEST', 'close'): [-100.0] * 100,  # Negative prices
+            ('TEST', 'volume'): np.random.uniform(1000, 2000, 100),
+        }, index=timestamps_ms)
+        df.columns = pd.MultiIndex.from_tuples(df.columns)
+
+        engineer = FeatureEngineer()
+        with pytest.raises(ValueError, match="Non-positive prices found"):
+            engineer.compute_all_features(df)
+
+    def test_zero_prices_raises_error(self):
+        """Test that zero prices raise ValueError."""
+        timestamps = pd.date_range('2024-01-01', periods=100, freq='1min')
+        timestamps_ms = (timestamps.astype(np.int64) // 10**6).values
+
+        # Create DataFrame with zero prices
+        df = pd.DataFrame({
+            ('TEST', 'close'): [0.0] * 100,  # Zero prices
+            ('TEST', 'volume'): np.random.uniform(1000, 2000, 100),
+        }, index=timestamps_ms)
+        df.columns = pd.MultiIndex.from_tuples(df.columns)
+
+        engineer = FeatureEngineer()
+        with pytest.raises(ValueError, match="Non-positive prices found"):
+            engineer.compute_all_features(df)
+
+    def test_multiple_price_columns_raises_error(self):
+        """Test that multiple price columns raise ValueError."""
+        timestamps = pd.date_range('2024-01-01', periods=100, freq='1min')
+        timestamps_ms = (timestamps.astype(np.int64) // 10**6).values
+
+        df = pd.DataFrame({
+            ('TEST', 'open'): np.random.uniform(95, 105, 100),
+            ('TEST', 'close'): np.random.uniform(95, 105, 100),
+            ('TEST', 'volume'): np.random.uniform(1000, 2000, 100),
+        }, index=timestamps_ms)
+        df.columns = pd.MultiIndex.from_tuples(df.columns)
+
+        engineer = FeatureEngineer()
+        # Trying to use both 'open' and 'close' should fail
+        with pytest.raises(ValueError, match="Only single price column supported"):
+            engineer.compute_all_features(df, price_cols=['open', 'close'])
+
+    def test_rsi_with_only_gains_no_division_error(self):
+        """Test RSI computation when there are only gains (no losses)."""
+        timestamps = pd.date_range('2024-01-01', periods=50, freq='1min')
+        timestamps_ms = (timestamps.astype(np.int64) // 10**6).values
+
+        # Create steadily increasing prices (only gains)
+        prices = np.linspace(100, 200, 50)
+        df = pd.DataFrame({
+            ('TEST', 'close'): prices,
+            ('TEST', 'volume'): np.random.uniform(1000, 2000, 50),
+        }, index=timestamps_ms)
+        df.columns = pd.MultiIndex.from_tuples(df.columns)
+
+        engineer = FeatureEngineer()
+        features = engineer.compute_all_features(df)
+
+        # RSI should not contain inf or nan
+        rsi = features[('TEST', 'rsi')]
+        assert np.isfinite(rsi).all()
+        # For only gains, RSI should be high (close to 100)
+        assert (rsi >= 50).all()
