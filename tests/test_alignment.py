@@ -199,7 +199,7 @@ class TestTimestampAligner:
 
         # Interpolation should fill gaps with intermediate values
         # Check that values are reasonable (no huge jumps)
-        close_values = aligned[('BTC/USDT', 'close')].dropna().values
+        close_values = aligned[('BTC/USDT', 'close')].dropna().to_numpy()
         if len(close_values) > 1:
             diffs = np.abs(np.diff(close_values))
             # Differences should be reasonable (< 5% of price)
@@ -219,7 +219,7 @@ class TestTimestampAligner:
         aligned = aligner.align(data_sources)
 
         timestamps = aligned.index.values
-        
+
         # Check first timestamp
         assert timestamps[0] == df_crypto['timestamp'].min()
 
@@ -270,8 +270,8 @@ class TestTimestampAligner:
             ts = row['timestamp']
             if ts in aligned.index:
                 assert np.isclose(
-                    aligned.loc[ts, ('BTC/USDT', 'close')],
-                    row['close'],
+                    float(aligned.loc[ts, ('BTC/USDT', 'close')]),
+                    float(row['close']),
                     rtol=1e-10
                 )
 

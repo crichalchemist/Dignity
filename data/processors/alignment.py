@@ -81,6 +81,8 @@ class TimestampAligner:
         # Validate each DataFrame has required columns
         required_columns = {'timestamp', 'open', 'high', 'low', 'close', 'volume'}
         for source_name, df in data_sources.items():
+            if len(df) == 0:
+                raise ValueError(f"Data source '{source_name}' is empty")
             if not required_columns.issubset(df.columns):
                 missing = required_columns - set(df.columns)
                 raise ValueError(
