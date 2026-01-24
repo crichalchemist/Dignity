@@ -1,88 +1,72 @@
-"""Policy head for reinforcement learning (optional)."""
+"""Trade signal generation head for foundation model."""
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 
 
-class PolicyHead(nn.Module):
+class TradeSignalHead(nn.Module):
     """
-    Task head for policy learning (A3C/PPO).
-
-    Outputs:
-    - Action logits (for discrete actions)
-    - State value estimate
-
-    This is optional and only used if doing RL-based training.
+    Task head for trade signal generation.
+    
+    Produces action probability distributions over discrete trading actions:
+    - Buy (long position)
+    - Hold (no position change)
+    - Sell (short position)
+    
+    This head processes the foundation model's backbone output and produces
+    action logits for categorical distribution sampling at each timestep.
     """
-
-    def __init__(
-        self,
-        input_size: int,
-        n_actions: int = 3,
-        hidden_size: int = 128,
-        dropout: float = 0.1,
-    ):
+    
+    def __init__(self, d_model: int = 512, num_actions: int = 3):
         """
+        Initialize trade signal generation head.
+        
         Args:
-            input_size: Size of backbone context vector
-            n_actions: Number of discrete actions
-            hidden_size: Size of intermediate layer
-            dropout: Dropout probability
+            d_model: Dimension of backbone feature vectors (default: 512)
+            num_actions: Number of discrete trading actions (default: 3 for Buy/Hold/Sell)
         """
         super().__init__()
-
-        self.n_actions = n_actions
-
-        # Shared layers
-        self.shared = nn.Sequential(
-            nn.Linear(input_size, hidden_size), nn.ReLU(), nn.Dropout(dropout)
-        )
-
-        # Policy head (actor)
-        self.policy = nn.Linear(hidden_size, n_actions)
-
-        # Value head (critic)
-        self.value = nn.Linear(hidden_size, 1)
-
-    def forward(self, context: torch.Tensor) -> tuple:
+        
+        self.d_model = d_model
+        self.num_actions = num_actions
+        
+        # Normalization layer for stable training
+        self.norm = nn.LayerNorm(d_model)
+        
+        # Two-layer projection network
+        self.fc1 = nn.Linear(d_model, d_model // 2)
+        self.activation = nn.GELU()
+        self.dropout = nn.Dropout(0.1)
+        self.fc2 = nn.Linear(d_model // 2, num_actions)
+        
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
-        Compute policy logits and value estimate.
-
+        Forward pass for trade signal generation.
+        
         Args:
-            context: Context vector [batch_size, input_size]
-
+            x: Backbone feature tensor [batch_size, seq_len, d_model]
+            
         Returns:
-            Tuple of:
-            - action_logits: [batch_size, n_actions]
-            - value: [batch_size, 1]
+            Action logits [batch_size, seq_len, num_actions]
+            
+        Example:
+            >>> head = TradeSignalHead(d_model=512, num_actions=3)
+            >>> x = torch.randn(8, 100, 512)  # [B, T, d_model]
+            >>> logits = head(x)  # [8, 100, 3]
         """
-        shared_features = self.shared(context)
+        # Normalize input features
+        x = self.norm(x)  # [B, T, d_model]
+        
+        # Project to intermediate dimension
+        x = self.fc1(x)  # [B, T, d_model // 2]
+        x = self.activation(x)
+        x = self.dropout(x)
+        
+        # Project to action logits
+        x = self.fc2(x)  # [B, T, num_actions]
+        
+        return x
 
-        action_logits = self.policy(shared_features)
-        value = self.value(shared_features)
 
-        return action_logits, value
-
-    def sample_action(self, context: torch.Tensor) -> tuple:
-        """
-        Sample action from policy distribution.
-
-        Args:
-            context: Context vector [batch_size, input_size]
-
-        Returns:
-            Tuple of:
-            - action: Sampled action [batch_size]
-            - log_prob: Log probability [batch_size]
-            - value: Value estimate [batch_size, 1]
-        """
-        action_logits, value = self.forward(context)
-
-        # Sample from categorical distribution
-        probs = F.softmax(action_logits, dim=-1)
-        dist = torch.distributions.Categorical(probs)
-        action = dist.sample()
-        log_prob = dist.log_prob(action)
-
-        return action, log_prob, value
+# Keep old PolicyHead name as alias for backward compatibility
+PolicyHead = TradeSignalHead

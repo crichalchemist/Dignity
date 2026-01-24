@@ -11,6 +11,7 @@ from typing import Optional
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.utils.checkpoint import checkpoint
 
 
 class B2S6Unit(nn.Module):
@@ -317,8 +318,15 @@ class B2S6Layer(nn.Module):
     Wraps B2S6Unit with modern architectural components:
     - Pre-normalization (LayerNorm before B2S6)
     - Residual connection (x + B2S6(LayerNorm(x)))
-    - Optional 1D convolution for local modeling
+    - Optional 1D convolution for local modeling (separate from B2S6Unit's conv)
     - Dropout for regularization
+
+    Flow:
+        1. LayerNorm(x)
+        2. Optional: Causal Conv1D (kernel=conv_kernel, padding left only)
+        3. B2S6Unit
+        4. Dropout
+        5. Residual: output = x + dropout(b2s6(conv(layernorm(x))))
     """
 
     def __init__(
@@ -338,24 +346,38 @@ class B2S6Layer(nn.Module):
             d_model: Channel dimension
             state_dim: SSM state dimension
             num_blocks: Number of blocks for partitioning
-            use_conv: Whether to use convolution (conv is inside B2S6Unit)
-            conv_kernel: Convolution kernel size
+            use_conv: Whether to use optional causal convolution for local patterns
+            conv_kernel: Convolution kernel size (for optional conv layer)
             dropout: Dropout probability
             dt_rank: Rank for delta projection
         """
         super().__init__()
 
         self.d_model = d_model
+        self.use_conv = use_conv
+        self.conv_kernel = conv_kernel
 
         # Layer normalization (pre-norm)
         self.norm = nn.LayerNorm(d_model)
 
-        # B2S6 unit
+        # Optional causal 1D convolution for local pattern modeling
+        if use_conv:
+            self.conv1d = nn.Conv1d(
+                in_channels=d_model,
+                out_channels=d_model,
+                kernel_size=conv_kernel,
+                padding=0,  # Manual causal padding
+                groups=d_model,  # Depthwise convolution
+            )
+        else:
+            self.conv1d = None
+
+        # B2S6 unit (always has its own internal conv)
         self.b2s6 = B2S6Unit(
             d_model=d_model,
             state_dim=state_dim,
             num_blocks=num_blocks,
-            conv_kernel=conv_kernel if use_conv else 1,
+            conv_kernel=4,  # B2S6Unit always uses its internal conv
             dt_rank=dt_rank,
         )
 
@@ -373,12 +395,31 @@ class B2S6Layer(nn.Module):
         Returns:
             Output tensor [batch_size, seq_len, d_model]
         """
-        # Pre-norm + B2S6 + dropout + residual
+        # Save residual
         residual = x
+
+        # 1. Pre-normalization
         x = self.norm(x)
+
+        # 2. Optional causal convolution for local patterns
+        if self.use_conv:
+            # Apply causal padding (pad left only, no future info)
+            # [B, T, D] -> [B, D, T]
+            x_conv = x.transpose(1, 2)
+            # Pad left with (kernel_size - 1) zeros
+            x_conv = F.pad(x_conv, (self.conv_kernel - 1, 0), mode='constant', value=0)
+            x_conv = self.conv1d(x_conv)
+            # [B, D, T] -> [B, T, D]
+            x = x_conv.transpose(1, 2)
+
+        # 3. B2S6 unit
         x = self.b2s6(x, use_parallel_scan=use_parallel_scan)
+
+        # 4. Dropout
         x = self.dropout(x)
-        x = x + residual
+
+        # 5. Residual connection
+        x = residual + x
 
         return x
 
@@ -389,6 +430,18 @@ class B2S6Backbone(nn.Module):
 
     Stacks multiple B2S6 layers with optional gradient checkpointing
     for memory-efficient long-range sequence processing.
+
+    Features:
+    - Configurable depth: 6-24 layers
+    - Gradient checkpointing: Memory efficiency for long sequences
+    - Final layer normalization: Stabilize output before cross-attention
+    - Optional input projection: Linear(input_features, d_model)
+
+    Flow:
+        1. Optional: Linear projection from input_features to d_model
+        2. Stack of B2S6Layer modules (num_layers)
+        3. Final LayerNorm
+        4. Optional: Gradient checkpointing during forward pass
     """
 
     def __init__(
@@ -399,6 +452,7 @@ class B2S6Backbone(nn.Module):
         num_blocks: int = 4,
         dropout: float = 0.1,
         use_gradient_checkpointing: bool = False,
+        input_features: Optional[int] = None,
         dt_rank: str = "auto",
     ):
         """
@@ -406,11 +460,12 @@ class B2S6Backbone(nn.Module):
 
         Args:
             d_model: Channel dimension
-            num_layers: Number of B2S6 layers
+            num_layers: Number of B2S6 layers (configurable: 6-24 layers)
             state_dim: SSM state dimension
             num_blocks: Number of blocks per layer
             dropout: Dropout probability
-            use_gradient_checkpointing: Whether to use gradient checkpointing
+            use_gradient_checkpointing: Whether to use gradient checkpointing for memory efficiency
+            input_features: If set, adds input projection from input_features to d_model
             dt_rank: Rank for delta projection
         """
         super().__init__()
@@ -418,6 +473,13 @@ class B2S6Backbone(nn.Module):
         self.d_model = d_model
         self.num_layers = num_layers
         self.use_gradient_checkpointing = use_gradient_checkpointing
+        self.input_features = input_features
+
+        # Optional input projection layer
+        if input_features is not None and input_features != d_model:
+            self.input_projection = nn.Linear(input_features, d_model)
+        else:
+            self.input_projection = None
 
         # Stack of B2S6 layers
         self.layers = nn.ModuleList(
@@ -441,16 +503,20 @@ class B2S6Backbone(nn.Module):
         Forward pass through B2S6 backbone.
 
         Args:
-            x: Input tensor [batch_size, seq_len, d_model]
+            x: Input tensor [batch_size, seq_len, input_features or d_model]
             use_parallel_scan: Whether to use parallel scan
 
         Returns:
             Output tensor [batch_size, seq_len, d_model]
         """
+        # Optional input projection
+        if self.input_projection is not None:
+            x = self.input_projection(x)
+
         # Process through all layers
         for layer in self.layers:
             if self.training and self.use_gradient_checkpointing:
-                x = torch.utils.checkpoint.checkpoint(
+                x = checkpoint(
                     layer, x, use_parallel_scan, use_reentrant=False
                 )
             else:
