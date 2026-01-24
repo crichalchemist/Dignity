@@ -5,5 +5,6 @@ The legacy TransactionPipeline is in data/pipeline.py at the parent level.
 """
 
 from .alignment import TimestampAligner
+from .windowing import SequenceWindowDataset
 
-__all__ = ['TimestampAligner']
+__all__ = ['TimestampAligner', 'SequenceWindowDataset']
