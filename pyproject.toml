@@ -34,14 +34,10 @@ ignore = [
 dummy-variable-rgx = "^(_+|(_+[a-zA-Z0-9_]*[a-zA-Z0-9]+?))$"
 
 [tool.ruff.lint.per-file-ignores]
-# Test files can have longer lines and unused imports
-"tests/**/*.py" = ["E402", "F401", "F811"]
 # Scripts can have uppercase constants in function scope
 "scripts/**/*.py" = ["N806"]
 
 # E402: Module imports after sys.path manipulation (intentional pattern for Colab compatibility)
-"data/**/*.py" = ["E402"]
-"train/**/*.py" = ["E402"]
 "eval/**/*.py" = ["E402"]
 "rl/**/*.py" = ["E402"]
 "run/**/*.py" = ["E402"]
@@ -49,6 +45,17 @@ dummy-variable-rgx = "^(_+|(_+[a-zA-Z0-9_]*[a-zA-Z0-9]+?))$"
 
 # N812: Allow PyTorch convention (torch.nn.functional as F)
 "models/**/*.py" = ["N812"]
+
+# N806/N803: Allow ML convention (X for feature matrices, B for batch, T_max for PyTorch scheduler)
+"data/**/*.py" = ["E402", "N803", "N806"]
+"train/**/*.py" = ["E402", "N803", "N806"]
+"backtest/**/*.py" = ["N806"]
+"tests/**/*.py" = ["E402", "F401", "F811", "N802", "N803", "N806"]
+"export/**/*.py" = ["N806"]
+
+# N999: False positive — ruff misreads module names from __init__.py docstrings
+"*/__init__.py" = ["N999"]
+"__init__.py" = ["N999"]
 
 # N806: Allow uppercase class names in GDELT downloader
 "data/downloaders/gdelt.py" = ["N806"]

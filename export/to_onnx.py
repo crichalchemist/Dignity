@@ -140,18 +140,20 @@ def verify_onnx_export(
             pytorch_outputs = _CascadeWrapper(pytorch_model)(test_input)
         else:
             pytorch_output = pytorch_model(test_input)
-            pytorch_outputs = pytorch_output if isinstance(pytorch_output, tuple) else (pytorch_output, None)
+            pytorch_outputs = (
+                pytorch_output if isinstance(pytorch_output, tuple) else (pytorch_output, None)
+            )
 
     ort_session = ort.InferenceSession(onnx_path)
     ort_inputs = {ort_session.get_inputs()[0].name: test_input.numpy()}
     ort_outputs = ort_session.run(None, ort_inputs)
 
     all_match = True
-    for i, (pt_tensor, ort_arr) in enumerate(zip(pytorch_outputs, ort_outputs)):
+    for i, (pt_tensor, ort_arr) in enumerate(zip(pytorch_outputs, ort_outputs, strict=True)):
         if pt_tensor is None:
             continue
         match = np.allclose(pt_tensor.numpy(), ort_arr, rtol=rtol, atol=atol)
-        name = (CASCADE_OUTPUT_NAMES[i] if is_cascade else ["predictions", "attention_weights"][i])
+        name = CASCADE_OUTPUT_NAMES[i] if is_cascade else ["predictions", "attention_weights"][i]
         if match:
             print(f"✓ {name} matches")
         else:
@@ -260,18 +262,12 @@ if __name__ == "__main__":
     from models.dignity import Dignity
 
     parser = argparse.ArgumentParser(description="Export Dignity model to ONNX")
-    parser.add_argument(
-        "--checkpoint", type=str, required=True, help="Path to model checkpoint"
-    )
-    parser.add_argument(
-        "--output", type=str, required=True, help="Output ONNX file path"
-    )
+    parser.add_argument("--checkpoint", type=str, required=True, help="Path to model checkpoint")
+    parser.add_argument("--output", type=str, required=True, help="Output ONNX file path")
     parser.add_argument(
         "--config", type=str, default=None, help="Config file (if not in checkpoint)"
     )
-    parser.add_argument(
-        "--benchmark", action="store_true", help="Run inference benchmark"
-    )
+    parser.add_argument("--benchmark", action="store_true", help="Run inference benchmark")
 
     args = parser.parse_args()
 

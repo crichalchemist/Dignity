@@ -32,6 +32,7 @@ from train.engine import (
 # Cascade helpers
 # ---------------------------------------------------------------------------
 
+
 def _build_cascade_labels(
     prices: np.ndarray,
     regime_raw: np.ndarray,
@@ -59,9 +60,9 @@ def _build_cascade_labels(
     # alpha: n-step forward return tanh-normalized to [-1, 1]
     fwd = np.zeros(n, dtype=np.float32)
     if alpha_horizon < n:
-        fwd[:-alpha_horizon] = (
-            prices[alpha_horizon:] - prices[:-alpha_horizon]
-        ) / np.maximum(prices[:-alpha_horizon], 1e-9)
+        fwd[:-alpha_horizon] = (prices[alpha_horizon:] - prices[:-alpha_horizon]) / np.maximum(
+            prices[:-alpha_horizon], 1e-9
+        )
     alpha = np.tanh(fwd * 20).reshape(-1, 1)
 
     # action: price-direction proxy (0=HOLD, 1=BUY, 2=SELL)
@@ -88,8 +89,8 @@ def _make_cascade_batches(
         x = torch.FloatTensor(X_seq[bi]).to(device)
         lbl: dict[str, torch.Tensor] = {
             "regime": torch.from_numpy(labels_seq["regime"][bi]).long().to(device),
-            "var":    torch.from_numpy(labels_seq["var"][bi]).float().to(device),
-            "alpha":  torch.from_numpy(labels_seq["alpha"][bi]).float().to(device),
+            "var": torch.from_numpy(labels_seq["var"][bi]).float().to(device),
+            "alpha": torch.from_numpy(labels_seq["alpha"][bi]).float().to(device),
             "action": torch.from_numpy(labels_seq["action"][bi]).long().to(device),
         }
         batches.append((x, lbl))
@@ -114,9 +115,7 @@ def _process_cascade_data(
 
     prices = df["close"].values if "close" in df.columns else df["price"].values
     regime_raw = (
-        df_signals["regime"].values
-        if "regime" in df_signals.columns
-        else np.zeros(len(prices))
+        df_signals["regime"].values if "regime" in df_signals.columns else np.zeros(len(prices))
     )
     labels_raw = _build_cascade_labels(prices, regime_raw)
 
@@ -124,15 +123,14 @@ def _process_cascade_data(
     n_seq = len(X_seq)
 
     # Align labels to sequence END (stride=1: seq i ends at i + seq_len - 1)
-    labels_seq = {
-        k: v[seq_len - 1 : seq_len - 1 + n_seq] for k, v in labels_raw.items()
-    }
+    labels_seq = {k: v[seq_len - 1 : seq_len - 1 + n_seq] for k, v in labels_raw.items()}
     return X_seq, labels_seq
 
 
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
+
 
 def main():
     """Main training entry point."""
@@ -166,9 +164,7 @@ def _train_cascade(config: DignityConfig, device: torch.device, resume: str | No
     """Cascade training: Regime → Risk → Alpha → Policy with Guided Learning."""
 
     # --- Data loading -------------------------------------------------
-    asset_cfg = ASSET_CONFIGS.get(
-        config.execution.asset_class, ASSET_CONFIGS["forex"]
-    )
+    asset_cfg = ASSET_CONFIGS.get(config.execution.asset_class, ASSET_CONFIGS["forex"])
 
     if config.data.source == "metaapi" and config.execution.metaapi_token:
         import asyncio
@@ -199,15 +195,13 @@ def _train_cascade(config: DignityConfig, device: torch.device, resume: str | No
         features=config.data.features,
     )
 
-    X_seq, labels_seq = _process_cascade_data(
-        df_raw, config, asset_cfg, pipeline, fit=True
-    )
+    X_seq, labels_seq = _process_cascade_data(df_raw, config, asset_cfg, pipeline, fit=True)
 
     split_idx = int(len(X_seq) * (1 - config.data.test_size))
     X_train = X_seq[:split_idx]
-    X_val   = X_seq[split_idx:]
+    X_val = X_seq[split_idx:]
     labels_train = {k: v[:split_idx] for k, v in labels_seq.items()}
-    labels_val   = {k: v[split_idx:] for k, v in labels_seq.items()}
+    labels_val = {k: v[split_idx:] for k, v in labels_seq.items()}
 
     n_features = len(pipeline.available_features)
     print(f"Train sequences: {len(X_train)}, Val sequences: {len(X_val)}")
@@ -245,15 +239,20 @@ def _train_cascade(config: DignityConfig, device: torch.device, resume: str | No
     best_val_loss = float("inf")
 
     for epoch in range(start_epoch, config.train.epochs + 1):
-        print(f"\n{'='*60}\nEpoch {epoch}/{config.train.epochs}\n{'='*60}")
+        print(f"\n{'=' * 60}\nEpoch {epoch}/{config.train.epochs}\n{'=' * 60}")
 
         train_loader = _make_cascade_batches(
             X_train, labels_train, config.data.batch_size, device, shuffle=True
         )
         train_metrics = train_cascade_epoch(
-            model, train_loader, optimizer, task_weights,
-            device=device, use_amp=config.train.use_amp,
-            grad_clip=config.train.gradient_clip, scheduler=scheduler,
+            model,
+            train_loader,
+            optimizer,
+            task_weights,
+            device=device,
+            use_amp=config.train.use_amp,
+            grad_clip=config.train.gradient_clip,
+            scheduler=scheduler,
         )
 
         # Validation: compute cascade loss without gradient updates
@@ -311,15 +310,14 @@ async def _fetch_history(src, start_time: str | None = None) -> pd.DataFrame:
     return df
 
 
-def _train_single_head(
-    config: DignityConfig, device: torch.device, resume: str | None
-):
+def _train_single_head(config: DignityConfig, device: torch.device, resume: str | None):
     """Existing single-head training path (risk / forecast / policy)."""
 
     print("\nGenerating synthetic data...")
     generator = SyntheticGenerator(seed=config.seed)
     df_train = generator.generate_dataset(
-        num_normal=800, num_anomalous=200,
+        num_normal=800,
+        num_anomalous=200,
         seq_len=config.data.seq_len + 20,
     )
 
@@ -342,8 +340,10 @@ def _train_single_head(
 
     print(f"Train sequences: {len(X_train)}, Val sequences: {len(X_val)}")
 
-    train_loader = create_dataloader(X_train, y_train, batch_size=config.data.batch_size, shuffle=True)
-    val_loader   = create_dataloader(X_val,   y_val,   batch_size=config.data.batch_size, shuffle=False)
+    train_loader = create_dataloader(
+        X_train, y_train, batch_size=config.data.batch_size, shuffle=True
+    )
+    val_loader = create_dataloader(X_val, y_val, batch_size=config.data.batch_size, shuffle=False)
 
     print("\nInitializing model...")
     model = Dignity(
@@ -378,12 +378,17 @@ def _train_single_head(
     best_val_loss = float("inf")
 
     for epoch in range(start_epoch, config.train.epochs + 1):
-        print(f"\n{'='*60}\nEpoch {epoch}/{config.train.epochs}\n{'='*60}")
+        print(f"\n{'=' * 60}\nEpoch {epoch}/{config.train.epochs}\n{'=' * 60}")
 
         train_metrics = train_epoch(
-            model=model, dataloader=train_loader, optimizer=optimizer,
-            criterion=criterion, device=device, use_amp=config.train.use_amp,
-            grad_clip=config.train.gradient_clip, log_interval=config.train.log_interval,
+            model=model,
+            dataloader=train_loader,
+            optimizer=optimizer,
+            criterion=criterion,
+            device=device,
+            use_amp=config.train.use_amp,
+            grad_clip=config.train.gradient_clip,
+            log_interval=config.train.log_interval,
         )
         val_metrics = validate_epoch(
             model=model, dataloader=val_loader, criterion=criterion, device=device
@@ -396,13 +401,21 @@ def _train_single_head(
 
         if epoch % config.train.save_interval == 0:
             path = checkpoint_dir / f"dignity_{config.model.task}_epoch{epoch}.pt"
-            save_checkpoint(model, optimizer, epoch, {"train": train_metrics, "val": val_metrics}, str(path))
+            save_checkpoint(
+                model, optimizer, epoch, {"train": train_metrics, "val": val_metrics}, str(path)
+            )
             print(f"Checkpoint saved to {path}")
 
         if val_metrics["loss"] < best_val_loss:
             best_val_loss = val_metrics["loss"]
             best_path = checkpoint_dir / f"dignity_{config.model.task}_best.pt"
-            save_checkpoint(model, optimizer, epoch, {"train": train_metrics, "val": val_metrics}, str(best_path))
+            save_checkpoint(
+                model,
+                optimizer,
+                epoch,
+                {"train": train_metrics, "val": val_metrics},
+                str(best_path),
+            )
             print(f"Best model saved (val_loss: {best_val_loss:.4f})")
 
     print("\nTraining complete!")

@@ -17,9 +17,7 @@ def make_cosine_scheduler(
     optionally cycles back up. Stable multi-task convergence requires a
     smooth LR schedule — cosine annealing avoids the abrupt drops of step LR.
     """
-    return torch.optim.lr_scheduler.CosineAnnealingLR(
-        optimizer, T_max=T_max, eta_min=eta_min
-    )
+    return torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=T_max, eta_min=eta_min)
 
 
 _GATE_SUPPRESSION_FACTOR = 0.1  # scale factor applied to non-HOLD logits under risk gate
@@ -92,16 +90,14 @@ def train_cascade_epoch(
                 # a scalar multiplier), so the model receives a weaker gradient
                 # signal for aggressive actions under high-risk conditions and
                 # learns to prefer HOLD when VaR is elevated.
-                gate_mask = (outputs["var_estimate"] > max_drawdown)  # [B, 1] bool
+                gate_mask = outputs["var_estimate"] > max_drawdown  # [B, 1] bool
                 non_hold = outputs["action_logits"][:, 1:]  # [B, n_actions-1]
                 suppressed = torch.where(
                     gate_mask.expand_as(non_hold),
                     non_hold * _GATE_SUPPRESSION_FACTOR,
                     non_hold,
                 )
-                gated_logits = torch.cat(
-                    [outputs["action_logits"][:, :1], suppressed], dim=-1
-                )
+                gated_logits = torch.cat([outputs["action_logits"][:, :1], suppressed], dim=-1)
                 outputs = {**outputs, "action_logits": gated_logits}
 
             loss, per_head = model.cascade_loss(outputs, labels, task_weights)
@@ -268,12 +264,11 @@ def validate_epoch(
         targets_cat = torch.cat(all_targets)
 
         # Add task-specific metrics
-        if predictions_cat.size(-1) == 1:  # Binary classification or regression
-            # For risk scoring (binary)
-            if targets_cat.max() <= 1 and targets_cat.min() >= 0:
-                preds_binary = (predictions_cat > 0.5).float()
-                accuracy = (preds_binary == targets_cat).float().mean().item()
-                metrics["accuracy"] = accuracy
+        if predictions_cat.size(-1) == 1 and targets_cat.max() <= 1 and targets_cat.min() >= 0:
+            # Binary classification accuracy
+            preds_binary = (predictions_cat > 0.5).float()
+            accuracy = (preds_binary == targets_cat).float().mean().item()
+            metrics["accuracy"] = accuracy
 
     return metrics
 

@@ -20,9 +20,7 @@ class TransactionPipeline:
     - Sequence windowing
     """
 
-    def __init__(
-        self, seq_len: int = 100, features: list = None, scaler_type: str = "robust"
-    ):
+    def __init__(self, seq_len: int = 100, features: list = None, scaler_type: str = "robust"):
         """
         Args:
             seq_len: Sequence length for windowing
@@ -31,13 +29,37 @@ class TransactionPipeline:
         """
         self.seq_len = seq_len
         self.features = features or [
-            'volume', 'price', 'fee_rate', 'tx_count', 'rsi', 'macd_line',
-            'macd_signal', 'macd_hist', 'bollinger_pct_b', 'bollinger_width',
-            'atr', 'stoch_k', 'stoch_d', 'adx', 'obv', 'vwap', 'roc_5', 'roc_20',
-            'momentum_10', 'momentum_20', 'volatility_5', 'volatility_20',
-            'vol_ratio', 'order_flow_imbalance', 'dc_direction',
-            'dc_overshoot', 'dc_bars_since_event', 'volume_volatility',
-            'volume_entropy', 'price_change', 'directional_change',
+            "volume",
+            "price",
+            "fee_rate",
+            "tx_count",
+            "rsi",
+            "macd_line",
+            "macd_signal",
+            "macd_hist",
+            "bollinger_pct_b",
+            "bollinger_width",
+            "atr",
+            "stoch_k",
+            "stoch_d",
+            "adx",
+            "obv",
+            "vwap",
+            "roc_5",
+            "roc_20",
+            "momentum_10",
+            "momentum_20",
+            "volatility_5",
+            "volatility_20",
+            "vol_ratio",
+            "order_flow_imbalance",
+            "dc_direction",
+            "dc_overshoot",
+            "dc_bars_since_event",
+            "volume_volatility",
+            "volume_entropy",
+            "price_change",
+            "directional_change",
         ]
 
         # Initialize scaler
@@ -91,7 +113,7 @@ class TransactionPipeline:
                     result[name] = arr
         return result
 
-    def fit(self, df: pd.DataFrame, asset_config: AssetConfig | None = None) -> "TransactionPipeline":
+    def fit(self, df: pd.DataFrame, asset_config: AssetConfig | None = None) -> TransactionPipeline:
         """
         Fit the scaler on training data.
 
@@ -109,9 +131,7 @@ class TransactionPipeline:
         available_features = [f for f in self.features if f in df_with_signals.columns]
 
         if not available_features:
-            raise ValueError(
-                f"None of the specified features found in data: {self.features}"
-            )
+            raise ValueError(f"None of the specified features found in data: {self.features}")
 
         # Fit scaler
         X = df_with_signals[available_features].values
@@ -144,7 +164,9 @@ class TransactionPipeline:
 
         return X_scaled
 
-    def fit_transform(self, df: pd.DataFrame, asset_config: AssetConfig | None = None) -> np.ndarray:
+    def fit_transform(
+        self, df: pd.DataFrame, asset_config: AssetConfig | None = None
+    ) -> np.ndarray:
         """Fit and transform in one step."""
         return self.fit(df, asset_config).transform(df, asset_config)
 
@@ -170,9 +192,7 @@ class TransactionPipeline:
         n_sequences = (n_samples - self.seq_len) // stride + 1
 
         if n_sequences <= 0:
-            raise ValueError(
-                f"Not enough samples ({n_samples}) for seq_len={self.seq_len}"
-            )
+            raise ValueError(f"Not enough samples ({n_samples}) for seq_len={self.seq_len}")
 
         # Create sequences
         X_seq = np.zeros((n_sequences, self.seq_len, n_features))
@@ -187,20 +207,13 @@ class TransactionPipeline:
         if y is not None:
             if y.ndim == 1:
                 # Classification labels (take label at sequence end)
-                y_seq = np.array(
-                    [y[i * stride + self.seq_len - 1] for i in range(n_sequences)]
-                )
+                y_seq = np.array([y[i * stride + self.seq_len - 1] for i in range(n_sequences)])
             else:
                 # Regression targets (take window after sequence)
                 pred_len = y.shape[1] if y.ndim > 1 else 1
                 y_seq = np.array(
                     [
-                        y[
-                            i * stride
-                            + self.seq_len : i * stride
-                            + self.seq_len
-                            + pred_len
-                        ]
+                        y[i * stride + self.seq_len : i * stride + self.seq_len + pred_len]
                         for i in range(n_sequences)
                     ]
                 )

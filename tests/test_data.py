@@ -31,9 +31,7 @@ class TestSyntheticGenerator:
 
         # Test different anomaly types
         for anomaly_type in ["volume_spike", "price_manipulation", "fee_evasion"]:
-            data = gen.generate_anomalous_sequence(
-                length=100, anomaly_type=anomaly_type
-            )
+            data = gen.generate_anomalous_sequence(length=100, anomaly_type=anomaly_type)
 
             assert len(data["volume"]) == 100
             assert "volume" in data and "price" in data
@@ -53,6 +51,7 @@ class TestTransactionPipeline:
 
     def setup_method(self):
         from core.signals import ASSET_CONFIGS
+
         self.forex_cfg = ASSET_CONFIGS["forex"]
 
     def test_signal_computation(self):
@@ -106,7 +105,9 @@ class TestTransactionPipeline:
         df = df.drop("label", axis=1)
 
         pipeline = TransactionPipeline(seq_len=100)
-        X_seq, y_seq = pipeline.process(df, labels, fit=True, stride=10, asset_config=self.forex_cfg)
+        X_seq, y_seq = pipeline.process(
+            df, labels, fit=True, stride=10, asset_config=self.forex_cfg
+        )
 
         assert X_seq.ndim == 3  # [sequences, seq_len, features]
         assert y_seq.ndim == 1  # [sequences]
@@ -148,20 +149,23 @@ class TestComputeSignalsWithAssetConfig:
 
     def setup_method(self):
         from core.signals import ASSET_CONFIGS
+
         rng = np.random.default_rng(1)
         n = 300
         close = np.cumprod(1 + rng.normal(0, 0.005, n)) * 100.0
         spread = np.abs(rng.normal(0.3, 0.05, n))
-        self.df = pd.DataFrame({
-            "open":   close - spread / 2,
-            "high":   close + spread,
-            "low":    close - spread,
-            "close":  close,
-            "volume": rng.uniform(1000, 5000, n),
-            "price":  close,
-            "fee_rate": np.full(n, 0.0002),
-            "tx_count": rng.integers(10, 100, n).astype(float),
-        })
+        self.df = pd.DataFrame(
+            {
+                "open": close - spread / 2,
+                "high": close + spread,
+                "low": close - spread,
+                "close": close,
+                "volume": rng.uniform(1000, 5000, n),
+                "price": close,
+                "fee_rate": np.full(n, 0.0002),
+                "tx_count": rng.integers(10, 100, n).astype(float),
+            }
+        )
         self.forex_cfg = ASSET_CONFIGS["forex"]
         self.crypto_cfg = ASSET_CONFIGS["crypto"]
 
@@ -171,14 +175,33 @@ class TestComputeSignalsWithAssetConfig:
         # Should have original cols + all 32 signal cols (some overlap is fine,
         # but the 32 named signals must be present)
         expected = {
-            "rsi", "macd_line", "macd_signal", "macd_hist",
-            "bollinger_pct_b", "bollinger_width", "atr",
-            "stoch_k", "stoch_d", "adx", "obv", "vwap",
-            "roc_5", "roc_20", "momentum_10", "momentum_20",
-            "volatility_5", "volatility_20", "vol_ratio",
-            "order_flow_imbalance", "dc_direction", "dc_overshoot",
-            "dc_bars_since_event", "volume_volatility", "volume_entropy",
-            "price_change", "directional_change",
+            "rsi",
+            "macd_line",
+            "macd_signal",
+            "macd_hist",
+            "bollinger_pct_b",
+            "bollinger_width",
+            "atr",
+            "stoch_k",
+            "stoch_d",
+            "adx",
+            "obv",
+            "vwap",
+            "roc_5",
+            "roc_20",
+            "momentum_10",
+            "momentum_20",
+            "volatility_5",
+            "volatility_20",
+            "vol_ratio",
+            "order_flow_imbalance",
+            "dc_direction",
+            "dc_overshoot",
+            "dc_bars_since_event",
+            "volume_volatility",
+            "volume_entropy",
+            "price_change",
+            "directional_change",
         }
         assert expected.issubset(result.columns)
 
@@ -210,22 +233,26 @@ class TestExecutionConfig:
 
     def test_default_paper_trading(self):
         from core.config import ExecutionConfig
+
         cfg = ExecutionConfig()
         assert cfg.paper_trading is True
 
     def test_default_max_drawdown(self):
         from core.config import ExecutionConfig
+
         cfg = ExecutionConfig()
         assert cfg.max_drawdown == pytest.approx(0.05)
 
     def test_default_symbols(self):
         from core.config import ExecutionConfig
+
         cfg = ExecutionConfig()
         assert isinstance(cfg.symbols, list)
         assert len(cfg.symbols) >= 1
 
     def test_custom_values(self):
         from core.config import ExecutionConfig
+
         cfg = ExecutionConfig(
             metaapi_token="tok123",
             account_id="acc456",
@@ -239,12 +266,14 @@ class TestExecutionConfig:
 
     def test_dignity_config_has_execution_field(self):
         from core.config import DignityConfig, ExecutionConfig
+
         cfg = DignityConfig()
         assert hasattr(cfg, "execution")
         assert isinstance(cfg.execution, ExecutionConfig)
 
     def test_dignity_config_yaml_roundtrip_with_execution(self, tmp_path):
         from core.config import DignityConfig, ExecutionConfig
+
         cfg = DignityConfig()
         cfg.execution = ExecutionConfig(
             metaapi_token="tok",
@@ -264,22 +293,26 @@ class TestModelConfigTaskWeights:
 
     def test_task_weights_field_exists(self):
         from core.config import ModelConfig
+
         cfg = ModelConfig()
         assert hasattr(cfg, "task_weights")
 
     def test_task_weights_default_keys(self):
         from core.config import ModelConfig
+
         cfg = ModelConfig()
         for key in ("regime", "risk", "alpha", "policy"):
             assert key in cfg.task_weights
 
     def test_task_weights_sum_to_one(self):
         from core.config import ModelConfig
+
         cfg = ModelConfig()
         assert sum(cfg.task_weights.values()) == pytest.approx(1.0)
 
     def test_cascade_is_valid_task(self):
         from core.config import ModelConfig
+
         cfg = ModelConfig(task="cascade")
         assert cfg.task == "cascade"
 
@@ -289,6 +322,7 @@ class TestMetaApiExecutor:
 
     def test_action_map_constants(self):
         from data.source.metaapi import MetaApiExecutor
+
         assert MetaApiExecutor.ACTION_MAP[0] == "HOLD"
         assert MetaApiExecutor.ACTION_MAP[1] == "BUY"
         assert MetaApiExecutor.ACTION_MAP[2] == "SELL"
@@ -297,9 +331,13 @@ class TestMetaApiExecutor:
         import asyncio
 
         from data.source.metaapi import MetaApiExecutor
+
         ex = MetaApiExecutor(
-            token="", account_id="", symbol="EURUSD",
-            max_position_size=1.0, paper=True,
+            token="",
+            account_id="",
+            symbol="EURUSD",
+            max_position_size=1.0,
+            paper=True,
         )
         result = asyncio.get_event_loop().run_until_complete(
             ex.execute(action_idx=0, position_size=0.1)
@@ -310,9 +348,13 @@ class TestMetaApiExecutor:
         import asyncio
 
         from data.source.metaapi import MetaApiExecutor
+
         ex = MetaApiExecutor(
-            token="", account_id="", symbol="EURUSD",
-            max_position_size=1.0, paper=True,
+            token="",
+            account_id="",
+            symbol="EURUSD",
+            max_position_size=1.0,
+            paper=True,
         )
         result = asyncio.get_event_loop().run_until_complete(
             ex.execute(action_idx=1, position_size=0.1)
@@ -325,9 +367,13 @@ class TestMetaApiExecutor:
         import asyncio
 
         from data.source.metaapi import MetaApiExecutor
+
         ex = MetaApiExecutor(
-            token="", account_id="", symbol="EURUSD",
-            max_position_size=1.0, paper=True,
+            token="",
+            account_id="",
+            symbol="EURUSD",
+            max_position_size=1.0,
+            paper=True,
         )
         result = asyncio.get_event_loop().run_until_complete(
             ex.execute(action_idx=2, position_size=0.05)
@@ -340,9 +386,13 @@ class TestMetaApiExecutor:
         import asyncio
 
         from data.source.metaapi import MetaApiExecutor
+
         ex = MetaApiExecutor(
-            token="", account_id="", symbol="EURUSD",
-            max_position_size=0.5, paper=True,
+            token="",
+            account_id="",
+            symbol="EURUSD",
+            max_position_size=0.5,
+            paper=True,
         )
         result = asyncio.get_event_loop().run_until_complete(
             ex.execute(action_idx=1, position_size=2.0)  # over limit
@@ -355,16 +405,19 @@ class TestMetaApiSource:
 
     def test_constructs_without_connecting(self):
         from data.source.metaapi import MetaApiSource
+
         src = MetaApiSource(token="", account_id="", symbol="EURUSD")
         assert src.symbol == "EURUSD"
 
     def test_default_timeframe(self):
         from data.source.metaapi import MetaApiSource
+
         src = MetaApiSource(token="", account_id="", symbol="GBPUSD")
         assert src.timeframe == "1m"
 
     def test_custom_timeframe(self):
         from data.source.metaapi import MetaApiSource
+
         src = MetaApiSource(token="", account_id="", symbol="EURUSD", timeframe="1h")
         assert src.timeframe == "1h"
 

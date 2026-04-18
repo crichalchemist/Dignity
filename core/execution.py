@@ -19,7 +19,7 @@ class GateDecision:
     """Immutable gate verdict returned by check_risk_gate."""
 
     allowed: bool
-    reason: str          # "ok" | "drawdown_exceeded"
+    reason: str  # "ok" | "drawdown_exceeded"
     adjusted_size: float  # 0.0 when blocked; min(requested, max) when allowed
 
 

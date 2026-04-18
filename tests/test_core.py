@@ -151,6 +151,7 @@ class TestDignityConfig:
 # Helpers shared across new signal tests
 # ---------------------------------------------------------------------------
 
+
 def _make_ohlcv(n: int = 200) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """Return (open, high, low, close, volume) arrays of length n."""
     rng = np.random.default_rng(42)
@@ -166,6 +167,7 @@ def _make_ohlcv(n: int = 200) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.nd
 # ---------------------------------------------------------------------------
 # AssetConfig
 # ---------------------------------------------------------------------------
+
 
 class TestAssetConfig:
     def test_asset_configs_keys_present(self):
@@ -191,6 +193,7 @@ class TestAssetConfig:
 # ---------------------------------------------------------------------------
 # New signal methods
 # ---------------------------------------------------------------------------
+
 
 class TestNewSignals:
     """Tests for the 13 new SignalProcessor methods."""
@@ -424,6 +427,7 @@ class TestNewSignals:
 # DC signal exact-value tests — lock the signal math against regressions
 # ---------------------------------------------------------------------------
 
+
 class TestDCSignalExact:
     """Deterministic DC signal verification with known price series.
 
@@ -526,6 +530,7 @@ class TestDCSignalExact:
 # process_sequence with 32 features
 # ---------------------------------------------------------------------------
 
+
 class TestProcessSequence32:
     def setup_method(self):
         self.open_, self.high, self.low, self.close, self.volume = _make_ohlcv(200)
@@ -550,12 +555,34 @@ class TestProcessSequence32:
             asset_config=self.asset_cfg,
         )
         required = {
-            "volume", "price", "rsi", "macd_line", "macd_signal", "macd_hist",
-            "bollinger_pct_b", "bollinger_width", "atr", "stoch_k", "stoch_d",
-            "adx", "obv", "vwap", "roc_5", "roc_20", "momentum_10", "momentum_20",
-            "volatility_5", "volatility_20", "vol_ratio", "order_flow_imbalance",
-            "dc_direction", "dc_overshoot", "dc_bars_since_event",
-            "volume_volatility", "volume_entropy", "price_change",
+            "volume",
+            "price",
+            "rsi",
+            "macd_line",
+            "macd_signal",
+            "macd_hist",
+            "bollinger_pct_b",
+            "bollinger_width",
+            "atr",
+            "stoch_k",
+            "stoch_d",
+            "adx",
+            "obv",
+            "vwap",
+            "roc_5",
+            "roc_20",
+            "momentum_10",
+            "momentum_20",
+            "volatility_5",
+            "volatility_20",
+            "vol_ratio",
+            "order_flow_imbalance",
+            "dc_direction",
+            "dc_overshoot",
+            "dc_bars_since_event",
+            "volume_volatility",
+            "volume_entropy",
+            "price_change",
             "directional_change",
         }
         assert required.issubset(result.keys())
@@ -585,13 +612,17 @@ class TestProcessSequence32:
     def test_process_sequence_uses_asset_config_thresholds(self):
         """Crypto DC threshold is larger → fewer events than forex."""
         forex_result = SignalProcessor.process_sequence(
-            volumes=self.volume, prices=self.close,
-            high=self.high, low=self.low,
+            volumes=self.volume,
+            prices=self.close,
+            high=self.high,
+            low=self.low,
             asset_config=ASSET_CONFIGS["forex"],
         )
         crypto_result = SignalProcessor.process_sequence(
-            volumes=self.volume, prices=self.close,
-            high=self.high, low=self.low,
+            volumes=self.volume,
+            prices=self.close,
+            high=self.high,
+            low=self.low,
             asset_config=ASSET_CONFIGS["crypto"],
         )
         forex_events = np.sum(forex_result["dc_direction"] != 0)
@@ -604,11 +635,13 @@ class TestProcessSequence32:
 # Phase 6: Execution gate
 # ---------------------------------------------------------------------------
 
+
 class TestCheckRiskGate:
     """check_risk_gate is a pure, stateless function — no model dependency."""
 
     def test_blocks_when_var_exceeds_max_drawdown(self):
         from core.execution import check_risk_gate
+
         decision = check_risk_gate(
             var_estimate=0.06, position_size=1.0, max_drawdown=0.05, max_position_size=2.0
         )
@@ -618,6 +651,7 @@ class TestCheckRiskGate:
 
     def test_allows_when_var_below_max_drawdown(self):
         from core.execution import check_risk_gate
+
         decision = check_risk_gate(
             var_estimate=0.03, position_size=0.5, max_drawdown=0.05, max_position_size=2.0
         )
@@ -627,6 +661,7 @@ class TestCheckRiskGate:
     def test_boundary_equal_is_allowed(self):
         """var == max_drawdown is NOT exceeded — boundary should pass."""
         from core.execution import check_risk_gate
+
         decision = check_risk_gate(
             var_estimate=0.05, position_size=0.5, max_drawdown=0.05, max_position_size=2.0
         )
@@ -634,6 +669,7 @@ class TestCheckRiskGate:
 
     def test_caps_position_size_at_max(self):
         from core.execution import check_risk_gate
+
         decision = check_risk_gate(
             var_estimate=0.01, position_size=5.0, max_drawdown=0.05, max_position_size=1.0
         )
@@ -641,6 +677,7 @@ class TestCheckRiskGate:
 
     def test_preserves_size_when_within_limit(self):
         from core.execution import check_risk_gate
+
         decision = check_risk_gate(
             var_estimate=0.01, position_size=0.3, max_drawdown=0.05, max_position_size=1.0
         )
@@ -648,6 +685,7 @@ class TestCheckRiskGate:
 
     def test_gate_decision_is_immutable(self):
         from core.execution import check_risk_gate
+
         decision = check_risk_gate(
             var_estimate=0.01, position_size=0.5, max_drawdown=0.05, max_position_size=1.0
         )
@@ -656,6 +694,7 @@ class TestCheckRiskGate:
 
     def test_zero_var_always_allowed(self):
         from core.execution import check_risk_gate
+
         decision = check_risk_gate(
             var_estimate=0.0, position_size=0.1, max_drawdown=0.05, max_position_size=1.0
         )
@@ -667,13 +706,19 @@ class TestMetaApiExecutorGate:
 
     def _make_executor(self, max_drawdown: float = 0.05):
         from data.source.metaapi import MetaApiExecutor
+
         return MetaApiExecutor(
-            token="", account_id="", symbol="EURUSD",
-            max_position_size=1.0, max_drawdown=max_drawdown, paper=True,
+            token="",
+            account_id="",
+            symbol="EURUSD",
+            max_position_size=1.0,
+            max_drawdown=max_drawdown,
+            paper=True,
         )
 
     def _run(self, coro):
         import asyncio
+
         return asyncio.get_event_loop().run_until_complete(coro)
 
     def test_buy_blocked_by_gate_returns_none(self):
@@ -702,6 +747,7 @@ class TestMetaApiExecutorGate:
 # ---------------------------------------------------------------------------
 # Phase 7: Quant config YAMLs
 # ---------------------------------------------------------------------------
+
 
 class TestQuantConfigYamls:
     """Both quant YAML files should parse into valid DignityConfig objects."""
@@ -743,8 +789,8 @@ class TestQuantConfigYamls:
 # Section 6 — Live position cap (core/execution.py)
 # ---------------------------------------------------------------------------
 
-class TestMaxPositionFraction:
 
+class TestMaxPositionFraction:
     def test_constant_is_75_percent(self):
         assert MAX_POSITION_FRACTION == 0.75
 
@@ -764,4 +810,3 @@ class TestMaxPositionFraction:
 
     def test_returns_float(self):
         assert isinstance(apply_live_position_cap(0.5, 1000.0), float)
-

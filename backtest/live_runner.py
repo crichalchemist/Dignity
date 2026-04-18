@@ -9,14 +9,10 @@ circuit breaker instead of the soak's daily breaker.
 from __future__ import annotations
 
 import asyncio
-import json
-import os
 import signal
 from dataclasses import dataclass
-from datetime import datetime
 from pathlib import Path
 
-import numpy as np
 import pandas as pd
 import torch
 
@@ -28,14 +24,14 @@ from backtest.paper_runner import (
     write_alert,
     write_lock,
 )
-from core.execution import MAX_POSITION_FRACTION, apply_live_position_cap, check_risk_gate
+from core.execution import apply_live_position_cap, check_risk_gate
 
 # ---------------------------------------------------------------------------
 # Live circuit breaker threshold
 # ---------------------------------------------------------------------------
 
-LIVE_CIRCUIT_BREAKER_DRAWDOWN = 0.08   # 7-day realized drawdown ceiling
-LIVE_ALERT_DRAWDOWN = 0.04             # alert at 4% before circuit breaker fires
+LIVE_CIRCUIT_BREAKER_DRAWDOWN = 0.08  # 7-day realized drawdown ceiling
+LIVE_ALERT_DRAWDOWN = 0.04  # alert at 4% before circuit breaker fires
 
 _ACTION_STRINGS: dict[int, str] = {0: "HOLD", 1: "BUY", 2: "SELL"}
 
@@ -43,6 +39,7 @@ _ACTION_STRINGS: dict[int, str] = {0: "HOLD", 1: "BUY", 2: "SELL"}
 # ---------------------------------------------------------------------------
 # Live config
 # ---------------------------------------------------------------------------
+
 
 @dataclass(frozen=True)
 class LiveConfig:
@@ -62,6 +59,7 @@ class LiveConfig:
 # ---------------------------------------------------------------------------
 # Pure helpers — testable without MetaApi or model
 # ---------------------------------------------------------------------------
+
 
 def compute_rolling_drawdown(log_entries: list[dict], days: int = 7) -> float:
     """Sum realized_pnl over the most recent `days` calendar days.
@@ -83,6 +81,7 @@ def compute_rolling_drawdown(log_entries: list[dict], days: int = 7) -> float:
 # ---------------------------------------------------------------------------
 # Async run loop
 # ---------------------------------------------------------------------------
+
 
 async def run_live_loop(config: LiveConfig) -> None:
     """Live trading run loop.
@@ -149,7 +148,7 @@ async def run_live_loop(config: LiveConfig) -> None:
             bar_buffer.append(bar)
             if len(bar_buffer) < config.seq_len:
                 continue
-            bar_buffer = bar_buffer[-config.seq_len:]
+            bar_buffer = bar_buffer[-config.seq_len :]
 
             action_str = "HOLD"
             var_est = 0.0
@@ -170,8 +169,10 @@ async def run_live_loop(config: LiveConfig) -> None:
                 position_size = float(outputs["position_limit"].item())
 
                 gate = check_risk_gate(
-                    var_est, position_size,
-                    config.max_drawdown, config.max_position_size,
+                    var_est,
+                    position_size,
+                    config.max_drawdown,
+                    config.max_position_size,
                 )
                 gate_passed = gate.allowed
 

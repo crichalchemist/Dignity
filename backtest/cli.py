@@ -3,15 +3,12 @@
 from __future__ import annotations
 
 import argparse
-import sys
-from pathlib import Path
 
 import numpy as np
 import pandas as pd
 import torch
 
 from core.config import DignityConfig
-from core.signals import ASSET_CONFIGS
 from data.pipeline import TransactionPipeline
 
 from .runner import BacktestConfig, align_signals, run_backtest
@@ -57,10 +54,6 @@ def _inference(
     )
     model.load_state_dict(ckpt["model_state_dict"])
     _set_inference_mode(model)
-
-    execution_cfg = getattr(config, "execution", None)
-    asset_class = execution_cfg.asset_class if execution_cfg else "equity"
-    asset_cfg = ASSET_CONFIGS.get(asset_class, ASSET_CONFIGS["equity"])
 
     pipeline = TransactionPipeline(
         seq_len=config.data.seq_len,
@@ -115,8 +108,14 @@ def main(argv: list[str] | None = None) -> None:
     stats = run_backtest(ohlcv, signals, config=bt_config, plot=args.plot, plot_path=args.plot_path)
 
     keys = [
-        "Return [%]", "Return (Ann.) [%]", "Sharpe Ratio", "Sortino Ratio",
-        "Max. Drawdown [%]", "# Trades", "Win Rate [%]", "Profit Factor",
+        "Return [%]",
+        "Return (Ann.) [%]",
+        "Sharpe Ratio",
+        "Sortino Ratio",
+        "Max. Drawdown [%]",
+        "# Trades",
+        "Win Rate [%]",
+        "Profit Factor",
     ]
     print("\n-- Backtest Results ---------------------------------")
     for k in keys:

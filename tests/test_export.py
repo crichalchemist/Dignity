@@ -11,11 +11,13 @@ from export.to_onnx import CASCADE_OUTPUT_NAMES, export_to_onnx
 
 def _small_cascade():
     from models.dignity import Dignity
+
     return Dignity(task="cascade", input_size=16, hidden_size=32, n_layers=1)
 
 
 def _small_risk():
     from models.dignity import Dignity
+
     return Dignity(task="risk", input_size=9, hidden_size=32, n_layers=1)
 
 
@@ -25,8 +27,13 @@ class TestCascadeOutputNames:
 
     def test_contains_all_expected_names(self):
         expected = {
-            "regime_probs", "var_estimate", "position_limit",
-            "alpha_score", "action_logits", "value", "attention_weights",
+            "regime_probs",
+            "var_estimate",
+            "position_limit",
+            "alpha_score",
+            "action_logits",
+            "value",
+            "attention_weights",
         }
         assert expected == set(CASCADE_OUTPUT_NAMES)
 

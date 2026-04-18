@@ -1,7 +1,6 @@
 """Signal processing utilities for transaction and market data sequences."""
 
 from dataclasses import dataclass
-from functools import reduce
 
 import numpy as np
 from scipy.stats import entropy as scipy_entropy
@@ -9,6 +8,7 @@ from scipy.stats import entropy as scipy_entropy
 # ---------------------------------------------------------------------------
 # Asset configuration — calibrates signal parameters per instrument class
 # ---------------------------------------------------------------------------
+
 
 @dataclass(frozen=True)
 class AssetConfig:
@@ -38,6 +38,7 @@ ASSET_CONFIGS: dict[str, AssetConfig] = {
 # Helper — exponential moving average (used by MACD, RSI, ATR, ADX)
 # ---------------------------------------------------------------------------
 
+
 def _ema(values: np.ndarray, period: int) -> np.ndarray:
     """Exponential moving average via recursive formula. No NaN in output."""
     alpha = 2.0 / (period + 1)
@@ -51,7 +52,6 @@ def _ema(values: np.ndarray, period: int) -> np.ndarray:
 def _rolling_mean(values: np.ndarray, window: int) -> np.ndarray:
     """Rolling mean; early values filled with expanding mean."""
     result = np.empty(len(values), dtype=np.float64)
-    cumsum = np.cumsum(values)
     for i in range(len(values)):
         start = max(0, i - window + 1)
         result[i] = np.mean(values[start : i + 1])
@@ -130,22 +130,22 @@ class SignalProcessor:
     ) -> np.ndarray:
         """
         Bars since last significant price movement.
-        
-        A significant move is when absolute price change exceeds vol_multiplier * 
+
+        A significant move is when absolute price change exceeds vol_multiplier *
         standard deviation of recent volatility. Tracks bars since last such event.
         """
         n = len(prices)
         bars_since = np.zeros(n, dtype=np.float64)
-        
+
         if n < vol_window + 1:
             return bars_since
-        
+
         # Compute rolling volatility
         price_changes = np.abs(np.diff(prices) / prices[:-1])
-        
+
         for i in range(vol_window, n):
             # Rolling volatility window
-            recent_changes = price_changes[max(0, i - vol_window):i]
+            recent_changes = price_changes[max(0, i - vol_window) : i]
             vol_std = np.std(recent_changes) if len(recent_changes) > 0 else 0.001
             threshold = vol_multiplier * vol_std
 
@@ -235,9 +235,7 @@ class SignalProcessor:
         return pct_b.astype(np.float64), band_width.astype(np.float64)
 
     @staticmethod
-    def atr(
-        high: np.ndarray, low: np.ndarray, close: np.ndarray, period: int = 14
-    ) -> np.ndarray:
+    def atr(high: np.ndarray, low: np.ndarray, close: np.ndarray, period: int = 14) -> np.ndarray:
         """Average True Range — smoothed via EMA."""
         high = high.astype(np.float64)
         low = low.astype(np.float64)
@@ -273,14 +271,11 @@ class SignalProcessor:
         return k, d
 
     @staticmethod
-    def adx(
-        high: np.ndarray, low: np.ndarray, close: np.ndarray, period: int = 14
-    ) -> np.ndarray:
+    def adx(high: np.ndarray, low: np.ndarray, close: np.ndarray, period: int = 14) -> np.ndarray:
         """Average Directional Index in [0, 100]. Measures trend strength."""
         high = high.astype(np.float64)
         low = low.astype(np.float64)
         close = close.astype(np.float64)
-        n = len(close)
         prev_high = np.concatenate([[high[0]], high[:-1]])
         prev_low = np.concatenate([[low[0]], low[:-1]])
 
@@ -321,7 +316,9 @@ class SignalProcessor:
         high: np.ndarray, low: np.ndarray, close: np.ndarray, volume: np.ndarray
     ) -> np.ndarray:
         """Volume-Weighted Average Price (cumulative session VWAP)."""
-        typical = (high.astype(np.float64) + low.astype(np.float64) + close.astype(np.float64)) / 3.0
+        typical = (
+            high.astype(np.float64) + low.astype(np.float64) + close.astype(np.float64)
+        ) / 3.0
         volume = volume.astype(np.float64)
         cum_vol = np.cumsum(volume)
         cum_tp_vol = np.cumsum(typical * volume)
@@ -351,9 +348,7 @@ class SignalProcessor:
         return SignalProcessor.volatility(log_returns, window)
 
     @staticmethod
-    def vol_ratio(
-        prices: np.ndarray, short_window: int = 5, long_window: int = 20
-    ) -> np.ndarray:
+    def vol_ratio(prices: np.ndarray, short_window: int = 5, long_window: int = 20) -> np.ndarray:
         """Ratio of short-term to long-term realized volatility."""
         short_vol = SignalProcessor.realized_volatility(prices, short_window)
         long_vol = SignalProcessor.realized_volatility(prices, long_window)
@@ -370,9 +365,7 @@ class SignalProcessor:
         return signed.astype(np.float64)
 
     @staticmethod
-    def dc_state_machine(
-        prices: np.ndarray, threshold: float = 0.0005
-    ) -> dict[str, np.ndarray]:
+    def dc_state_machine(prices: np.ndarray, threshold: float = 0.0005) -> dict[str, np.ndarray]:
         """Directional-change intrinsic time (dense enrichment mode).
 
         Tracks a DC state machine: emits an event when price moves by
@@ -499,7 +492,7 @@ class SignalProcessor:
             "dc_bars_since_event": dc["bars_since_event"],
             "volume_volatility": cls.volatility(volumes),
             "volume_entropy": np.array(
-                [cls.entropy(volumes[max(0, i - 50):i + 1]) for i in range(len(volumes))]
+                [cls.entropy(volumes[max(0, i - 50) : i + 1]) for i in range(len(volumes))]
             ),
             "price_change": np.gradient(prices),
             "directional_change": cls.directional_change(prices, threshold=cfg.dc_threshold),
@@ -507,17 +500,41 @@ class SignalProcessor:
         }
 
         feature_order = [
-            'volume', 'price', 'fee_rate', 'tx_count', 'rsi', 'macd_line',
-            'macd_signal', 'macd_hist', 'bollinger_pct_b', 'bollinger_width',
-            'atr', 'stoch_k', 'stoch_d', 'adx', 'obv', 'vwap', 'roc_5', 'roc_20',
-            'momentum_10', 'momentum_20', 'volatility_5', 'volatility_20',
-            'vol_ratio', 'order_flow_imbalance', 'dc_direction', 'dc_overshoot',
-            'bars_since_event', 'dc_bars_since_event', 'volume_volatility',
-            'volume_entropy', 'price_change', 'directional_change',
+            "volume",
+            "price",
+            "fee_rate",
+            "tx_count",
+            "rsi",
+            "macd_line",
+            "macd_signal",
+            "macd_hist",
+            "bollinger_pct_b",
+            "bollinger_width",
+            "atr",
+            "stoch_k",
+            "stoch_d",
+            "adx",
+            "obv",
+            "vwap",
+            "roc_5",
+            "roc_20",
+            "momentum_10",
+            "momentum_20",
+            "volatility_5",
+            "volatility_20",
+            "vol_ratio",
+            "order_flow_imbalance",
+            "dc_direction",
+            "dc_overshoot",
+            "bars_since_event",
+            "dc_bars_since_event",
+            "volume_volatility",
+            "volume_entropy",
+            "price_change",
+            "directional_change",
         ]
 
         # This will raise a KeyError if a feature is missing and also ensures order
         ordered_signals = {key: signals[key] for key in feature_order}
 
         return ordered_signals
-

@@ -9,6 +9,13 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from backtest.go_live_check import run_checks
+from backtest.live_runner import (
+    LIVE_ALERT_DRAWDOWN,
+    LIVE_CIRCUIT_BREAKER_DRAWDOWN,
+    LiveConfig,
+    compute_rolling_drawdown,
+)
 from backtest.runner import (
     BACKTEST_MAX_DRAWDOWN,
     BACKTEST_MAX_GATE_TRIGGER,
@@ -25,20 +32,13 @@ from backtest.runner import (
     validate_backtest_results,
     write_backtest_report,
 )
-from backtest.go_live_check import run_checks
-from backtest.live_runner import (
-    LIVE_ALERT_DRAWDOWN,
-    LIVE_CIRCUIT_BREAKER_DRAWDOWN,
-    LiveConfig,
-    compute_rolling_drawdown,
-)
 from backtest.strategy import ACTION_BUY, ACTION_HOLD, ACTION_SELL, DignityStrategy
 from data.source.metaapi import MetaApiSource, _filter_date_range
-
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 def _make_ohlcv(n: int = 300, trend: float = 0.001) -> pd.DataFrame:
     """Synthetic OHLCV with a gentle upward trend (lowercase columns)."""
@@ -72,6 +72,7 @@ def _make_signals(n: int, action: int = ACTION_BUY) -> dict[str, np.ndarray]:
 # Action constants
 # ---------------------------------------------------------------------------
 
+
 class TestActionConstants:
     def test_hold_is_zero(self):
         assert ACTION_HOLD == 0
@@ -86,6 +87,7 @@ class TestActionConstants:
 # ---------------------------------------------------------------------------
 # prepare_ohlcv
 # ---------------------------------------------------------------------------
+
 
 class TestPrepareOHLCV:
     def test_renames_to_title_case(self):
@@ -118,6 +120,7 @@ class TestPrepareOHLCV:
 # ---------------------------------------------------------------------------
 # align_signals
 # ---------------------------------------------------------------------------
+
 
 class TestAlignSignals:
     def test_output_length_equals_n_bars(self):
@@ -154,6 +157,7 @@ class TestAlignSignals:
 # ---------------------------------------------------------------------------
 # run_backtest
 # ---------------------------------------------------------------------------
+
 
 class TestRunBacktest:
     def setup_method(self):
@@ -202,6 +206,7 @@ class TestRunBacktest:
         plot_path = str(tmp_path / "bt.html")
         run_backtest(self.ohlcv, self.signals, plot=True, plot_path=plot_path)
         import os
+
         assert os.path.exists(plot_path)
 
 
@@ -209,9 +214,9 @@ class TestRunBacktest:
 # DignityStrategy (unit-level, via Backtest harness)
 # ---------------------------------------------------------------------------
 
+
 class TestDignityStrategy:
     def _run(self, action: int, var: float = 0.01, max_drawdown: float = 0.05) -> pd.Series:
-        ohlcv = prepare_ohlcv(_make_ohlcv(150))
         signals = _make_signals(150, action=action)
         signals["var"] = np.full(150, var)
         config = BacktestConfig(max_drawdown=max_drawdown)
@@ -242,8 +247,8 @@ class TestDignityStrategy:
 # Gate constants
 # ---------------------------------------------------------------------------
 
-class TestGateConstants:
 
+class TestGateConstants:
     def test_min_arr_is_15_percent(self):
         assert BACKTEST_MIN_ARR == 0.15
 
@@ -264,6 +269,7 @@ class TestGateConstants:
 # validate_backtest_results
 # ---------------------------------------------------------------------------
 
+
 def _passing_metrics() -> dict[str, float]:
     return {
         "arr": 0.20,
@@ -275,7 +281,6 @@ def _passing_metrics() -> dict[str, float]:
 
 
 class TestValidateBacktestResults:
-
     def test_passes_when_all_metrics_meet_thresholds(self):
         validate_backtest_results(_passing_metrics())  # must not raise
 
@@ -305,7 +310,13 @@ class TestValidateBacktestResults:
             validate_backtest_results(m)
 
     def test_error_message_lists_all_failures_at_once(self):
-        m = {"arr": 0.05, "sharpe": 0.2, "max_drawdown": 0.30, "win_rate": 0.40, "gate_trigger_rate": 0.20}
+        m = {
+            "arr": 0.05,
+            "sharpe": 0.2,
+            "max_drawdown": 0.30,
+            "win_rate": 0.40,
+            "gate_trigger_rate": 0.20,
+        }
         with pytest.raises(BacktestGateError) as exc_info:
             validate_backtest_results(m)
         msg = str(exc_info.value)
@@ -321,8 +332,8 @@ class TestValidateBacktestResults:
 # _gate_trigger_rate
 # ---------------------------------------------------------------------------
 
-class TestGateTriggerRate:
 
+class TestGateTriggerRate:
     def test_all_below_threshold_is_zero(self):
         signals = {"var": np.full(100, 0.01)}
         assert _gate_trigger_rate(signals, max_drawdown=0.05) == 0.0
@@ -344,8 +355,8 @@ class TestGateTriggerRate:
 # compute_gate_metrics
 # ---------------------------------------------------------------------------
 
-class TestComputeGateMetrics:
 
+class TestComputeGateMetrics:
     def _make_stats(self, **overrides) -> pd.Series:
         base = {
             "Return (Ann.) [%]": 20.0,
@@ -386,7 +397,9 @@ class TestComputeGateMetrics:
 
     def test_gate_trigger_rate_computed_from_signals(self):
         var = np.concatenate([np.full(80, 0.01), np.full(20, 0.99)])
-        m = compute_gate_metrics(self._make_stats(), {"var": var}, BacktestConfig(max_drawdown=0.05))
+        m = compute_gate_metrics(
+            self._make_stats(), {"var": var}, BacktestConfig(max_drawdown=0.05)
+        )
         assert m["gate_trigger_rate"] == pytest.approx(0.20)
 
 
@@ -394,8 +407,8 @@ class TestComputeGateMetrics:
 # write_backtest_report
 # ---------------------------------------------------------------------------
 
-class TestWriteBacktestReport:
 
+class TestWriteBacktestReport:
     def test_creates_file_in_output_dir(self):
         with tempfile.TemporaryDirectory() as tmp:
             config = os.path.join(tmp, "config.yaml")
@@ -403,8 +416,11 @@ class TestWriteBacktestReport:
             open(config, "w").close()
             open(ckpt, "w").close()
             path = write_backtest_report(
-                _passing_metrics(), config, ckpt,
-                ("2020-01-01", "2023-12-31"), output_dir=tmp,
+                _passing_metrics(),
+                config,
+                ckpt,
+                ("2020-01-01", "2023-12-31"),
+                output_dir=tmp,
             )
             assert path.exists()
 
@@ -415,11 +431,20 @@ class TestWriteBacktestReport:
             open(config, "w").close()
             open(ckpt, "w").close()
             path = write_backtest_report(
-                _passing_metrics(), config, ckpt,
-                ("2020-01-01", "2023-12-31"), output_dir=tmp,
+                _passing_metrics(),
+                config,
+                ckpt,
+                ("2020-01-01", "2023-12-31"),
+                output_dir=tmp,
             )
             report = json.loads(path.read_text())
-        for key in ("metrics", "config_sha256", "checkpoint_sha256", "data_date_range", "generated"):
+        for key in (
+            "metrics",
+            "config_sha256",
+            "checkpoint_sha256",
+            "data_date_range",
+            "generated",
+        ):
             assert key in report, f"report missing key: '{key}'"
 
     def test_metrics_preserved_in_report(self):
@@ -430,8 +455,11 @@ class TestWriteBacktestReport:
             open(ckpt, "w").close()
             metrics = _passing_metrics()
             path = write_backtest_report(
-                metrics, config, ckpt,
-                ("2020-01-01", "2023-12-31"), output_dir=tmp,
+                metrics,
+                config,
+                ckpt,
+                ("2020-01-01", "2023-12-31"),
+                output_dir=tmp,
             )
             report = json.loads(path.read_text())
         assert report["metrics"]["arr"] == pytest.approx(metrics["arr"])
@@ -443,8 +471,11 @@ class TestWriteBacktestReport:
             open(config, "w").close()
             open(ckpt, "w").close()
             path = write_backtest_report(
-                _passing_metrics(), config, ckpt,
-                ("2020-01-01", "2023-12-31"), output_dir=tmp,
+                _passing_metrics(),
+                config,
+                ckpt,
+                ("2020-01-01", "2023-12-31"),
+                output_dir=tmp,
             )
             report = json.loads(path.read_text())
         assert len(report["config_sha256"]) == 64
@@ -457,8 +488,11 @@ class TestWriteBacktestReport:
             open(config, "w").close()
             open(ckpt, "w").close()
             path = write_backtest_report(
-                _passing_metrics(), config, ckpt,
-                ("2020-01-01", "2023-12-31"), output_dir=tmp,
+                _passing_metrics(),
+                config,
+                ckpt,
+                ("2020-01-01", "2023-12-31"),
+                output_dir=tmp,
             )
             report = json.loads(path.read_text())
         assert report["data_date_range"] == ["2020-01-01", "2023-12-31"]
@@ -468,8 +502,8 @@ class TestWriteBacktestReport:
 # MetaApiSource date_range (4.1)
 # ---------------------------------------------------------------------------
 
-class TestMetaApiSourceDateRange:
 
+class TestMetaApiSourceDateRange:
     def test_date_range_stored_on_construction(self):
         src = MetaApiSource("tok", "acc", "EURUSD", date_range=("2020-01-01", "2022-12-31"))
         assert src.date_range == ("2020-01-01", "2022-12-31")
@@ -480,7 +514,6 @@ class TestMetaApiSourceDateRange:
 
 
 class TestFilterDateRange:
-
     def _make_df(self) -> pd.DataFrame:
         idx = pd.date_range("2020-01-01", periods=730, freq="D")
         return pd.DataFrame({"close": np.arange(730, dtype=float)}, index=idx)
@@ -546,20 +579,21 @@ def _make_log_entries(
         ts = base + pd.Timedelta(hours=i)
         bar_blocked = i % max(1, int(1 / gate_rate)) == 0 if gate_rate > 0 else False
         bar_regime = regime if regime is not None else (i % 4)
-        entries.append({
-            "timestamp": ts.isoformat(),
-            "action": "BLOCKED" if bar_blocked else action,
-            "regime": bar_regime,
-            "var_estimate": 0.02,
-            "alpha_score": 0.1,
-            "gate_passed": not bar_blocked,
-            "simulated_pnl": daily_pnl / bars_per_day,
-        })
+        entries.append(
+            {
+                "timestamp": ts.isoformat(),
+                "action": "BLOCKED" if bar_blocked else action,
+                "regime": bar_regime,
+                "var_estimate": 0.02,
+                "alpha_score": 0.1,
+                "gate_passed": not bar_blocked,
+                "simulated_pnl": daily_pnl / bars_per_day,
+            }
+        )
     return entries
 
 
 class TestSoakGateThresholds:
-
     def test_max_daily_drawdown_is_5_percent(self):
         assert SOAK_MAX_DAILY_DRAWDOWN == 0.05
 
@@ -577,7 +611,6 @@ class TestSoakGateThresholds:
 
 
 class TestCheckDailyDrawdown:
-
     def test_empty_entries_returns_zero(self):
         assert check_daily_drawdown([]) == 0.0
 
@@ -603,7 +636,6 @@ class TestCheckDailyDrawdown:
 
 
 class TestEvaluateSoakGate:
-
     def test_passes_with_sufficient_clean_data(self):
         entries = _make_log_entries(n_days=31)
         result = evaluate_soak_gate(entries, backtest_gate_rate=0.0)
@@ -644,13 +676,18 @@ class TestEvaluateSoakGate:
     def test_returns_all_five_criteria_plus_all_passed(self):
         entries = _make_log_entries(n_days=31)
         result = evaluate_soak_gate(entries, backtest_gate_rate=0.0)
-        for key in ("days_elapsed", "daily_drawdown", "regime_concentration",
-                    "gate_trigger_rate", "zero_executor_errors", "all_passed"):
+        for key in (
+            "days_elapsed",
+            "daily_drawdown",
+            "regime_concentration",
+            "gate_trigger_rate",
+            "zero_executor_errors",
+            "all_passed",
+        ):
             assert key in result
 
 
 class TestAppendBarLog:
-
     def test_creates_file_if_absent(self):
         with tempfile.TemporaryDirectory() as tmp:
             log_path = Path(tmp) / "soak.jsonl"
@@ -677,7 +714,6 @@ class TestAppendBarLog:
 
 
 class TestWriteAlert:
-
     def test_creates_file_if_absent(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "alerts.log"
@@ -706,7 +742,6 @@ class TestWriteAlert:
 
 
 class TestWriteLock:
-
     def test_creates_lock_file(self):
         with tempfile.TemporaryDirectory() as tmp:
             lock = Path(tmp) / "soak_breaker.lock"
@@ -727,43 +762,46 @@ class TestWriteLock:
 
 
 class TestBarsToTensor:
-
     def _make_bar_buffer(self, n: int = 100) -> list[pd.Series]:
         rng = np.random.default_rng(0)
         close = np.cumprod(1 + rng.normal(0, 0.005, n)) * 100.0
         spread = np.abs(rng.normal(0.1, 0.02, n))
         return [
-            pd.Series({
-                "open": close[i] - spread[i] / 2,
-                "high": close[i] + spread[i],
-                "low": close[i] - spread[i],
-                "close": close[i],
-                "volume": rng.uniform(1000, 5000),
-            })
+            pd.Series(
+                {
+                    "open": close[i] - spread[i] / 2,
+                    "high": close[i] + spread[i],
+                    "low": close[i] - spread[i],
+                    "close": close[i],
+                    "volume": rng.uniform(1000, 5000),
+                }
+            )
             for i in range(n)
         ]
 
     def test_output_shape(self):
         import torch
+
         buf = self._make_bar_buffer(100)
         t = bars_to_tensor(buf, input_size=32)
         assert t.shape == (1, 100, 32)
 
     def test_output_dtype_is_float32(self):
         import torch
+
         buf = self._make_bar_buffer(100)
         t = bars_to_tensor(buf, input_size=32)
         assert t.dtype == torch.float32
 
     def test_no_nan_in_output(self):
         import torch
+
         buf = self._make_bar_buffer(100)
         t = bars_to_tensor(buf, input_size=32)
         assert not torch.isnan(t).any()
 
 
 class TestSoakScripts:
-
     def test_start_script_exists_and_is_executable(self):
         path = Path("scripts/start_paper.sh")
         assert path.exists()
@@ -787,8 +825,8 @@ class TestSoakScripts:
 # Section 6 — live runner and go-live gate
 # ---------------------------------------------------------------------------
 
-class TestComputeRollingDrawdown:
 
+class TestComputeRollingDrawdown:
     def test_empty_entries_returns_zero(self):
         assert compute_rolling_drawdown([]) == 0.0
 
@@ -804,15 +842,14 @@ class TestComputeRollingDrawdown:
         entries = [
             {"timestamp": "2026-01-01T00:00:00", "realized_pnl": -0.03},
             {"timestamp": "2026-01-02T00:00:00", "realized_pnl": -0.02},
-            {"timestamp": "2026-01-03T00:00:00", "realized_pnl":  0.01},
+            {"timestamp": "2026-01-03T00:00:00", "realized_pnl": 0.01},
         ]
         assert compute_rolling_drawdown(entries, days=7) == pytest.approx(-0.04)
 
     def test_excludes_entries_outside_window(self):
         # 10 days of data, window=3 — only last 3 days should count
         entries = [
-            {"timestamp": f"2026-01-{i:02d}T00:00:00", "realized_pnl": -0.10}
-            for i in range(1, 11)
+            {"timestamp": f"2026-01-{i:02d}T00:00:00", "realized_pnl": -0.10} for i in range(1, 11)
         ]
         result = compute_rolling_drawdown(entries, days=3)
         assert result == pytest.approx(-0.30)
@@ -829,13 +866,12 @@ class TestComputeRollingDrawdown:
         assert compute_rolling_drawdown(entries) == 0.0
 
     def test_constants_are_sane(self):
-        assert LIVE_CIRCUIT_BREAKER_DRAWDOWN == pytest.approx(0.08)
-        assert LIVE_ALERT_DRAWDOWN == pytest.approx(0.04)
+        assert pytest.approx(0.08) == LIVE_CIRCUIT_BREAKER_DRAWDOWN
+        assert pytest.approx(0.04) == LIVE_ALERT_DRAWDOWN
         assert LIVE_ALERT_DRAWDOWN < LIVE_CIRCUIT_BREAKER_DRAWDOWN
 
 
 class TestLiveConfig:
-
     def test_default_symbol(self):
         cfg = LiveConfig(model_path="m.pt", metaapi_token="tok", account_id="acc")
         assert cfg.symbol == "EURUSD"
@@ -858,7 +894,6 @@ class TestLiveConfig:
 
 
 class TestGoLiveCheck:
-
     def _write_valid_report(self, reports_dir: Path) -> None:
         metrics = {
             "arr": 0.20,
@@ -911,7 +946,7 @@ class TestGoLiveCheck:
             # Write a report with failing Sharpe
             metrics = {
                 "arr": 0.20,
-                "sharpe": 0.5,         # below BACKTEST_MIN_SHARPE=1.0
+                "sharpe": 0.5,  # below BACKTEST_MIN_SHARPE=1.0
                 "max_drawdown": 0.10,
                 "win_rate": 0.55,
                 "gate_trigger_rate": 0.05,
@@ -929,7 +964,6 @@ class TestGoLiveCheck:
 
 
 class TestLiveScripts:
-
     def test_go_live_script_exists_and_is_executable(self):
         path = Path("scripts/go_live.sh")
         assert path.exists()

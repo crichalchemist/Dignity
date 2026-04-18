@@ -13,10 +13,8 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncIterator
-from dataclasses import dataclass
 from typing import ClassVar
 
-import numpy as np
 import pandas as pd
 
 
@@ -37,6 +35,7 @@ def _filter_date_range(
 # ---------------------------------------------------------------------------
 # MetaApiSource
 # ---------------------------------------------------------------------------
+
 
 class MetaApiSource:
     """Stream and fetch OHLCV data from a MetaApi-connected MT4/MT5 account.
@@ -74,9 +73,7 @@ class MetaApiSource:
         from metaapi_cloud_sdk import MetaApi  # type: ignore[import]
 
         self._api = MetaApi(self._token)
-        self._account = await self._api.metatrader_account_api.get_account(
-            self._account_id
-        )
+        self._account = await self._api.metatrader_account_api.get_account(self._account_id)
         await self._account.deploy()
         await self._account.wait_connected()
         self._connection = self._account.get_rpc_connection()
@@ -165,6 +162,7 @@ class MetaApiSource:
 # MetaApiExecutor
 # ---------------------------------------------------------------------------
 
+
 class MetaApiExecutor:
     """Translate PolicyHead action index → MetaApi market order.
 
@@ -239,15 +237,18 @@ class MetaApiExecutor:
             return None
 
         if self.paper:
-            return {"action": action, "symbol": self.symbol, "size": gate.adjusted_size, "paper": True}
+            return {
+                "action": action,
+                "symbol": self.symbol,
+                "size": gate.adjusted_size,
+                "paper": True,
+            }
 
         if self._connection is None:
             raise RuntimeError("Call connect() before execute() in live mode.")
 
         if action == "BUY":
-            result = await self._connection.create_market_buy_order(
-                self.symbol, gate.adjusted_size
-            )
+            result = await self._connection.create_market_buy_order(self.symbol, gate.adjusted_size)
         else:
             result = await self._connection.create_market_sell_order(
                 self.symbol, gate.adjusted_size

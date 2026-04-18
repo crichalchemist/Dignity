@@ -10,6 +10,7 @@ Exits 0 on full pass, 1 on any failure.
 
 from __future__ import annotations
 
+import contextlib
 import glob
 import json
 import sys
@@ -33,10 +34,8 @@ def _load_jsonl(path: Path) -> list[dict]:
     for line in path.read_text().splitlines():
         line = line.strip()
         if line:
-            try:
+            with contextlib.suppress(json.JSONDecodeError):
                 entries.append(json.loads(line))
-            except json.JSONDecodeError:
-                pass
     return entries
 
 

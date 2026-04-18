@@ -1,20 +1,20 @@
 """Tests for training engine — cascade training path."""
 
-import tempfile
+import math
 import os
+import tempfile
 
+import pytest
 import torch
 import torch.nn as nn
-import pytest
 
 from models.dignity import Dignity
 from train.engine import (
+    load_checkpoint,
     make_cosine_scheduler,
     save_checkpoint,
-    load_checkpoint,
     train_cascade_epoch,
 )
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -46,14 +46,18 @@ def _small_cascade_model():
 # TestTrainCascadeEpoch
 # ---------------------------------------------------------------------------
 
-class TestTrainCascadeEpoch:
 
+class TestTrainCascadeEpoch:
     def test_returns_dict(self):
         model = _small_cascade_model()
         opt = torch.optim.AdamW(model.parameters(), lr=1e-3)
         metrics = train_cascade_epoch(
-            model, _cascade_loader(), opt, _TASK_WEIGHTS,
-            device=torch.device("cpu"), use_amp=False,
+            model,
+            _cascade_loader(),
+            opt,
+            _TASK_WEIGHTS,
+            device=torch.device("cpu"),
+            use_amp=False,
         )
         assert isinstance(metrics, dict)
 
@@ -61,8 +65,12 @@ class TestTrainCascadeEpoch:
         model = _small_cascade_model()
         opt = torch.optim.AdamW(model.parameters(), lr=1e-3)
         metrics = train_cascade_epoch(
-            model, _cascade_loader(), opt, _TASK_WEIGHTS,
-            device=torch.device("cpu"), use_amp=False,
+            model,
+            _cascade_loader(),
+            opt,
+            _TASK_WEIGHTS,
+            device=torch.device("cpu"),
+            use_amp=False,
         )
         assert "loss" in metrics
 
@@ -70,8 +78,12 @@ class TestTrainCascadeEpoch:
         model = _small_cascade_model()
         opt = torch.optim.AdamW(model.parameters(), lr=1e-3)
         metrics = train_cascade_epoch(
-            model, _cascade_loader(), opt, _TASK_WEIGHTS,
-            device=torch.device("cpu"), use_amp=False,
+            model,
+            _cascade_loader(),
+            opt,
+            _TASK_WEIGHTS,
+            device=torch.device("cpu"),
+            use_amp=False,
         )
         for key in ("regime_loss", "risk_loss", "alpha_loss", "policy_loss"):
             assert key in metrics, f"missing key: {key}"
@@ -80,8 +92,12 @@ class TestTrainCascadeEpoch:
         model = _small_cascade_model()
         opt = torch.optim.AdamW(model.parameters(), lr=1e-3)
         metrics = train_cascade_epoch(
-            model, _cascade_loader(), opt, _TASK_WEIGHTS,
-            device=torch.device("cpu"), use_amp=False,
+            model,
+            _cascade_loader(),
+            opt,
+            _TASK_WEIGHTS,
+            device=torch.device("cpu"),
+            use_amp=False,
         )
         assert isinstance(metrics["loss"], float) and metrics["loss"] > 0
 
@@ -91,13 +107,16 @@ class TestTrainCascadeEpoch:
         params_before = [p.clone().detach() for p in model.parameters()]
         opt = torch.optim.AdamW(model.parameters(), lr=1e-2)
         train_cascade_epoch(
-            model, _cascade_loader(n_batches=2), opt, _TASK_WEIGHTS,
-            device=torch.device("cpu"), use_amp=False,
+            model,
+            _cascade_loader(n_batches=2),
+            opt,
+            _TASK_WEIGHTS,
+            device=torch.device("cpu"),
+            use_amp=False,
         )
         params_after = list(model.parameters())
         changed = any(
-            not torch.equal(b, a.detach())
-            for b, a in zip(params_before, params_after)
+            not torch.equal(b, a.detach()) for b, a in zip(params_before, params_after, strict=True)
         )
         assert changed, "no model parameters changed after training step"
 
@@ -107,8 +126,13 @@ class TestTrainCascadeEpoch:
         scheduler = make_cosine_scheduler(opt, T_max=10)
         lr_before = opt.param_groups[0]["lr"]
         train_cascade_epoch(
-            model, _cascade_loader(n_batches=1), opt, _TASK_WEIGHTS,
-            device=torch.device("cpu"), use_amp=False, scheduler=scheduler,
+            model,
+            _cascade_loader(n_batches=1),
+            opt,
+            _TASK_WEIGHTS,
+            device=torch.device("cpu"),
+            use_amp=False,
+            scheduler=scheduler,
         )
         lr_after = opt.param_groups[0]["lr"]
         # After one scheduler.step(), LR should have changed
@@ -118,8 +142,12 @@ class TestTrainCascadeEpoch:
         model = _small_cascade_model()
         opt = torch.optim.AdamW(model.parameters(), lr=1e-3)
         train_cascade_epoch(
-            model, _cascade_loader(), opt, _TASK_WEIGHTS,
-            device=torch.device("cpu"), use_amp=False,
+            model,
+            _cascade_loader(),
+            opt,
+            _TASK_WEIGHTS,
+            device=torch.device("cpu"),
+            use_amp=False,
         )
         assert model.training
 
@@ -128,8 +156,8 @@ class TestTrainCascadeEpoch:
 # TestMakeCosineScheduler
 # ---------------------------------------------------------------------------
 
-class TestMakeCosineScheduler:
 
+class TestMakeCosineScheduler:
     def test_returns_lr_scheduler(self):
         model = _small_cascade_model()
         opt = torch.optim.AdamW(model.parameters(), lr=1e-3)
@@ -147,7 +175,7 @@ class TestMakeCosineScheduler:
             lrs.append(opt.param_groups[0]["lr"])
         # First half should be strictly decreasing
         half = lrs[:6]
-        assert all(a >= b for a, b in zip(half, half[1:]))
+        assert all(a >= b for a, b in zip(half, half[1:], strict=False))
 
     @pytest.mark.filterwarnings("ignore::UserWarning")
     def test_lr_reaches_eta_min_at_T_max(self):
@@ -164,15 +192,20 @@ class TestMakeCosineScheduler:
 # TestRiskGateTraining
 # ---------------------------------------------------------------------------
 
-class TestRiskGateTraining:
 
+class TestRiskGateTraining:
     def test_runs_with_gate_enabled(self):
         model = _small_cascade_model()
         opt = torch.optim.AdamW(model.parameters(), lr=1e-3)
         metrics = train_cascade_epoch(
-            model, _cascade_loader(n_batches=2), opt, _TASK_WEIGHTS,
-            device=torch.device("cpu"), use_amp=False,
-            risk_gate_training=True, max_drawdown=0.03,
+            model,
+            _cascade_loader(n_batches=2),
+            opt,
+            _TASK_WEIGHTS,
+            device=torch.device("cpu"),
+            use_amp=False,
+            risk_gate_training=True,
+            max_drawdown=0.03,
         )
         assert "loss" in metrics and metrics["loss"] > 0
 
@@ -180,8 +213,12 @@ class TestRiskGateTraining:
         model = _small_cascade_model()
         opt = torch.optim.AdamW(model.parameters(), lr=1e-3)
         metrics = train_cascade_epoch(
-            model, _cascade_loader(n_batches=2), opt, _TASK_WEIGHTS,
-            device=torch.device("cpu"), use_amp=False,
+            model,
+            _cascade_loader(n_batches=2),
+            opt,
+            _TASK_WEIGHTS,
+            device=torch.device("cpu"),
+            use_amp=False,
             risk_gate_training=False,
         )
         assert "loss" in metrics and metrics["loss"] > 0
@@ -191,17 +228,23 @@ class TestRiskGateTraining:
         model = _small_cascade_model()
         opt = torch.optim.AdamW(model.parameters(), lr=1e-3)
         metrics = train_cascade_epoch(
-            model, _cascade_loader(n_batches=2), opt, _TASK_WEIGHTS,
-            device=torch.device("cpu"), use_amp=False,
-            risk_gate_training=True, max_drawdown=0.0,
+            model,
+            _cascade_loader(n_batches=2),
+            opt,
+            _TASK_WEIGHTS,
+            device=torch.device("cpu"),
+            use_amp=False,
+            risk_gate_training=True,
+            max_drawdown=0.0,
         )
         assert metrics["loss"] > 0
-        assert not (metrics["loss"] != metrics["loss"])  # NaN check without math.isnan
+        assert not math.isnan(metrics["loss"])  # NaN check
 
 
 # ---------------------------------------------------------------------------
 # Helpers for convergence and checkpoint tests
 # ---------------------------------------------------------------------------
+
 
 def _fixed_loader(n_batches: int = 4, B: int = 8, seq_len: int = 50, features: int = 32) -> list:
     """Pre-seeded dataset — same tensors every call, required for convergence assertions."""
@@ -227,6 +270,7 @@ def _no_dropout_model() -> Dignity:
 # TestConvergenceSmoke
 # ---------------------------------------------------------------------------
 
+
 class TestConvergenceSmoke:
     """10-epoch regression gate — catches gradient flow breakage from future refactors."""
 
@@ -239,8 +283,13 @@ class TestConvergenceSmoke:
         losses = []
         for _ in range(10):
             m = train_cascade_epoch(
-                model, loader, opt, _TASK_WEIGHTS,
-                device=torch.device("cpu"), use_amp=False, risk_gate_training=False,
+                model,
+                loader,
+                opt,
+                _TASK_WEIGHTS,
+                device=torch.device("cpu"),
+                use_amp=False,
+                risk_gate_training=False,
             )
             losses.append(m["loss"])
         assert losses[-1] < losses[0], (
@@ -255,8 +304,13 @@ class TestConvergenceSmoke:
         loader = _fixed_loader()
         for epoch in range(10):
             m = train_cascade_epoch(
-                model, loader, opt, _TASK_WEIGHTS,
-                device=torch.device("cpu"), use_amp=False, risk_gate_training=False,
+                model,
+                loader,
+                opt,
+                _TASK_WEIGHTS,
+                device=torch.device("cpu"),
+                use_amp=False,
+                risk_gate_training=False,
             )
             assert m["loss"] == m["loss"], f"NaN loss at epoch {epoch}"  # NaN != NaN
 
@@ -268,8 +322,13 @@ class TestConvergenceSmoke:
         loader = _fixed_loader()
         for _ in range(10):
             train_cascade_epoch(
-                model, loader, opt, _TASK_WEIGHTS,
-                device=torch.device("cpu"), use_amp=False, risk_gate_training=False,
+                model,
+                loader,
+                opt,
+                _TASK_WEIGHTS,
+                device=torch.device("cpu"),
+                use_amp=False,
+                risk_gate_training=False,
             )
         model.train(False)
         correct = total = 0
@@ -286,8 +345,8 @@ class TestConvergenceSmoke:
 # TestCheckpointRoundTrip
 # ---------------------------------------------------------------------------
 
-class TestCheckpointRoundTrip:
 
+class TestCheckpointRoundTrip:
     def test_all_cascade_outputs_match_after_reload(self):
         torch.manual_seed(0)
         model = _small_cascade_model()

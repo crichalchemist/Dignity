@@ -176,7 +176,15 @@ class TestCascadeForward:
     def test_all_keys_present(self, sample_sequence_32):
         model = self._make_model()
         out = model(sample_sequence_32)
-        expected = {"regime_probs", "var_estimate", "position_limit", "alpha_score", "action_logits", "value", "attention_weights"}
+        expected = {
+            "regime_probs",
+            "var_estimate",
+            "position_limit",
+            "alpha_score",
+            "action_logits",
+            "value",
+            "attention_weights",
+        }
         assert expected == set(out.keys())
 
     def test_regime_shape(self, sample_sequence_32):
@@ -224,8 +232,9 @@ class TestCascadeForward:
 
     def test_single_head_forward_unaffected(self, sample_sequence):
         """The non-cascade forward() path must still work after refactor."""
-        model = Dignity(task="forecast", input_size=9, hidden_size=128, n_layers=2,
-                        pred_len=5, num_features=3)
+        model = Dignity(
+            task="forecast", input_size=9, hidden_size=128, n_layers=2, pred_len=5, num_features=3
+        )
         preds, attn = model(sample_sequence)
         assert preds.shape == (4, 5, 3)
 

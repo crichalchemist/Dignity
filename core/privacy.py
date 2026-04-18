@@ -73,9 +73,7 @@ class PrivacyManager:
         return quantized
 
     @staticmethod
-    def add_noise(
-        values: np.ndarray, epsilon: float = 0.1, sensitivity: float = 1.0
-    ) -> np.ndarray:
+    def add_noise(values: np.ndarray, epsilon: float = 0.1, sensitivity: float = 1.0) -> np.ndarray:
         """
         Add Laplace noise for differential privacy.
 
@@ -147,9 +145,7 @@ class PrivacyManager:
         sanitized["volumes"] = cls.quantize_amounts(volumes, bins=quantize_bins)
 
         # Add differential privacy noise
-        sanitized["volumes_noisy"] = cls.add_noise(
-            sanitized["volumes"], epsilon=epsilon
-        )
+        sanitized["volumes_noisy"] = cls.add_noise(sanitized["volumes"], epsilon=epsilon)
 
         # Anonymize addresses if provided
         if addresses is not None:

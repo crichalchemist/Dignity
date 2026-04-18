@@ -81,9 +81,7 @@ class CryptoSource:
 
         return prepared
 
-    def resample_to_blocks(
-        self, df: pd.DataFrame, block_time: str = "10min"
-    ) -> pd.DataFrame:
+    def resample_to_blocks(self, df: pd.DataFrame, block_time: str = "10min") -> pd.DataFrame:
         """
         Resample exchange data to block-like intervals.
 
@@ -156,4 +154,3 @@ class CryptoSource:
             return (numeric_ts / 10**6).astype("int64")
         else:  # Already in milliseconds
             return numeric_ts.astype("int64")
-

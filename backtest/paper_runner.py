@@ -25,10 +25,10 @@ import torch
 # Soak gate thresholds
 # ---------------------------------------------------------------------------
 
-SOAK_MAX_DAILY_DRAWDOWN = 0.05         # circuit breaker fires at or below this
-SOAK_ALERT_DAILY_DRAWDOWN = 0.03      # alert fires at or below this (no circuit break)
-SOAK_MAX_REGIME_CONCENTRATION = 0.70   # no single regime > 70% of bars
-SOAK_GATE_RATE_TOLERANCE = 0.05       # gate trigger rate within ±5% of backtest rate
+SOAK_MAX_DAILY_DRAWDOWN = 0.05  # circuit breaker fires at or below this
+SOAK_ALERT_DAILY_DRAWDOWN = 0.03  # alert fires at or below this (no circuit break)
+SOAK_MAX_REGIME_CONCENTRATION = 0.70  # no single regime > 70% of bars
+SOAK_GATE_RATE_TOLERANCE = 0.05  # gate trigger rate within ±5% of backtest rate
 SOAK_MIN_CALENDAR_DAYS = 30
 
 _ACTION_STRINGS: dict[int, str] = {0: "HOLD", 1: "BUY", 2: "SELL"}
@@ -40,6 +40,7 @@ _LOG_ROTATE_BACKUPS = 5
 # Soak config
 # ---------------------------------------------------------------------------
 
+
 @dataclass(frozen=True)
 class SoakConfig:
     """Configuration for a paper trading soak run."""
@@ -50,7 +51,7 @@ class SoakConfig:
     symbol: str = "EURUSD"
     max_drawdown: float = 0.05
     max_position_size: float = 0.1
-    backtest_gate_rate: float = 0.0   # from Section 4 report
+    backtest_gate_rate: float = 0.0  # from Section 4 report
     seq_len: int = 100
     input_size: int = 32
     log_dir: str = "reports"
@@ -59,6 +60,7 @@ class SoakConfig:
 # ---------------------------------------------------------------------------
 # Pure helpers — testable without MetaApi or model
 # ---------------------------------------------------------------------------
+
 
 def append_bar_log(log_path: Path, entry: dict) -> None:
     """Append one JSON line to the soak JSONL log."""
@@ -188,9 +190,7 @@ def bars_to_tensor(bar_buffer: list[pd.Series], input_size: int) -> torch.Tensor
 
 def _send_macos_alert(message: str) -> None:
     """Fire a macOS notification via osascript (best-effort, non-blocking)."""
-    os.system(
-        f"osascript -e 'display notification \"{message}\" with title \"Dignity Soak\"'"
-    )
+    os.system(f'osascript -e \'display notification "{message}" with title "Dignity Soak"\'')
 
 
 def _setup_rotating_logger(log_path: Path) -> logging.Logger:
@@ -209,6 +209,7 @@ def _setup_rotating_logger(log_path: Path) -> logging.Logger:
 # ---------------------------------------------------------------------------
 # Async run loop
 # ---------------------------------------------------------------------------
+
 
 async def run_paper_loop(config: SoakConfig) -> None:
     """Long-running paper trading soak loop.
@@ -232,8 +233,7 @@ async def run_paper_loop(config: SoakConfig) -> None:
 
     if lock_path.exists():
         raise RuntimeError(
-            f"Soak breaker lock exists at {lock_path}. "
-            "Delete it manually before resuming."
+            f"Soak breaker lock exists at {lock_path}. Delete it manually before resuming."
         )
 
     _setup_rotating_logger(soak_log)
@@ -274,7 +274,7 @@ async def run_paper_loop(config: SoakConfig) -> None:
             bar_buffer.append(bar)
             if len(bar_buffer) < config.seq_len:
                 continue
-            bar_buffer = bar_buffer[-config.seq_len:]
+            bar_buffer = bar_buffer[-config.seq_len :]
 
             action_str = "HOLD"
             var_est = 0.0
@@ -295,8 +295,10 @@ async def run_paper_loop(config: SoakConfig) -> None:
                 position_size = float(outputs["position_limit"].item())
 
                 gate = check_risk_gate(
-                    var_est, position_size,
-                    config.max_drawdown, config.max_position_size,
+                    var_est,
+                    position_size,
+                    config.max_drawdown,
+                    config.max_position_size,
                 )
                 gate_passed = gate.allowed
 
@@ -316,15 +318,18 @@ async def run_paper_loop(config: SoakConfig) -> None:
             day = ts[:10]
             daily_pnl[day] = daily_pnl.get(day, 0.0) + simulated_pnl
 
-            append_bar_log(soak_log, {
-                "timestamp": ts,
-                "action": action_str,
-                "regime": regime,
-                "var_estimate": var_est,
-                "alpha_score": alpha,
-                "gate_passed": gate_passed,
-                "simulated_pnl": simulated_pnl,
-            })
+            append_bar_log(
+                soak_log,
+                {
+                    "timestamp": ts,
+                    "action": action_str,
+                    "regime": regime,
+                    "var_estimate": var_est,
+                    "alpha_score": alpha,
+                    "gate_passed": gate_passed,
+                    "simulated_pnl": simulated_pnl,
+                },
+            )
 
             day_dd = daily_pnl[day]
             if day_dd < -SOAK_ALERT_DAILY_DRAWDOWN:

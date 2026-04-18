@@ -138,9 +138,7 @@ class SyntheticGenerator:
         anomaly_types = ["volume_spike", "price_manipulation", "fee_evasion"]
         for _ in range(num_anomalous):
             anomaly_type = np.random.choice(anomaly_types)
-            data = self.generate_anomalous_sequence(
-                length=seq_len, anomaly_type=anomaly_type
-            )
+            data = self.generate_anomalous_sequence(length=seq_len, anomaly_type=anomaly_type)
             sequences.append(data)
             labels.append(1)  # Anomalous
 

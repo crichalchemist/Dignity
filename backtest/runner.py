@@ -12,10 +12,9 @@ from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
-from typing import Any
 
 import numpy as np
 import pandas as pd
@@ -27,10 +26,10 @@ from .strategy import ACTION_HOLD, DignityStrategy
 # Backtest gate thresholds — machine-enforced via validate_backtest_results()
 # ---------------------------------------------------------------------------
 
-BACKTEST_MIN_ARR = 0.15           # 15% annualized return (fraction, not %)
-BACKTEST_MIN_SHARPE = 1.0         # Sharpe ratio
-BACKTEST_MAX_DRAWDOWN = 0.20      # 20% max drawdown (fraction, not %)
-BACKTEST_MIN_WIN_RATE = 0.52      # 52% win rate (fraction, not %)
+BACKTEST_MIN_ARR = 0.15  # 15% annualized return (fraction, not %)
+BACKTEST_MIN_SHARPE = 1.0  # Sharpe ratio
+BACKTEST_MAX_DRAWDOWN = 0.20  # 20% max drawdown (fraction, not %)
+BACKTEST_MIN_WIN_RATE = 0.52  # 52% win rate (fraction, not %)
 BACKTEST_MAX_GATE_TRIGGER = 0.10  # risk gate fires on ≤10% of bars
 
 
@@ -40,6 +39,7 @@ class BacktestGateError(Exception):
     All failures are reported together so the caller can see every gap at once,
     not just the first one hit.
     """
+
 
 # Required OHLCV columns (backtesting.py convention — Title case)
 _REQUIRED_COLS = ("Open", "High", "Low", "Close", "Volume")
@@ -63,8 +63,8 @@ class BacktestConfig:
     max_drawdown: float = 0.05
     position_size: float = 0.95
     trade_on_close: bool = True
-    exclusive_orders: bool = True   # each new signal closes prior trade
-    finalize_trades: bool = True    # close open trades at end so # Trades counts them
+    exclusive_orders: bool = True  # each new signal closes prior trade
+    finalize_trades: bool = True  # close open trades at end so # Trades counts them
 
 
 def prepare_ohlcv(df: pd.DataFrame) -> pd.DataFrame:
@@ -232,13 +232,9 @@ def validate_backtest_results(metrics: dict[str, float]) -> None:
     failures: list[str] = []
 
     if metrics.get("arr", 0.0) < BACKTEST_MIN_ARR:
-        failures.append(
-            f"ARR {metrics['arr']:.1%} < required {BACKTEST_MIN_ARR:.0%}"
-        )
+        failures.append(f"ARR {metrics['arr']:.1%} < required {BACKTEST_MIN_ARR:.0%}")
     if metrics.get("sharpe", 0.0) < BACKTEST_MIN_SHARPE:
-        failures.append(
-            f"Sharpe {metrics['sharpe']:.2f} < required {BACKTEST_MIN_SHARPE:.1f}"
-        )
+        failures.append(f"Sharpe {metrics['sharpe']:.2f} < required {BACKTEST_MIN_SHARPE:.1f}")
     if metrics.get("max_drawdown", 1.0) > BACKTEST_MAX_DRAWDOWN:
         failures.append(
             f"Max drawdown {metrics['max_drawdown']:.1%} > allowed {BACKTEST_MAX_DRAWDOWN:.0%}"

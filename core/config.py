@@ -15,7 +15,7 @@ class ExecutionConfig:
     stored in YAML files that may be committed to version control.
     """
 
-    provider: str = "mock" # 'metaapi' or 'mock'
+    provider: str = "mock"  # 'metaapi' or 'mock'
     metaapi_token: str = ""
     account_id: str = ""
     symbols: list = field(default_factory=lambda: ["EURUSD"])
@@ -58,13 +58,37 @@ class DataConfig:
     start_date: str = "2016-01-01"  # inclusive start for both synthetic and MetaApi pulls
     features: list = field(
         default_factory=lambda: [
-            'volume', 'price', 'fee_rate', 'tx_count', 'rsi', 'macd_line',
-            'macd_signal', 'macd_hist', 'bollinger_pct_b', 'bollinger_width',
-            'atr', 'stoch_k', 'stoch_d', 'adx', 'obv', 'vwap', 'roc_5', 'roc_20',
-            'momentum_10', 'momentum_20', 'volatility_5', 'volatility_20',
-            'vol_ratio', 'order_flow_imbalance', 'dc_direction',
-            'dc_overshoot', 'dc_bars_since_event', 'volume_volatility',
-            'volume_entropy', 'price_change', 'directional_change',
+            "volume",
+            "price",
+            "fee_rate",
+            "tx_count",
+            "rsi",
+            "macd_line",
+            "macd_signal",
+            "macd_hist",
+            "bollinger_pct_b",
+            "bollinger_width",
+            "atr",
+            "stoch_k",
+            "stoch_d",
+            "adx",
+            "obv",
+            "vwap",
+            "roc_5",
+            "roc_20",
+            "momentum_10",
+            "momentum_20",
+            "volatility_5",
+            "volatility_20",
+            "vol_ratio",
+            "order_flow_imbalance",
+            "dc_direction",
+            "dc_overshoot",
+            "dc_bars_since_event",
+            "volume_volatility",
+            "volume_entropy",
+            "price_change",
+            "directional_change",
         ]
     )
 
@@ -106,10 +130,10 @@ class DignityConfig:
             config_dict = yaml.safe_load(f)
 
         # Handle imports
-        if 'imports' in config_dict:
+        if "imports" in config_dict:
             base_path = Path(path).parent
             base_config = {}
-            for import_path in config_dict['imports']:
+            for import_path in config_dict["imports"]:
                 with open(base_path / import_path) as f:
                     imported_config = yaml.safe_load(f)
                     # simple merge
@@ -117,11 +141,12 @@ class DignityConfig:
             base_config.update(config_dict)
             config_dict = base_config
 
-
         # Create a set of all valid field names for ModelConfig
         model_fields = {f.name for f in fields(ModelConfig)}
         # Filter the config_dict to only include valid fields
-        filtered_model_config = {k: v for k, v in config_dict.get("model", {}).items() if k in model_fields}
+        filtered_model_config = {
+            k: v for k, v in config_dict.get("model", {}).items() if k in model_fields
+        }
 
         return cls(
             model=ModelConfig(**filtered_model_config),
