@@ -2,8 +2,136 @@
 
 import torch
 import torch.nn as nn
-from torch.cuda.amp import GradScaler, autocast
+from torch.amp import GradScaler, autocast
 from tqdm import tqdm
+
+
+def make_cosine_scheduler(
+    optimizer: torch.optim.Optimizer,
+    T_max: int,
+    eta_min: float = 1e-6,
+) -> torch.optim.lr_scheduler.CosineAnnealingLR:
+    """Return a CosineAnnealingLR scheduler.
+
+    Decays LR from its initial value to eta_min over T_max steps, then
+    optionally cycles back up. Stable multi-task convergence requires a
+    smooth LR schedule — cosine annealing avoids the abrupt drops of step LR.
+    """
+    return torch.optim.lr_scheduler.CosineAnnealingLR(
+        optimizer, T_max=T_max, eta_min=eta_min
+    )
+
+
+_GATE_SUPPRESSION_FACTOR = 0.1  # scale factor applied to non-HOLD logits under risk gate
+
+
+def train_cascade_epoch(
+    model: nn.Module,
+    dataloader,
+    optimizer: torch.optim.Optimizer,
+    task_weights: dict[str, float],
+    device: torch.device,
+    use_amp: bool = True,
+    grad_clip: float = 1.0,
+    scheduler: torch.optim.lr_scheduler.LRScheduler | None = None,
+    risk_gate_training: bool = True,
+    max_drawdown: float = 0.05,
+) -> dict[str, float]:
+    """Train one epoch using the Guided Learning cascade loss.
+
+    Each batch calls model.cascade_loss() which attaches auxiliary supervision
+    at every intermediate head — short gradient paths prevent vanishing
+    gradients in the deep 4-stage cascade (vault finding: +7.31pp ARR).
+
+    Args:
+        model: Dignity model instantiated with task='cascade'.
+        dataloader: Iterable of (x, labels_dict) pairs.
+            labels_dict must contain keys: regime, var, alpha, action.
+        optimizer: Optimizer (AdamW recommended).
+        task_weights: Per-head loss weights, e.g. {"regime":0.2, ...}.
+        device: Target device.
+        use_amp: Enable automatic mixed precision.
+        grad_clip: Max gradient norm (0 to disable).
+        scheduler: Optional LR scheduler stepped once per epoch.
+        risk_gate_training: When True, suppress non-HOLD action logits for
+            samples where var_estimate exceeds max_drawdown. This aligns
+            training with deployment constraints and prevents the model from
+            learning aggressive strategies that the risk gate will block at
+            inference time. Default True; set False for research runs only.
+        max_drawdown: VaR threshold above which the gate fires. Should match
+            ExecutionConfig.max_drawdown.
+
+    Returns:
+        Metrics dict with keys: loss, regime_loss, risk_loss, alpha_loss, policy_loss.
+    """
+    model.train()
+    scaler = GradScaler("cuda", enabled=use_amp)
+
+    total_loss = 0.0
+    head_totals: dict[str, float] = {
+        "regime_loss": 0.0,
+        "risk_loss": 0.0,
+        "alpha_loss": 0.0,
+        "policy_loss": 0.0,
+    }
+    n_batches = 0
+
+    pbar = tqdm(dataloader, desc="Training Cascade")
+    for x, labels in pbar:
+        x = x.to(device)
+        labels = {k: v.to(device) for k, v in labels.items()}
+
+        optimizer.zero_grad()
+
+        with autocast("cuda", enabled=use_amp):
+            outputs = model(x)
+
+            if risk_gate_training:
+                # Suppress BUY/SELL logits for samples where var_estimate exceeds
+                # max_drawdown. The suppression is differentiable (torch.where with
+                # a scalar multiplier), so the model receives a weaker gradient
+                # signal for aggressive actions under high-risk conditions and
+                # learns to prefer HOLD when VaR is elevated.
+                gate_mask = (outputs["var_estimate"] > max_drawdown)  # [B, 1] bool
+                non_hold = outputs["action_logits"][:, 1:]  # [B, n_actions-1]
+                suppressed = torch.where(
+                    gate_mask.expand_as(non_hold),
+                    non_hold * _GATE_SUPPRESSION_FACTOR,
+                    non_hold,
+                )
+                gated_logits = torch.cat(
+                    [outputs["action_logits"][:, :1], suppressed], dim=-1
+                )
+                outputs = {**outputs, "action_logits": gated_logits}
+
+            loss, per_head = model.cascade_loss(outputs, labels, task_weights)
+
+        scaler.scale(loss).backward()
+
+        if grad_clip > 0:
+            scaler.unscale_(optimizer)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
+
+        scaler.step(optimizer)
+        scaler.update()
+
+        total_loss += loss.item()
+        head_totals["regime_loss"] += per_head["regime"].item()
+        head_totals["risk_loss"] += per_head["risk"].item()
+        head_totals["alpha_loss"] += per_head["alpha"].item()
+        head_totals["policy_loss"] += per_head["policy"].item()
+        n_batches += 1
+
+        pbar.set_postfix({"loss": f"{total_loss / n_batches:.4f}"})
+
+    if scheduler is not None:
+        scheduler.step()
+
+    denom = max(n_batches, 1)
+    return {
+        "loss": total_loss / denom,
+        **{k: v / denom for k, v in head_totals.items()},
+    }
 
 
 def train_epoch(
@@ -33,7 +161,7 @@ def train_epoch(
         Dictionary with training metrics
     """
     model.train()
-    scaler = GradScaler(enabled=use_amp)
+    scaler = GradScaler("cuda", enabled=use_amp)
 
     total_loss = 0.0
     num_batches = len(dataloader)
@@ -53,7 +181,7 @@ def train_epoch(
         optimizer.zero_grad()
 
         # Forward pass with AMP
-        with autocast(enabled=use_amp):
+        with autocast("cuda", enabled=use_amp):
             predictions, _ = model(x)
             # Squeeze predictions if they have an extra dimension
             if predictions.dim() > y.dim():

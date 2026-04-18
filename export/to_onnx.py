@@ -4,39 +4,92 @@ import numpy as np
 import onnx
 import onnxruntime as ort
 import torch
+import torch.nn as nn
+
+# Ordered output names for the cascade task — position matters for ONNX tuple output.
+CASCADE_OUTPUT_NAMES: list[str] = [
+    "regime_probs",
+    "var_estimate",
+    "position_limit",
+    "alpha_score",
+    "action_logits",
+    "value",
+    "attention_weights",
+]
+
+
+class _CascadeWrapper(nn.Module):
+    """Thin wrapper that converts forward_cascade()'s dict to a tuple.
+
+    torch.onnx.export traces through forward() which returns a dict for
+    cascade models — ONNX tracing can't handle dict outputs. This wrapper
+    produces a fixed-order tuple instead, matching CASCADE_OUTPUT_NAMES.
+    Never serialized; used only at export time.
+    """
+
+    def __init__(self, model: nn.Module) -> None:
+        super().__init__()
+        self.model = model
+
+    def forward(self, x: torch.Tensor) -> tuple:
+        out = self.model.forward_cascade(x)
+        return (
+            out["regime_probs"],
+            out["var_estimate"],
+            out["position_limit"],
+            out["alpha_score"],
+            out["action_logits"],
+            out["value"],
+            out["attention_weights"],
+        )
 
 
 def export_to_onnx(
     model: torch.nn.Module,
     output_path: str,
-    input_shape: tuple[int, int, int] = (1, 100, 9),
+    input_shape: tuple[int, int, int] = (1, 100, 32),
     opset_version: int = 13,
     verify: bool = True,
 ) -> None:
-    """
-    Export Dignity model to ONNX format.
+    """Export Dignity model to ONNX format.
+
+    Cascade models are wrapped to convert dict output to a tuple before
+    tracing — ONNX requires fixed-arity tuple outputs.
 
     Args:
-        model: Trained Dignity model
-        output_path: Path to save ONNX model
-        input_shape: Input shape (batch, seq_len, features)
-        opset_version: ONNX opset version
-        verify: Whether to verify exported model
+        model: Trained Dignity model (any task).
+        output_path: Path to save ONNX model.
+        input_shape: Input shape (batch, seq_len, features).
+        opset_version: ONNX opset version.
+        verify: Whether to verify exported model against PyTorch.
     """
-    model.eval()
-
-    # Create dummy input
+    model.train(False)
     dummy_input = torch.randn(*input_shape)
+    is_cascade = getattr(model, "task", None) == "cascade"
 
-    # Determine output names based on task
-    output_names = ["predictions", "attention_weights"]
+    if is_cascade:
+        export_model = _CascadeWrapper(model)
+        output_names = CASCADE_OUTPUT_NAMES
+        dynamic_axes: dict = {
+            "input": {0: "batch_size"},
+            **{name: {0: "batch_size"} for name in CASCADE_OUTPUT_NAMES},
+        }
+        # attention_weights also has a sequence dimension
+        dynamic_axes["attention_weights"] = {0: "batch_size", 1: "sequence_length"}
+    else:
+        export_model = model  # type: ignore[assignment]
+        output_names = ["predictions", "attention_weights"]
+        dynamic_axes = {
+            "input": {0: "batch_size"},
+            "predictions": {0: "batch_size"},
+            "attention_weights": {0: "batch_size", 1: "sequence_length"},
+        }
 
     print(f"Exporting model to {output_path}...")
-    print(f"Input shape: {input_shape}")
+    print(f"Input shape: {input_shape}, task: {getattr(model, 'task', 'unknown')}")
 
-    # Export to ONNX
     torch.onnx.export(
-        model,
+        export_model,
         dummy_input,
         output_path,
         export_params=True,
@@ -44,16 +97,11 @@ def export_to_onnx(
         do_constant_folding=True,
         input_names=["input"],
         output_names=output_names,
-        dynamic_axes={
-            "input": {0: "batch_size", 1: "sequence_length"},
-            "predictions": {0: "batch_size"},
-            "attention_weights": {0: "batch_size", 1: "sequence_length"},
-        },
+        dynamic_axes=dynamic_axes,
     )
 
     print(f"Model exported successfully to {output_path}")
 
-    # Verify export
     if verify:
         print("\nVerifying ONNX model...")
         verify_onnx_export(model, output_path, dummy_input)
@@ -84,46 +132,35 @@ def verify_onnx_export(
     onnx.checker.check_model(onnx_model)
     print("✓ ONNX model is valid")
 
-    # Get PyTorch output
-    pytorch_model.eval()
-    with torch.no_grad():
-        pytorch_output = pytorch_model(test_input)
-        if isinstance(pytorch_output, tuple):
-            pytorch_pred, pytorch_attn = pytorch_output
-        else:
-            pytorch_pred = pytorch_output
-            pytorch_attn = None
+    pytorch_model.train(False)
+    is_cascade = getattr(pytorch_model, "task", None) == "cascade"
 
-    # Get ONNX output
+    with torch.no_grad():
+        if is_cascade:
+            pytorch_outputs = _CascadeWrapper(pytorch_model)(test_input)
+        else:
+            pytorch_output = pytorch_model(test_input)
+            pytorch_outputs = pytorch_output if isinstance(pytorch_output, tuple) else (pytorch_output, None)
+
     ort_session = ort.InferenceSession(onnx_path)
     ort_inputs = {ort_session.get_inputs()[0].name: test_input.numpy()}
     ort_outputs = ort_session.run(None, ort_inputs)
 
-    # Compare predictions
-    pred_match = np.allclose(pytorch_pred.numpy(), ort_outputs[0], rtol=rtol, atol=atol)
-
-    if pred_match:
-        print("✓ Predictions match between PyTorch and ONNX")
-        max_diff = np.max(np.abs(pytorch_pred.numpy() - ort_outputs[0]))
-        print(f"  Max difference: {max_diff:.6e}")
-    else:
-        print("✗ Predictions do NOT match!")
-        return False
-
-    # Compare attention weights if available
-    if pytorch_attn is not None and len(ort_outputs) > 1:
-        attn_match = np.allclose(
-            pytorch_attn.numpy(), ort_outputs[1], rtol=rtol, atol=atol
-        )
-
-        if attn_match:
-            print("✓ Attention weights match between PyTorch and ONNX")
+    all_match = True
+    for i, (pt_tensor, ort_arr) in enumerate(zip(pytorch_outputs, ort_outputs)):
+        if pt_tensor is None:
+            continue
+        match = np.allclose(pt_tensor.numpy(), ort_arr, rtol=rtol, atol=atol)
+        name = (CASCADE_OUTPUT_NAMES[i] if is_cascade else ["predictions", "attention_weights"][i])
+        if match:
+            print(f"✓ {name} matches")
         else:
-            print("✗ Attention weights do NOT match!")
-            return False
+            print(f"✗ {name} does NOT match!")
+            all_match = False
 
-    print("\n✓ Verification successful!")
-    return True
+    if all_match:
+        print("\n✓ Verification successful!")
+    return all_match
 
 
 def get_onnx_model_info(onnx_path: str) -> dict:
@@ -170,7 +207,7 @@ def get_onnx_model_info(onnx_path: str) -> dict:
 
 
 def benchmark_onnx_inference(
-    onnx_path: str, input_shape: tuple[int, int, int] = (1, 100, 9), num_runs: int = 100
+    onnx_path: str, input_shape: tuple[int, int, int] = (1, 100, 32), num_runs: int = 100
 ) -> dict[str, float]:
     """
     Benchmark ONNX model inference speed.

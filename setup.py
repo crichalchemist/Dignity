@@ -32,12 +32,14 @@ setup(
             "pytest>=7.4.0",
             "pytest-cov>=4.1.0",
             "ruff>=0.1.0",
+            "backtesting>=0.3.3",
         ],
     },
     entry_points={
         "console_scripts": [
             "dignity-train=train.cli:main",
             "dignity-export=export.to_onnx:main",
+            "dignity-backtest=backtest.cli:main",
         ],
     },
     classifiers=[
