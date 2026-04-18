@@ -101,3 +101,22 @@ All development training uses `config/train_quant_paper.yaml` (paper trading, `r
 2. **Section 5** — 30-day paper soak: daily drawdown ≤ 5% on every day, gate trigger rate within ±5% of backtest
 
 Do not switch to the live config until both gates pass. See `docs/plans/2026-04-13-dignity-production-path.md`.
+
+## Monthly Re-training Cadence
+
+Once live, re-train monthly on the last 6 months of live + paper bar data:
+
+```bash
+# Collect latest bars via MetaApi into data/
+dignity-train --config config/train_quant_paper.yaml  # validate on paper first
+
+# If paper soak gate re-passes (scripts/go_live.sh delegates to backtest.go_live_check):
+dignity-train --config config/train_quant.yaml
+```
+
+Trigger conditions (whichever comes first):
+- Calendar month boundary
+- 7-day Sharpe (per `scripts/monitor.sh`) drops below 0.5 for 3 consecutive days
+- Regime distribution shifts by > 15% from the training distribution
+
+Keep the last 3 checkpoints in `checkpoints/quant/` before overwriting.

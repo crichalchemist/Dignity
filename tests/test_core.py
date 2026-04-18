@@ -5,6 +5,7 @@ import pandas as pd
 import pytest
 
 from core.config import DignityConfig
+from core.execution import MAX_POSITION_FRACTION, apply_live_position_cap
 from core.privacy import PrivacyManager
 from core.signals import ASSET_CONFIGS, AssetConfig, SignalProcessor
 
@@ -736,3 +737,31 @@ class TestQuantConfigYamls:
     def test_live_yaml_input_size_is_32(self):
         config = DignityConfig.from_yaml("config/train_quant.yaml")
         assert config.model.input_size == 32
+
+
+# ---------------------------------------------------------------------------
+# Section 6 — Live position cap (core/execution.py)
+# ---------------------------------------------------------------------------
+
+class TestMaxPositionFraction:
+
+    def test_constant_is_75_percent(self):
+        assert MAX_POSITION_FRACTION == 0.75
+
+    def test_500_account_cap_is_375(self):
+        # Request more than the cap to verify clamping kicks in
+        assert apply_live_position_cap(500.0, 500.0) == pytest.approx(375.0)
+
+    def test_50000_paper_account_cap_is_37500(self):
+        assert apply_live_position_cap(50_000.0, 50_000.0) == pytest.approx(37_500.0)
+
+    def test_smaller_size_not_inflated(self):
+        # If gate already approved a small size, don't inflate it
+        assert apply_live_position_cap(0.01, 500.0) == pytest.approx(0.01)
+
+    def test_zero_balance_returns_zero(self):
+        assert apply_live_position_cap(1.0, 0.0) == pytest.approx(0.0)
+
+    def test_returns_float(self):
+        assert isinstance(apply_live_position_cap(0.5, 1000.0), float)
+

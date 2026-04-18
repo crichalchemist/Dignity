@@ -25,6 +25,13 @@ from backtest.runner import (
     validate_backtest_results,
     write_backtest_report,
 )
+from backtest.go_live_check import run_checks
+from backtest.live_runner import (
+    LIVE_ALERT_DRAWDOWN,
+    LIVE_CIRCUIT_BREAKER_DRAWDOWN,
+    LiveConfig,
+    compute_rolling_drawdown,
+)
 from backtest.strategy import ACTION_BUY, ACTION_HOLD, ACTION_SELL, DignityStrategy
 from data.source.metaapi import MetaApiSource, _filter_date_range
 
@@ -774,3 +781,193 @@ class TestSoakScripts:
     def test_stop_script_sends_sigterm(self):
         content = Path("scripts/stop_paper.sh").read_text()
         assert "SIGTERM" in content or "TERM" in content
+
+
+# ---------------------------------------------------------------------------
+# Section 6 — live runner and go-live gate
+# ---------------------------------------------------------------------------
+
+class TestComputeRollingDrawdown:
+
+    def test_empty_entries_returns_zero(self):
+        assert compute_rolling_drawdown([]) == 0.0
+
+    def test_single_entry_positive(self):
+        entries = [{"timestamp": "2026-01-01T12:00:00", "realized_pnl": 0.03}]
+        assert compute_rolling_drawdown(entries) == pytest.approx(0.03)
+
+    def test_single_entry_negative(self):
+        entries = [{"timestamp": "2026-01-01T12:00:00", "realized_pnl": -0.05}]
+        assert compute_rolling_drawdown(entries) == pytest.approx(-0.05)
+
+    def test_sums_within_window(self):
+        entries = [
+            {"timestamp": "2026-01-01T00:00:00", "realized_pnl": -0.03},
+            {"timestamp": "2026-01-02T00:00:00", "realized_pnl": -0.02},
+            {"timestamp": "2026-01-03T00:00:00", "realized_pnl":  0.01},
+        ]
+        assert compute_rolling_drawdown(entries, days=7) == pytest.approx(-0.04)
+
+    def test_excludes_entries_outside_window(self):
+        # 10 days of data, window=3 — only last 3 days should count
+        entries = [
+            {"timestamp": f"2026-01-{i:02d}T00:00:00", "realized_pnl": -0.10}
+            for i in range(1, 11)
+        ]
+        result = compute_rolling_drawdown(entries, days=3)
+        assert result == pytest.approx(-0.30)
+
+    def test_multiple_bars_same_day_aggregated(self):
+        entries = [
+            {"timestamp": "2026-01-01T01:00:00", "realized_pnl": -0.02},
+            {"timestamp": "2026-01-01T02:00:00", "realized_pnl": -0.02},
+        ]
+        assert compute_rolling_drawdown(entries, days=7) == pytest.approx(-0.04)
+
+    def test_missing_pnl_key_treated_as_zero(self):
+        entries = [{"timestamp": "2026-01-01T00:00:00"}]
+        assert compute_rolling_drawdown(entries) == 0.0
+
+    def test_constants_are_sane(self):
+        assert LIVE_CIRCUIT_BREAKER_DRAWDOWN == pytest.approx(0.08)
+        assert LIVE_ALERT_DRAWDOWN == pytest.approx(0.04)
+        assert LIVE_ALERT_DRAWDOWN < LIVE_CIRCUIT_BREAKER_DRAWDOWN
+
+
+class TestLiveConfig:
+
+    def test_default_symbol(self):
+        cfg = LiveConfig(model_path="m.pt", metaapi_token="tok", account_id="acc")
+        assert cfg.symbol == "EURUSD"
+
+    def test_frozen(self):
+        cfg = LiveConfig(model_path="m.pt", metaapi_token="tok", account_id="acc")
+        with pytest.raises((AttributeError, TypeError)):
+            cfg.symbol = "GBPUSD"  # type: ignore[misc]
+
+    def test_custom_fields(self):
+        cfg = LiveConfig(
+            model_path="ckpt.pt",
+            metaapi_token="tok",
+            account_id="acc",
+            symbol="GBPUSD",
+            max_drawdown=0.03,
+        )
+        assert cfg.max_drawdown == pytest.approx(0.03)
+        assert cfg.symbol == "GBPUSD"
+
+
+class TestGoLiveCheck:
+
+    def _write_valid_report(self, reports_dir: Path) -> None:
+        metrics = {
+            "arr": 0.20,
+            "sharpe": 1.5,
+            "max_drawdown": 0.10,
+            "win_rate": 0.55,
+            "gate_trigger_rate": 0.05,
+        }
+        report = {"metrics": metrics}
+        path = reports_dir / "backtest_report_2026-01-01.json"
+        path.write_text(json.dumps(report))
+
+    def _write_valid_paper_log(self, reports_dir: Path, n_days: int = 31) -> None:
+        soak_log = reports_dir / "paper_trading_log.jsonl"
+        lines = []
+        for i in range(n_days * 24):
+            day = f"2026-01-{(i // 24) + 1:02d}"
+            entry = {
+                "timestamp": f"{day}T{(i % 24):02d}:00:00",
+                "realized_pnl": 0.001,
+                "gate_passed": True,
+                "regime": i % 4,
+                "error": False,
+            }
+            lines.append(json.dumps(entry))
+        soak_log.write_text("\n".join(lines))
+
+    def test_passes_when_all_gates_met(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            d = Path(tmp)
+            self._write_valid_report(d)
+            self._write_valid_paper_log(d)
+            assert run_checks(reports_dir=d) is True
+
+    def test_fails_when_no_backtest_report(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            d = Path(tmp)
+            self._write_valid_paper_log(d)
+            assert run_checks(reports_dir=d) is False
+
+    def test_fails_when_no_paper_log(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            d = Path(tmp)
+            self._write_valid_report(d)
+            assert run_checks(reports_dir=d) is False
+
+    def test_fails_when_sharpe_too_low(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            d = Path(tmp)
+            # Write a report with failing Sharpe
+            metrics = {
+                "arr": 0.20,
+                "sharpe": 0.5,         # below BACKTEST_MIN_SHARPE=1.0
+                "max_drawdown": 0.10,
+                "win_rate": 0.55,
+                "gate_trigger_rate": 0.05,
+            }
+            (d / "backtest_report_2026-01-01.json").write_text(json.dumps({"metrics": metrics}))
+            self._write_valid_paper_log(d)
+            assert run_checks(reports_dir=d) is False
+
+    def test_fails_when_paper_log_too_short(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            d = Path(tmp)
+            self._write_valid_report(d)
+            self._write_valid_paper_log(d, n_days=10)  # below 30-day threshold
+            assert run_checks(reports_dir=d) is False
+
+
+class TestLiveScripts:
+
+    def test_go_live_script_exists_and_is_executable(self):
+        path = Path("scripts/go_live.sh")
+        assert path.exists()
+        assert os.access(path, os.X_OK)
+
+    def test_monitor_script_exists_and_is_executable(self):
+        path = Path("scripts/monitor.sh")
+        assert path.exists()
+        assert os.access(path, os.X_OK)
+
+    def test_go_live_checks_metaapi_token(self):
+        content = Path("scripts/go_live.sh").read_text()
+        assert "METAAPI_TOKEN" in content
+
+    def test_go_live_checks_metaapi_account_id(self):
+        content = Path("scripts/go_live.sh").read_text()
+        assert "METAAPI_ACCOUNT_ID" in content
+
+    def test_go_live_checks_checkpoint_arg(self):
+        content = Path("scripts/go_live.sh").read_text()
+        assert "CHECKPOINT" in content
+
+    def test_go_live_checks_circuit_breaker_lock(self):
+        content = Path("scripts/go_live.sh").read_text()
+        assert "circuit_breaker.lock" in content
+
+    def test_go_live_delegates_to_go_live_check(self):
+        content = Path("scripts/go_live.sh").read_text()
+        assert "go_live_check" in content
+
+    def test_monitor_watches_live_log(self):
+        content = Path("scripts/monitor.sh").read_text()
+        assert "live_trading_log" in content
+
+    def test_monitor_computes_sharpe(self):
+        content = Path("scripts/monitor.sh").read_text()
+        assert "sharpe" in content.lower()
+
+    def test_go_live_writes_pid_file(self):
+        content = Path("scripts/go_live.sh").read_text()
+        assert "pid" in content.lower()

@@ -8,6 +8,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+# Hard cap on live position size — 75% of account balance per trade.
+# Sized for a $500 live account (~$375/trade). Deliberately a named constant
+# (not YAML-configurable) so it requires a code change + review to modify.
+MAX_POSITION_FRACTION = 0.75
+
 
 @dataclass(frozen=True)
 class GateDecision:
@@ -46,3 +51,19 @@ def check_risk_gate(
 
     capped = min(float(position_size), float(max_position_size))
     return GateDecision(allowed=True, reason="ok", adjusted_size=capped)
+
+
+def apply_live_position_cap(size: float, account_balance: float) -> float:
+    """Cap lot size at MAX_POSITION_FRACTION of account balance for live trading.
+
+    Applied after check_risk_gate() as a second layer — prevents outsized positions
+    regardless of model confidence or gate configuration.
+
+    Args:
+        size:            Gate-approved lot size from check_risk_gate().
+        account_balance: Current account balance in account currency.
+
+    Returns:
+        min(size, MAX_POSITION_FRACTION * account_balance)
+    """
+    return min(float(size), MAX_POSITION_FRACTION * float(account_balance))
