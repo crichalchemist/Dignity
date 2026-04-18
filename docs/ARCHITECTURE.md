@@ -5,208 +5,262 @@ Dignity Core uses a modular architecture with composable backbones and task-spec
 ## System Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│                     Dignity Core                             │
-├─────────────────────────────────────────────────────────────┤
-│                                                               │
-│  Input Data → Privacy → Signals → Pipeline → Model → Export │
-│                                                               │
-└─────────────────────────────────────────────────────────────┘
+Input Data → Privacy → Signals → Pipeline → Model → Export
+```
 
-Data Flow:
-1. Load transaction data (CSV, database, synthetic)
+Data flows left to right. Each stage is independent and testable.
+
+1. Load transaction data (synthetic, CSV, MetaApi)
 2. Apply privacy operations (hashing, anonymization, DP noise)
-3. Compute signals (volatility, entropy, momentum, regime)
-4. Create sequences with sliding windows
-5. Feed to neural network model
+3. Compute 32 signal features (RSI, MACD, Bollinger, volatility, regime, etc.)
+4. Scale features and create sliding-window sequences
+5. Feed sequences to neural network model
 6. Train with task-specific objective
 7. Export to ONNX for deployment
-```
 
 ## Module Structure
 
-### core/ - Foundation
+### core/ – Foundation
 
-**config.py** - Configuration management
+**config.py** – Configuration management via `DignityConfig` dataclass.
+
 ```python
 from core.config import DignityConfig
 
 config = DignityConfig.from_yaml("config/base.yaml")
+print(config.model.task)         # "risk"
+print(config.model.hidden_size)  # 256
+print(config.data.batch_size)    # 64
 ```
 
-**signals.py** - Signal processing
+**signals.py** – 32-feature signal processor.
+
 ```python
-from core.signals import compute_volatility, compute_entropy
+from core.signals import SignalProcessor
+import numpy as np
 
-df = compute_volatility(df, window=20)
-df = compute_entropy(df, window=50, bins=10)
+prices = np.array([100.0, 102.0, 98.0, 101.0])
+volumes = np.array([1000.0, 1200.0, 800.0, 1100.0])
+
+# Individual indicators
+rsi = SignalProcessor.rsi(prices, period=14)
+macd_line, signal, hist = SignalProcessor.macd(prices)
+vol = SignalProcessor.volatility(prices, window=3)
+
+# Full 32-feature computation
+signals = SignalProcessor.process_sequence(volumes, prices)
 ```
 
-**privacy.py** - Privacy operations
+**privacy.py** – Privacy operations via `PrivacyManager` class.
+
 ```python
-from core.privacy import hash_identifiers, add_differential_privacy_noise
+from core.privacy import PrivacyManager
+import numpy as np
 
-df = hash_identifiers(df, columns=["user_id"])
-df = add_differential_privacy_noise(df, columns=["amount"], epsilon=1.0)
+hashed = PrivacyManager.hash_identifier("user_123", salt="secret")
+amounts = np.array([100.0, 250.0, 75.0])
+quantized = PrivacyManager.quantize_amounts(amounts, bins=10)
+noisy = PrivacyManager.add_noise(amounts, epsilon=1.0)
 ```
 
-### data/ - Data Processing
+### data/ – Data Processing
 
-**pipeline.py** - End-to-end data pipeline
+**pipeline.py** – End-to-end data pipeline.
+
 ```python
 from data.pipeline import TransactionPipeline
 
-pipeline = TransactionPipeline(config)
-data = pipeline.load_and_process("transactions.csv")
+pipeline = TransactionPipeline(seq_len=100, features=config.data.features)
+pipeline.fit(df_train)
+X_scaled = pipeline.transform(df_test)
+X_seq, y_seq = pipeline.create_sequences(X_scaled, labels, stride=1)
 ```
 
-**loader.py** - PyTorch data loading
+**loader.py** – PyTorch data loading.
+
 ```python
-from data.loader import create_dataloaders
+from data.loader import create_dataloader
 
-train_loader, val_loader = create_dataloaders(data, config, split=0.8)
+train_loader = create_dataloader(X_train, y_train, batch_size=64, shuffle=True)
 ```
 
-**source/synthetic.py** - Synthetic data generation
+**source/synthetic.py** – Synthetic data generation.
+
 ```python
 from data.source.synthetic import SyntheticGenerator
 
-generator = SyntheticGenerator(num_entities=100, num_transactions=10000)
-data = generator.generate()
+gen = SyntheticGenerator(seed=42)
+
+# Transaction sequences (for risk/forecast/policy tasks)
+df = gen.generate_dataset(num_normal=800, num_anomalous=200, seq_len=100)
+
+# OHLCV series (for cascade task)
+ohlcv = gen.generate_ohlcv(n_bars=2000, start_date="2016-01-01")
 ```
 
-**source/crypto.py** - Cryptocurrency data
+**source/crypto.py** – Cryptocurrency data.
+
 ```python
-from data.source.crypto import load_crypto_prices
+from data.source.crypto import CryptoSource
 
-prices = load_crypto_prices(symbols=["BTC", "ETH"], start_date="2024-01-01")
+src = CryptoSource(pair="BTC/USD")
+df = src.load_from_csv("data/btc.csv")
 ```
 
-### models/ - Neural Networks
+**source/metaapi.py** – Live/historical forex data via MetaApi.
 
-#### Backbone Architectures
-
-**backbone/cnn.py** - 1D Convolutional Network
 ```python
-from models.backbone.cnn import CNN1D
+from data.source.metaapi import MetaApiSource
 
-backbone = CNN1D(
-    input_dim=12,
-    hidden_dim=128,
-    num_layers=3,
-    kernel_size=3
-)
+src = MetaApiSource(token="...", account_id="...", symbol="EURUSD")
+await src.connect()
+df = await src.get_history(bars=5000)
 ```
 
-**backbone/lstm.py** - Stacked LSTM
+### models/ – Neural Networks
+
+#### Backbone
+
+**backbone/cnn1d.py** – 1D Convolutional Network.
+
+```python
+from models.backbone.cnn1d import CNN1D
+
+cnn = CNN1D(input_size=32, hidden_size=256, kernel_size=3, num_layers=2)
+```
+
+**backbone/lstm.py** – Stacked LSTM.
+
 ```python
 from models.backbone.lstm import StackedLSTM
 
-backbone = StackedLSTM(
-    input_dim=12,
-    hidden_dim=128,
-    num_layers=2,
-    dropout=0.1
-)
+lstm = StackedLSTM(input_size=256, hidden_size=256, num_layers=2, dropout=0.1)
 ```
 
-**backbone/attention.py** - Additive Attention
+**backbone/attention.py** – Additive Attention.
+
 ```python
 from models.backbone.attention import AdditiveAttention
 
-attention = AdditiveAttention(hidden_dim=128)
+attn = AdditiveAttention(hidden_size=256)
 ```
 
-**backbone/dignity.py** - Combined Backbone
-```python
-from models.backbone.dignity import DignityBackbone
+**backbone/hybrid.py** – Combined Backbone (CNN → LSTM → Attention).
 
-# CNN + LSTM + Attention
+```python
+from models.backbone.hybrid import DignityBackbone
+
 backbone = DignityBackbone(
-    input_dim=12,
-    hidden_dim=128,
-    num_layers=2,
+    input_size=32,
+    hidden_size=256,
+    n_layers=2,
     dropout=0.1,
-    use_attention=True
 )
+# Returns: (context [B, H], attention_weights [B, T])
 ```
 
 #### Task Heads
 
-**head/risk.py** - Risk Classification
+**head/risk.py** – Dual-output risk head.
+
 ```python
 from models.head.risk import RiskHead
 
-head = RiskHead(
-    input_dim=128,
-    hidden_dim=64,
-    num_classes=3  # low, medium, high
-)
+head = RiskHead(input_size=256, hidden_size=128)
+# Returns: (var_estimate [B, 1], position_limit [B, 1])
 ```
 
-**head/forecast.py** - Sequence Forecasting
+**head/forecast.py** – Sequence forecasting.
+
 ```python
 from models.head.forecast import ForecastHead
 
-head = ForecastHead(
-    input_dim=128,
-    hidden_dim=128,
-    forecast_horizon=5  # Predict next 5 timesteps
-)
+head = ForecastHead(input_size=256, pred_len=5, num_features=3)
+# Returns: [B, pred_len, num_features]
 ```
 
-**head/policy.py** - Decision Policy
+**head/policy.py** – Actor-critic policy.
+
 ```python
 from models.head.policy import PolicyHead
 
-head = PolicyHead(
-    input_dim=128,
-    hidden_dim=64,
-    num_actions=4
-)
+head = PolicyHead(input_size=256, n_actions=3)
+# Returns: (action_logits [B, n_actions], value [B, 1])
+```
+
+**head/regime.py** – Regime classification.
+
+```python
+from models.head.regime import RegimeHead
+
+head = RegimeHead(input_size=256, n_regimes=4)
+# Returns: regime_probs [B, n_regimes] (softmax)
+```
+
+**head/alpha.py** – Alpha scoring.
+
+```python
+from models.head.alpha import AlphaHead
+
+head = AlphaHead(input_size=256)
+# Returns: alpha_score [B, 1] in [-1, 1] (tanh)
 ```
 
 #### Complete Model
 
-**dignity.py** - Model Assembly
-```python
-from models.dignity import create_dignity_model
+**dignity.py** – Model assembly.
 
-# Automatically combines backbone + head
-model = create_dignity_model(
-    config,
-    task="risk"  # or "forecast", "policy"
-)
+```python
+from models.dignity import Dignity
+
+# Single-head tasks
+model = Dignity(task="risk", input_size=32, hidden_size=256)
+model = Dignity(task="forecast", input_size=32, hidden_size=256)
+model = Dignity(task="policy", input_size=32, hidden_size=256)
+
+# Cascade: Regime → Risk → Alpha → Policy
+model = Dignity(task="cascade", input_size=32, hidden_size=256)
+outputs = model(x)  # dict with regime_probs, var_estimate, alpha_score, action_logits, value
 ```
 
-### train/ - Training
+### train/ – Training
 
-**engine.py** - Training loop
+**engine.py** – Training and validation loops.
+
 ```python
-from train.engine import train_epoch, validate_epoch
+from train.engine import train_epoch, validate_epoch, train_cascade_epoch
 
-train_loss = train_epoch(model, train_loader, optimizer, device)
-val_loss = validate_epoch(model, val_loader, device)
+# Single-head
+train_metrics = train_epoch(model, train_loader, optimizer, criterion, device)
+val_metrics = validate_epoch(model, val_loader, criterion, device)
+
+# Cascade (Guided Learning)
+train_metrics = train_cascade_epoch(model, train_loader, optimizer, task_weights, device=device)
 ```
 
-**cli.py** - Command-line interface
+**cli.py** – Command-line interface.
+
 ```bash
-python -m train.cli \
-    --config config/train_risk.yaml \
-    --epochs 50 \
-    --batch-size 32
+dignity-train --config config/train_risk.yaml
+dignity-train --config config/train_quant_paper.yaml --resume checkpoints/latest.pt
 ```
 
-### export/ - Deployment
+### export/ – Deployment
 
-**to_onnx.py** - ONNX export
+**to_onnx.py** – ONNX export.
+
+```bash
+python -m export.to_onnx \
+    --checkpoint checkpoints/dignity_risk_best.pt \
+    --output dignity_risk.onnx \
+    --benchmark
+```
+
 ```python
-from export.to_onnx import export_dignity_to_onnx
+from export.to_onnx import export_to_onnx, benchmark_onnx_inference
 
-export_dignity_to_onnx(
-    checkpoint_path="checkpoints/dignity_risk_best.pth",
-    output_path="dignity_risk.onnx"
-)
+export_to_onnx(model, "model.onnx", input_shape=(1, 100, 32))
+stats = benchmark_onnx_inference("model.onnx")
 ```
 
 ## Model Architecture Details
@@ -214,74 +268,85 @@ export_dignity_to_onnx(
 ### DignityBackbone
 
 ```
-Input: (batch, seq_len, input_dim)
+Input: (batch, seq_len, input_size)
     ↓
-Conv1D layers (temporal feature extraction)
+CNN1D (2 layers) → local temporal feature extraction
     ↓
-LSTM layers (sequence modeling)
+StackedLSTM (n_layers, unidirectional) → sequence modeling
     ↓
-Attention mechanism (focus on important timesteps)
+Dropout
     ↓
-Output: (batch, hidden_dim)
+AdditiveAttention → weighted context vector
+    ↓
+Output: context [batch, hidden_size], attention_weights [batch, seq_len]
 ```
-
-**Components:**
-1. **CNN1D** - Extract local temporal patterns
-2. **StackedLSTM** - Model long-range dependencies
-3. **AdditiveAttention** - Weight important timesteps
 
 ### Task Heads
 
 #### RiskHead
+
+Dual sigmoid outputs for regime-conditioned risk assessment:
+
 ```
-Input: (batch, hidden_dim)
+Input: [batch, input_size]
     ↓
-Dense layer 1 (hidden_dim → hidden_dim // 2)
-    ↓
-ReLU + Dropout
-    ↓
-Dense layer 2 (hidden_dim // 2 → num_classes)
-    ↓
-Softmax
-    ↓
-Output: (batch, num_classes)
+Linear → ReLU → Dropout → Linear → ReLU → Dropout (shared trunk)
+    ↓                           ↓
+Linear → Sigmoid            Linear → Sigmoid
+    ↓                           ↓
+var_estimate [B, 1]        position_limit [B, 1]
 ```
 
 #### ForecastHead
+
+Multi-step multi-feature forecasting:
+
 ```
-Input: (batch, hidden_dim)
+Input: [batch, input_size]
     ↓
-Dense layer 1 (hidden_dim → hidden_dim)
+Linear → ReLU → Dropout → Linear → ReLU → Dropout → Linear
     ↓
-ReLU + Dropout
-    ↓
-Dense layer 2 (hidden_dim → forecast_horizon)
-    ↓
-Output: (batch, forecast_horizon)
+Reshape to [batch, pred_len, num_features]
 ```
 
 #### PolicyHead
+
+Actor-critic architecture for RL:
+
 ```
-Input: (batch, hidden_dim)
+Input: [batch, input_size]
     ↓
-Dense layer 1 (hidden_dim → hidden_dim // 2)
-    ↓
-Tanh + Dropout
-    ↓
-Dense layer 2 (hidden_dim // 2 → num_actions)
-    ↓
-Softmax
-    ↓
-Output: (batch, num_actions)
+Linear → ReLU → Dropout (shared)
+    ↓               ↓
+Linear (actor)   Linear (critic)
+    ↓               ↓
+action_logits     value
+[B, n_actions]    [B, 1]
 ```
+
+#### Cascade Architecture
+
+```
+Backbone context [B, H]
+    ↓
+RegimeHead → regime_probs [B, 4]
+    ↓
+cat(context, regime_probs) → RiskHead → (var_estimate, position_limit)
+    ↓
+cat(context, regime_probs) → AlphaHead → alpha_score [B, 1]
+    ↓
+cat(context, alpha_score, var_estimate) → PolicyHead → (action_logits, value)
+```
+
+Each head receives the backbone context plus upstream outputs, so earlier predictions condition downstream decisions.
 
 ## Training Pipeline
 
 ```python
 from core.config import DignityConfig
 from data.pipeline import TransactionPipeline
-from data.loader import create_dataloaders
-from models.dignity import create_dignity_model
+from data.loader import create_dataloader
+from models.dignity import Dignity
 from train.engine import train_epoch, validate_epoch
 import torch
 
@@ -289,133 +354,47 @@ import torch
 config = DignityConfig.from_yaml("config/train_risk.yaml")
 
 # 2. Prepare data
-pipeline = TransactionPipeline(config)
-data = pipeline.load_and_process("transactions.csv")
+pipeline = TransactionPipeline(seq_len=config.data.seq_len, features=config.data.features)
+pipeline.fit(df_train)
+X_train = pipeline.transform(df_train)
+X_val = pipeline.transform(df_val)
 
-# 3. Create data loaders
-train_loader, val_loader = create_dataloaders(data, config, split=0.8)
+train_loader = create_dataloader(X_train, y_train, batch_size=config.data.batch_size)
+val_loader = create_dataloader(X_val, y_val, batch_size=config.data.batch_size)
 
-# 4. Create model
-model = create_dignity_model(config, task="risk")
-model = model.to(config.training.device)
+# 3. Create model
+model = Dignity(
+    task=config.model.task,
+    input_size=len(pipeline.available_features),
+    hidden_size=config.model.hidden_size,
+).to(config.device)
 
-# 5. Setup optimizer and loss
-optimizer = torch.optim.AdamW(
-    model.parameters(),
-    lr=config.training.learning_rate
-)
-criterion = torch.nn.CrossEntropyLoss()
+# 4. Setup optimizer and loss
+optimizer = torch.optim.AdamW(model.parameters(), lr=config.train.lr)
+criterion = torch.nn.BCELoss()
 
-# 6. Training loop
-for epoch in range(config.training.epochs):
-    train_loss = train_epoch(model, train_loader, optimizer, criterion, config.training.device)
-    val_loss = validate_epoch(model, val_loader, criterion, config.training.device)
-    
-    print(f"Epoch {epoch}: train_loss={train_loss:.4f}, val_loss={val_loss:.4f}")
-    
-    # Save best model
-    if val_loss < best_val_loss:
-        torch.save(model.state_dict(), "checkpoints/best_model.pth")
-        best_val_loss = val_loss
-```
-
-## Data Flow Example
-
-```python
-# 1. Raw transaction data
-raw_data = {
-    "user_id": ["alice", "bob", "charlie"],
-    "merchant_id": ["shop_1", "shop_2", "shop_1"],
-    "amount": [100.50, 250.75, 75.25],
-    "timestamp": ["2024-01-01 10:00", "2024-01-01 10:30", "2024-01-01 11:00"]
-}
-
-# 2. Apply privacy
-data = hash_identifiers(data, ["user_id", "merchant_id"])
-data = add_differential_privacy_noise(data, ["amount"], epsilon=1.0)
-
-# 3. Compute signals
-data = compute_volatility(data, window=20)
-data = compute_entropy(data, window=50, bins=10)
-data = detect_regime(data, method="volatility")
-
-# 4. Create sequences
-# Shape: (num_sequences, window_size, num_features)
-sequences = create_sequences(data, window_size=20, stride=1)
-
-# 5. Feed to model
-model_output = model(sequences)
-
-# 6. Compute loss and update
-loss = criterion(model_output, targets)
-loss.backward()
-optimizer.step()
-```
-
-## Customization Examples
-
-### Custom Backbone
-
-```python
-import torch.nn as nn
-
-class CustomBackbone(nn.Module):
-    def __init__(self, input_dim, hidden_dim):
-        super().__init__()
-        self.encoder = nn.Sequential(
-            nn.Linear(input_dim, hidden_dim),
-            nn.ReLU(),
-            nn.Linear(hidden_dim, hidden_dim)
-        )
-    
-    def forward(self, x):
-        # x: (batch, seq_len, input_dim)
-        # Average pool across sequence
-        pooled = x.mean(dim=1)  # (batch, input_dim)
-        return self.encoder(pooled)  # (batch, hidden_dim)
-```
-
-### Custom Task Head
-
-```python
-class CustomHead(nn.Module):
-    def __init__(self, input_dim, output_dim):
-        super().__init__()
-        self.head = nn.Sequential(
-            nn.Linear(input_dim, 128),
-            nn.ReLU(),
-            nn.Dropout(0.2),
-            nn.Linear(128, output_dim)
-        )
-    
-    def forward(self, x):
-        return self.head(x)
+# 5. Training loop
+for epoch in range(config.train.epochs):
+    train_metrics = train_epoch(model, train_loader, optimizer, criterion, config.device)
+    val_metrics = validate_epoch(model, val_loader, criterion, config.device)
+    print(f"Epoch {epoch}: train={train_metrics['loss']:.4f}, val={val_metrics['loss']:.4f}")
 ```
 
 ## Performance Considerations
 
 ### Memory Optimization
-- Use gradient checkpointing for large models
-- Enable AMP (automatic mixed precision)
-- Batch size tuning based on GPU memory
+- Enable AMP (`config.train.use_amp = True`)
+- Gradient clipping (`config.train.gradient_clip`)
+- Batch size tuning based on available memory
 
 ### Speed Optimization
 - DataLoader with `num_workers > 0`
 - Pin memory for GPU training
 - Compile model with `torch.compile()` (PyTorch 2.0+)
 
-### Distributed Training
-```python
-# Multi-GPU training
-model = nn.DataParallel(model)
-
-# Or with DistributedDataParallel
-model = nn.parallel.DistributedDataParallel(model)
-```
-
 ## Next Steps
 
-- **[Configuration Guide](CONFIGURATION.md)** - Configure architecture parameters
-- **[Training Guide](TRAINING.md)** - Train and evaluate models
-- **[API Reference](API_REFERENCE.md)** - Detailed API documentation
-- **[Deployment Guide](DEPLOYMENT.md)** - Export and deploy models
+- [Configuration Guide](CONFIGURATION.md) – Configure architecture parameters
+- [Quick Start Guide](QUICK_START.md) – Get running in 5 minutes
+- [Privacy Operations](PRIVACY.md) – Deep dive into privacy features
+- [Signal Processing](SIGNALS.md) – Understand the 32-feature signal set

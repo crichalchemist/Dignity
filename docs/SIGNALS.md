@@ -1,310 +1,229 @@
 # Signal Processing
 
-Dignity Core provides financial and statistical signal computation for transaction data.
+Dignity Core computes 32 financial and statistical features from OHLCV data via the `SignalProcessor` class in `core/signals.py`.
 
 ## Overview
 
-The `core.signals` module computes:
+`SignalProcessor` is a collection of static methods. All return `float64` arrays of the same length as the input. Warmup bars are filled with the first valid computed value rather than NaN.
 
-- **Volatility** - Rolling standard deviation and variance
-- **Entropy** - Information-theoretic measures of randomness
-- **Momentum** - Directional trend indicators
-- **Regime Detection** - Market state classification
+The full feature set is computed by `process_sequence()`, which returns an ordered dictionary of 32 features.
 
-## Volatility Signals
+## Asset Configuration
 
-### Rolling Volatility
+Different instrument classes need different signal parameters. `AssetConfig` calibrates thresholds per asset class:
 
 ```python
-from core.signals import compute_volatility
-import pandas as pd
+from core.signals import ASSET_CONFIGS
 
-df = pd.DataFrame({
-    "timestamp": pd.date_range("2024-01-01", periods=100, freq="h"),
-    "amount": np.random.randn(100).cumsum() + 100
-})
-
-# Compute rolling volatility
-volatility = compute_volatility(
-    df,
-    column="amount",
-    window=20,  # 20-period rolling window
-    method="std"  # Standard deviation
-)
-
-print(volatility["volatility"].head())
+forex_cfg = ASSET_CONFIGS["forex"]      # DC threshold: 0.0005
+crypto_cfg = ASSET_CONFIGS["crypto"]    # DC threshold: 0.005
+equity_cfg = ASSET_CONFIGS["equity"]    # DC threshold: 0.001
+commodity_cfg = ASSET_CONFIGS["commodity"]  # DC threshold: 0.002
 ```
 
-### Volatility Methods
+Pass an `AssetConfig` to `process_sequence()` to use the appropriate thresholds.
+
+## The 32 Features
+
+`SignalProcessor.process_sequence(volumes, prices, fees, high, low, tx_count, asset_config)` returns:
+
+### Raw Inputs (4)
+`volume`, `price`, `fee_rate`, `tx_count`
+
+### Technical Indicators (10)
+`rsi`, `macd_line`, `macd_signal`, `macd_hist`, `bollinger_pct_b`, `bollinger_width`, `atr`, `stoch_k`, `stoch_d`, `adx`
+
+### Volume Signals (3)
+`obv`, `vwap`, `order_flow_imbalance`
+
+### Rate of Change (2)
+`roc_5`, `roc_20`
+
+### Momentum (2)
+`momentum_10`, `momentum_20`
+
+### Volatility (3)
+`volatility_5`, `volatility_20`, `vol_ratio`
+
+### Directional Change (4)
+`dc_direction`, `dc_overshoot`, `bars_since_event`, `dc_bars_since_event`
+
+### Derived (2)
+`volume_volatility`, `volume_entropy`
+
+### Other (2)
+`price_change`, `directional_change`
+
+## Individual Indicators
+
+### RSI – Relative Strength Index
 
 ```python
-# Standard deviation (default)
-vol_std = compute_volatility(df, window=20, method="std")
+from core.signals import SignalProcessor
+import numpy as np
 
-# Variance
-vol_var = compute_volatility(df, window=20, method="variance")
-
-# Exponentially weighted
-vol_ewm = compute_volatility(
-    df, 
-    window=20, 
-    method="ewm",
-    alpha=0.1  # Decay factor
-)
+prices = np.array([100.0, 102.0, 98.0, 101.0, 99.0, 103.0, 105.0, 104.0])
+rsi = SignalProcessor.rsi(prices, period=14)
+# Returns: values in [0, 100]
 ```
 
-**Parameters:**
-- `window` - Rolling window size
-- `method` - Computation method: std, variance, ewm
-- `alpha` - EWM decay factor (0 < alpha < 1)
-
-## Entropy Signals
-
-### Transaction Entropy
+### MACD
 
 ```python
-from core.signals import compute_entropy
-
-# Shannon entropy of transaction amounts
-entropy = compute_entropy(
-    df,
-    column="amount",
-    window=50,
-    bins=10  # Discretize into 10 bins
-)
-
-print(f"Average entropy: {entropy['entropy'].mean():.3f}")
-```
-
-### Conditional Entropy
-
-```python
-# Entropy conditioned on time-of-day
-entropy = compute_entropy(
-    df,
-    column="amount",
-    window=50,
-    bins=10,
-    condition_column="hour_of_day"
+macd_line, signal_line, histogram = SignalProcessor.macd(
+    prices, fast=12, slow=26, signal_period=9
 )
 ```
 
-**Interpretation:**
-- **High entropy** - Uniform distribution, high uncertainty
-- **Low entropy** - Concentrated distribution, predictable patterns
+### Bollinger Bands
 
-## Momentum Signals
+```python
+pct_b, bandwidth = SignalProcessor.bollinger_bands(prices, window=20, n_std=2.0)
+# pct_b: where price sits within the band [0, 1]
+# bandwidth: width of the band
+```
+
+### ATR – Average True Range
+
+```python
+atr = SignalProcessor.atr(high, low, close, period=14)
+```
+
+### Stochastic Oscillator
+
+```python
+k, d = SignalProcessor.stochastic(high, low, close, k_period=14, d_period=3)
+# Both in [0, 100]
+```
+
+### ADX – Average Directional Index
+
+```python
+adx = SignalProcessor.adx(high, low, close, period=14)
+# Returns: values in [0, 100], measures trend strength
+```
+
+### OBV – On-Balance Volume
+
+```python
+obv = SignalProcessor.obv(close, volume)
+```
+
+### VWAP – Volume-Weighted Average Price
+
+```python
+vwap = SignalProcessor.vwap(high, low, close, volume)
+```
+
+### ROC – Rate of Change
+
+```python
+roc = SignalProcessor.roc(prices, period=5)
+# (price[t] - price[t-period]) / price[t-period]
+```
+
+### Realized Volatility
+
+```python
+vol = SignalProcessor.realized_volatility(prices, window=20)
+# Rolling std of log returns
+```
+
+### Volatility Ratio
+
+```python
+ratio = SignalProcessor.vol_ratio(prices, short_window=5, long_window=20)
+# Short-term vol / long-term vol
+```
+
+### Order Flow Imbalance
+
+```python
+ofi = SignalProcessor.order_flow_imbalance(close, volume)
+# Volume signed by price direction
+```
+
+### Directional Change State Machine
+
+```python
+dc = SignalProcessor.dc_state_machine(prices, threshold=0.005)
+# Returns dict: dc_direction, overshoot, bars_since_event
+```
+
+The DC state machine tracks intrinsic time: it emits an event when price moves by `threshold` from its last extreme point.
+
+## Original Signals
+
+These methods existed before the quant expansion and remain available:
+
+### Volatility
+
+```python
+vol = SignalProcessor.volatility(values, window=20)
+# Rolling standard deviation
+```
+
+### Entropy
+
+```python
+ent = SignalProcessor.entropy(values, bins=10)
+# Returns: scalar float (Shannon entropy, base 2)
+```
 
 ### Price Momentum
 
 ```python
-from core.signals import compute_momentum
-
-# Compute momentum over different horizons
-momentum = compute_momentum(
-    df,
-    column="amount",
-    periods=[5, 10, 20]  # Multiple time horizons
-)
-
-# Returns: momentum_5, momentum_10, momentum_20
+mom = SignalProcessor.price_momentum(prices, window=10)
+# Rate of change over window bars
 ```
 
-### Rate of Change
+### Directional Change
 
 ```python
-# Percentage change momentum
-momentum = compute_momentum(
-    df,
-    column="amount",
-    periods=[10],
-    method="pct_change"
-)
-
-# Absolute difference momentum
-momentum = compute_momentum(
-    df,
-    column="amount",
-    periods=[10],
-    method="diff"
-)
+dc = SignalProcessor.directional_change(prices, threshold=0.01)
+# Returns: 1 (up), -1 (down), 0 (none)
 ```
 
-## Regime Detection
-
-### Volatility Regime
+### Bars Since Significant Move
 
 ```python
-from core.signals import detect_regime
-
-# Classify into low/medium/high volatility regimes
-regimes = detect_regime(
-    df,
-    column="amount",
-    method="volatility",
-    window=20,
-    thresholds=[0.33, 0.67]  # Quantile thresholds
-)
-
-# Returns: 0 (low), 1 (medium), 2 (high)
-print(regimes["regime"].value_counts())
+bars = SignalProcessor.bars_since_significant_move(prices, vol_window=20)
+# Count of bars since last move exceeding vol_multiplier * rolling_std
 ```
 
-### Trend Regime
+### Regime Detection
 
 ```python
-# Classify as uptrend, sideways, downtrend
-regimes = detect_regime(
-    df,
-    column="amount",
-    method="trend",
-    window=20
-)
-
-# Returns: -1 (downtrend), 0 (sideways), 1 (uptrend)
+regime = SignalProcessor.regime_detection(volatility, vol_threshold=0.5)
+# Returns: 0 (calm), 1 (normal), 2 (turbulent)
 ```
 
-### Hidden Markov Model Regime
+## Full Pipeline Example
 
 ```python
-# HMM-based regime detection
-regimes = detect_regime(
-    df,
-    column="amount",
-    method="hmm",
-    num_states=3  # Number of hidden states
-)
-```
+from core.signals import SignalProcessor, ASSET_CONFIGS
+import numpy as np
 
-## Combined Signal Pipeline
+# Assume OHLCV arrays loaded
+prices = np.array([...])
+high = np.array([...])
+low = np.array([...])
+close = np.array([...])
+volumes = np.array([...])
+fees = np.full_like(prices, 0.0002)
 
-```python
-from core.signals import (
-    compute_volatility,
-    compute_entropy,
-    compute_momentum,
-    detect_regime
-)
-
-def compute_all_signals(df):
-    """Compute comprehensive signal suite"""
-    
-    # Volatility
-    df = compute_volatility(df, column="amount", window=20)
-    
-    # Entropy
-    df = compute_entropy(df, column="amount", window=50, bins=10)
-    
-    # Momentum (multiple horizons)
-    df = compute_momentum(df, column="amount", periods=[5, 10, 20])
-    
-    # Regime detection
-    df = detect_regime(df, column="amount", method="volatility")
-    
-    return df
-
-# Apply to data
-df_with_signals = compute_all_signals(df)
-print(df_with_signals.columns)
-# ['timestamp', 'amount', 'volatility', 'entropy', 
-#  'momentum_5', 'momentum_10', 'momentum_20', 'regime']
-```
-
-## Signal Normalization
-
-```python
-from core.signals import normalize_signals
-
-# Z-score normalization
-df_norm = normalize_signals(
-    df,
-    columns=["volatility", "entropy", "momentum_10"],
-    method="zscore"
+# Compute all 32 features
+signals = SignalProcessor.process_sequence(
+    volumes=volumes,
+    prices=close,
+    fees=fees,
+    high=high,
+    low=low,
+    asset_config=ASSET_CONFIGS["forex"],
 )
 
-# Min-max scaling
-df_norm = normalize_signals(
-    df,
-    columns=["volatility", "entropy"],
-    method="minmax",
-    feature_range=(0, 1)
-)
-
-# Robust scaling (median and IQR)
-df_norm = normalize_signals(
-    df,
-    columns=["volatility"],
-    method="robust"
-)
-```
-
-## Time-Based Features
-
-### Temporal Patterns
-
-```python
-from core.signals import extract_temporal_features
-
-# Extract hour, day-of-week, month
-df = extract_temporal_features(
-    df,
-    timestamp_column="timestamp",
-    features=["hour", "dayofweek", "month", "is_weekend"]
-)
-
-print(df[["timestamp", "hour", "dayofweek", "is_weekend"]].head())
-```
-
-### Cyclical Encoding
-
-```python
-# Encode cyclical features (hour, month) as sin/cos
-df = extract_temporal_features(
-    df,
-    timestamp_column="timestamp",
-    features=["hour", "month"],
-    cyclical=True
-)
-
-# Creates: hour_sin, hour_cos, month_sin, month_cos
-```
-
-## Cross-Sectional Signals
-
-### Entity-Relative Signals
-
-```python
-from core.signals import compute_cross_sectional_signals
-
-# Compute signals relative to peer group
-df = compute_cross_sectional_signals(
-    df,
-    group_column="entity_id",
-    value_column="amount",
-    signals=["rank", "percentile", "zscore"]
-)
-
-# rank: within-group rank
-# percentile: percentile within group
-# zscore: standardized relative to group
-```
-
-## Signal Quality Metrics
-
-```python
-from core.signals import compute_signal_quality
-
-quality = compute_signal_quality(
-    df,
-    signal_columns=["volatility", "momentum_10"],
-    target_column="future_return"
-)
-
-print(quality)
-# {
-#   'volatility': {'correlation': 0.32, 'information_ratio': 0.45},
-#   'momentum_10': {'correlation': 0.58, 'information_ratio': 0.71}
-# }
+# signals is an ordered dict with keys matching DataConfig.features
+print(list(signals.keys()))
 ```
 
 ## Integration with Data Pipeline
@@ -312,88 +231,29 @@ print(quality)
 ```python
 from data.pipeline import TransactionPipeline
 from core.config import DignityConfig
+from core.signals import ASSET_CONFIGS
 
 config = DignityConfig.from_yaml("config/base.yaml")
+pipeline = TransactionPipeline(seq_len=config.data.seq_len, features=config.data.features)
 
-# Configure signal computation
-config.signals = {
-    "compute_volatility": True,
-    "compute_entropy": True,
-    "compute_momentum": True,
-    "detect_regime": True,
-    "volatility_window": 20,
-    "entropy_bins": 10,
-    "momentum_periods": [5, 10, 20]
-}
+# compute_signals uses SignalProcessor.process_sequence internally
+df_with_signals = pipeline.compute_signals(df, asset_config=ASSET_CONFIGS["forex"])
 
-# Pipeline automatically computes signals
-pipeline = TransactionPipeline(config)
-data = pipeline.load_and_process("transactions.csv")
-
-# Signals are included in output
-print(data.columns)
-# Includes: volatility, entropy, momentum_5, momentum_10, momentum_20, regime
-```
-
-## Advanced: Custom Signals
-
-```python
-from core.signals import register_custom_signal
-
-@register_custom_signal
-def compute_custom_signal(df, column, window=20):
-    """Custom signal function"""
-    # Example: Kurtosis-based signal
-    from scipy.stats import kurtosis
-    
-    rolling_kurtosis = df[column].rolling(window).apply(
-        lambda x: kurtosis(x, fisher=True)
-    )
-    
-    df["custom_kurtosis"] = rolling_kurtosis
-    return df
-
-# Use in pipeline
-df = compute_custom_signal(df, column="amount", window=20)
-```
-
-## Performance Optimization
-
-```python
-# Vectorized computation for large datasets
-import numpy as np
-
-def fast_rolling_volatility(values, window):
-    """Optimized rolling volatility"""
-    n = len(values)
-    result = np.empty(n)
-    result[:window-1] = np.nan
-    
-    for i in range(window-1, n):
-        result[i] = np.std(values[i-window+1:i+1])
-    
-    return result
-
-df["volatility"] = fast_rolling_volatility(df["amount"].values, 20)
+# Fit scaler and transform
+pipeline.fit(df_with_signals)
+X_scaled = pipeline.transform(df_with_signals)
 ```
 
 ## Best Practices
 
-1. **Choose appropriate windows** - Balance responsiveness vs. stability
-2. **Normalize signals** - Use consistent scaling across features
-3. **Handle missing values** - Use forward-fill or interpolation
-4. **Validate signal quality** - Check correlation with targets
-5. **Avoid look-ahead bias** - Only use historical data
-6. **Document parameters** - Track window sizes, thresholds
-
-## References
-
-- Shannon, C. E. (1948). *A Mathematical Theory of Communication*
-- Mandelbrot, B. (1963). *The Variation of Certain Speculative Prices*
-- Rabiner, L. R. (1989). *A Tutorial on Hidden Markov Models*
+1. Use asset-specific configs – A DC threshold of 0.005 works for crypto but is too large for forex.
+2. Handle warmup bars – Early values use expanding windows; the first valid value fills warmup positions.
+3. Avoid look-ahead bias – Only use historical data when computing signals for training.
+4. Normalize features – The pipeline applies RobustScaler by default.
+5. Check feature count – The default feature list has 31 entries (the 32nd is `regime`, included separately by the pipeline).
 
 ## Next Steps
 
-- **[Privacy Operations](PRIVACY.md)** - Combine signals with privacy
-- **[Data Pipeline](API_REFERENCE.md#data)** - Integrate signals in pipeline
-- **[Configuration Guide](CONFIGURATION.md)** - Configure signal parameters
+- [Privacy Operations](PRIVACY.md) – Combine signals with privacy
+- [Configuration Guide](CONFIGURATION.md) – Configure signal parameters
+- [Architecture Overview](ARCHITECTURE.md) – Understand the full data flow

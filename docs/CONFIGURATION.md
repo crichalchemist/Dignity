@@ -1,140 +1,160 @@
 # Configuration Guide
 
-Dignity Core uses YAML configuration files for flexible model and training setup.
+Dignity Core uses YAML configuration files for model and training setup. The `DignityConfig` dataclass parses YAML into typed Python objects.
 
 ## Configuration Files
 
 Located in `config/`:
 
-- **base.yaml** - Base model and data configuration
-- **train_risk.yaml** - Risk modeling task
-- **train_forecast.yaml** - Forecasting task
-- **colab.yaml** - Google Colab-specific settings
+- **base.yaml** – Base model and data configuration
+- **train_risk.yaml** – Risk scoring task
+- **train_forecast.yaml** – Forecasting task
+- **train_quant_paper.yaml** – Paper trading cascade (default for development)
+- **train_quant.yaml** – Live execution (gated — see production path docs)
+- **colab.yaml** – Google Colab optimized settings
 
 ## Configuration Structure
 
-### Complete Example (config/base.yaml)
+`DignityConfig` nests four sub-configs:
 
-```yaml
-data:
-  window_size: 20              # Sequence length
-  feature_dim: 12              # Input features per timestep
-  num_entities: 1000           # Number of unique entities
-  stride: 1                    # Window stride for sampling
-  
-model:
-  backbone:
-    type: "dignity"            # Backbone architecture
-    hidden_dim: 128            # Hidden layer dimension
-    num_layers: 2              # LSTM layers
-    dropout: 0.1               # Dropout rate
-    attention: true            # Use attention mechanism
-    
-  head:
-    type: "risk"               # Task head type: risk, forecast, or policy
-    hidden_dim: 64             # Head-specific hidden dimension
-    num_classes: 3             # For classification tasks
-    
-privacy:
-  hash_ids: true               # Hash entity identifiers
-  quantize_amounts: true       # Quantize transaction amounts
-  num_bins: 20                 # Quantization bins
-  add_noise: false             # Differential privacy noise
-  epsilon: 1.0                 # Privacy budget (if noise enabled)
-  
-training:
-  batch_size: 32               # Training batch size
-  learning_rate: 0.001         # Initial learning rate
-  epochs: 50                   # Training epochs
-  val_split: 0.2               # Validation split fraction
-  seed: 42                     # Random seed
-  device: "cuda"               # Device: cuda, cpu, mps
-  amp: true                    # Automatic mixed precision
-  grad_clip: 1.0               # Gradient clipping threshold
-  
-signals:
-  compute_volatility: true     # Compute rolling volatility
-  compute_entropy: true        # Compute transaction entropy
-  compute_momentum: true       # Compute momentum signals
-  detect_regime: true          # Regime detection
-  volatility_window: 10        # Volatility computation window
-  entropy_bins: 5              # Entropy histogram bins
+```python
+@dataclass
+class DignityConfig:
+    model: ModelConfig       # Architecture parameters
+    data: DataConfig         # Data pipeline parameters
+    train: TrainConfig       # Training parameters
+    execution: ExecutionConfig  # Live/paper trading parameters
+    device: str = "cuda"
+    seed: int = 42
 ```
 
-## Key Parameters
+### ModelConfig
 
-### Data Configuration
+```python
+@dataclass
+class ModelConfig:
+    task: str = "risk"            # risk, forecast, policy, cascade
+    input_size: int = 32          # Number of input features
+    hidden_size: int = 256        # Backbone hidden dimension
+    n_layers: int = 2             # LSTM layers
+    dropout: float = 0.1          # Dropout rate
+    cnn_kernel_size: int = 3      # CNN kernel size
+    task_weights: dict = {        # Cascade head weights
+        "regime": 0.2,
+        "risk": 0.3,
+        "alpha": 0.3,
+        "policy": 0.2,
+    }
+```
 
-| Parameter | Type | Default | Description |
-|-----------|------|---------|-------------|
-| `window_size` | int | 20 | Sequence length for temporal modeling |
-| `feature_dim` | int | 12 | Number of input features |
-| `num_entities` | int | 1000 | Unique entities in dataset |
-| `stride` | int | 1 | Sampling stride for windows |
+### DataConfig
 
-### Model Architecture
+```python
+@dataclass
+class DataConfig:
+    source: str = "synthetic"     # synthetic, crypto, metaapi
+    seq_len: int = 100            # Sequence length for windowing
+    batch_size: int = 64          # Training batch size
+    test_size: float = 0.2        # Validation split fraction
+    num_workers: int = 4          # DataLoader workers
+    start_date: str = "2016-01-01"  # Historical data start
+    features: list = [...]        # 31 feature names (see below)
+```
 
-| Parameter | Type | Default | Description |
-|-----------|------|---------|-------------|
-| `backbone.type` | str | "dignity" | Backbone architecture |
-| `backbone.hidden_dim` | int | 128 | Hidden dimension |
-| `backbone.num_layers` | int | 2 | LSTM layers |
-| `backbone.dropout` | float | 0.1 | Dropout rate |
-| `backbone.attention` | bool | true | Enable attention |
-| `head.type` | str | "risk" | Task: risk, forecast, policy |
+Default feature list:
+```
+volume, price, fee_rate, tx_count, rsi, macd_line, macd_signal, macd_hist,
+bollinger_pct_b, bollinger_width, atr, stoch_k, stoch_d, adx, obv, vwap,
+roc_5, roc_20, momentum_10, momentum_20, volatility_5, volatility_20,
+vol_ratio, order_flow_imbalance, dc_direction, dc_overshoot,
+dc_bars_since_event, volume_volatility, volume_entropy, price_change,
+directional_change
+```
 
-### Privacy Settings
+### TrainConfig
 
-| Parameter | Type | Default | Description |
-|-----------|------|---------|-------------|
-| `hash_ids` | bool | true | Hash entity identifiers |
-| `quantize_amounts` | bool | true | Quantize amounts |
-| `num_bins` | int | 20 | Quantization bins |
-| `add_noise` | bool | false | Add DP noise |
-| `epsilon` | float | 1.0 | Privacy budget |
+```python
+@dataclass
+class TrainConfig:
+    epochs: int = 50
+    lr: float = 3e-4              # Learning rate
+    weight_decay: float = 1e-5
+    use_amp: bool = True          # Automatic mixed precision
+    gradient_clip: float = 1.0
+    checkpoint_dir: str = "./checkpoints"
+    log_interval: int = 10
+    save_interval: int = 5
+    risk_gate_training: bool = True  # Suppress actions when VaR exceeds max_drawdown
+```
 
-### Training Parameters
+### ExecutionConfig
 
-| Parameter | Type | Default | Description |
-|-----------|------|---------|-------------|
-| `batch_size` | int | 32 | Batch size |
-| `learning_rate` | float | 0.001 | Learning rate |
-| `epochs` | int | 50 | Training epochs |
-| `val_split` | float | 0.2 | Validation split |
-| `device` | str | "cuda" | Device: cuda/cpu/mps |
-| `amp` | bool | true | Mixed precision |
-| `grad_clip` | float | 1.0 | Gradient clipping |
+```python
+@dataclass
+class ExecutionConfig:
+    provider: str = "mock"        # metaapi or mock
+    metaapi_token: str = ""
+    account_id: str = ""
+    symbols: list = ["EURUSD"]
+    asset_class: str = "forex"    # forex, crypto, equity, commodity
+    max_drawdown: float = 0.05
+    max_position_size: float = 1.0
+    risk_sdk_enabled: bool = True
+    paper_trading: bool = True    # Must explicitly set False for live
+```
 
 ## Task-Specific Configurations
 
-### Risk Modeling (train_risk.yaml)
+### Risk Scoring (train_risk.yaml)
 
 ```yaml
 model:
-  head:
-    type: "risk"
-    hidden_dim: 64
-    num_classes: 3  # low, medium, high risk
-    
-training:
-  batch_size: 32
-  learning_rate: 0.001
+  task: "risk"
+  hidden_size: 256
+  n_layers: 2
+  dropout: 0.1
+
+data:
+  seq_len: 100
+  batch_size: 64
+
+train:
   epochs: 50
+  lr: 3e-4
 ```
 
 ### Forecasting (train_forecast.yaml)
 
 ```yaml
 model:
-  head:
-    type: "forecast"
-    hidden_dim: 128
-    forecast_horizon: 5  # Predict next 5 timesteps
-    
-training:
+  task: "forecast"
+  hidden_size: 256
+  n_layers: 2
+
+data:
+  seq_len: 100
   batch_size: 64
-  learning_rate: 0.0005
+
+train:
   epochs: 100
+  lr: 1e-4
+```
+
+### Cascade – Paper Trading (train_quant_paper.yaml)
+
+```yaml
+model:
+  task: "cascade"
+  hidden_size: 256
+  n_layers: 2
+
+data:
+  source: "synthetic"
+  seq_len: 100
+
+execution:
+  paper_trading: true
+  risk_sdk_enabled: false
 ```
 
 ## Using Configurations
@@ -148,60 +168,51 @@ from core.config import DignityConfig
 config = DignityConfig.from_yaml("config/train_risk.yaml")
 
 # Access parameters
-print(f"Hidden dim: {config.model.backbone.hidden_dim}")
-print(f"Batch size: {config.training.batch_size}")
+print(f"Task: {config.model.task}")
+print(f"Hidden size: {config.model.hidden_size}")
+print(f"Batch size: {config.data.batch_size}")
+print(f"Learning rate: {config.train.lr}")
 
-# Override specific values
-config.training.epochs = 100
-config.training.device = "cpu"
+# Override values
+config.train.epochs = 100
+config.device = "cpu"
 ```
 
 ### CLI Training
 
 ```bash
 # Use default config
-python -m train.cli --config config/train_risk.yaml
+dignity-train --config config/train_risk.yaml
 
-# Override parameters
-python -m train.cli \
-    --config config/train_risk.yaml \
-    --epochs 100 \
-    --batch-size 64 \
-    --learning-rate 0.0005
+# Resume from checkpoint
+dignity-train --config config/train_risk.yaml --resume checkpoints/latest.pt
 ```
+
+## Config Imports
+
+Configs support an `imports` key for inheriting from a base config:
+
+```yaml
+# train_risk.yaml
+imports:
+  - base.yaml
+
+model:
+  task: "risk"
+```
+
+The imported base config provides defaults; the importing file overrides specific keys.
 
 ## Best Practices
 
-1. **Start with base.yaml** - Use as template for new configurations
-2. **Task-specific configs** - Create separate configs for different tasks
-3. **Version control** - Track configuration changes in git
-4. **Document changes** - Add comments explaining non-standard parameters
-5. **Validate** - Test configurations with small epoch counts first
-
-## Advanced: Custom Configurations
-
-```python
-from core.config import DignityConfig
-
-# Create custom config programmatically
-config = DignityConfig(
-    data={"window_size": 30, "feature_dim": 15},
-    model={
-        "backbone": {
-            "hidden_dim": 256,
-            "num_layers": 3,
-            "dropout": 0.2
-        }
-    },
-    training={"batch_size": 64, "epochs": 200}
-)
-
-# Save to YAML
-config.to_yaml("config/custom.yaml")
-```
+1. Start with base.yaml – Use it as a template for new configurations.
+2. Separate configs per task – Risk, forecast, policy, and cascade each need different hyperparameters.
+3. Version control configs – Track changes in git alongside code.
+4. Validate first – Test with small epoch counts before full training runs.
+5. Keep credentials out of YAML – Use environment variables for API tokens.
 
 ## Next Steps
 
-- **[Training Guide](TRAINING.md)** - Use configurations in training
-- **[Architecture Overview](ARCHITECTURE.md)** - Understand model components
-- **[API Reference](API_REFERENCE.md)** - Full API details
+- [Quick Start Guide](QUICK_START.md) – Use configurations for first training run
+- [Architecture Overview](ARCHITECTURE.md) – Understand model components
+- [Privacy Operations](PRIVACY.md) – Configure privacy settings

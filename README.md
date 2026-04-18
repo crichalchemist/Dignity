@@ -1,8 +1,8 @@
 # Dignity Core – Privacy-Preserving Sequence Modeling for Transactional Behavior
 
-[![PyTorch](https://img.shields.io/badge/PyTorch-2.2+-ee4c2c.svg)](https://pytorch.org/)
+[![PyTorch](https://img.shields.io/badge/PyTorch-2.1+-ee4c2c.svg)](https://pytorch.org/)
 [![Python](https://img.shields.io/badge/Python-3.10+-blue.svg)](https://python.org/)
-[![Tests](https://img.shields.io/badge/tests-31%20passing-brightgreen.svg)]()
+[![Tests](https://img.shields.io/badge/tests-324%20passing-brightgreen.svg)]()
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
 **Dignity** is a privacy-preserving deep learning framework for modeling transactional behavior patterns. It provides modular components for signal processing, data pipelines, and neural architectures with built-in privacy safeguards including differential privacy and secure data handling.
@@ -11,25 +11,25 @@
 
 Dignity Core implements privacy-first sequence modeling:
 
-- **Privacy-Preserving**: Built-in hashing, anonymization, quantization, and differential privacy operations
-- **Signal Processing**: Volatility, entropy, momentum, and regime detection utilities
+- **Privacy-Preserving**: Built-in hashing, anonymization, quantization, and differential privacy via `PrivacyManager`
+- **Signal Processing**: 32 quant finance features — RSI, MACD, Bollinger Bands, ATR, stochastic, ADX, OBV, VWAP, volatility, momentum, regime detection, and more
 - **Modular Architecture**: Clean separation between data pipeline, model components, and training infrastructure
 - **Deployable**: ONNX export with verification and benchmarking for production inference
-- **Task-Agnostic**: Configurable for risk scoring, forecasting, or policy learning (RL)
-- **Lightweight**: Focused, production-ready codebase
+- **Multi-Task**: Configurable for risk scoring, forecasting, policy learning, or hierarchical cascade
+- **Lightweight**: ~8,000 lines of focused, production-ready Python
 
 ## Key Features
 
-- ✅ **Privacy-First**: Hashing, anonymization, quantization, differential privacy for sensitive transaction data
-- ✅ **Signal Processing**: Volatility, entropy, momentum, directional change, and regime detection
-- ✅ **Modular Design**: Core utilities, data pipeline, model components cleanly separated
-- ✅ **Flexible Architecture**: CNN1D + LSTM + Attention backbone with task-specific heads
-- ✅ **Multi-Task Ready**: Risk scoring, forecasting, or policy learning (RL) via configurable heads
-- ✅ **Production Export**: ONNX conversion with verification and inference benchmarking
-- ✅ **Synthetic Data**: Built-in generator for testing and prototyping
-- ✅ **Training Infrastructure**: AMP support, gradient clipping, checkpointing, CLI interface
-- ✅ **Comprehensive Tests**: 31 tests covering core utilities, data pipeline, and model components
-- ✅ **YAML Configuration**: Declarative configs for different tasks and environments
+- **Privacy-First**: SHA-256 hashing, address anonymization, k-anonymity quantization, Laplace differential privacy
+- **32 Signal Features**: Full OHLCV-derived feature set for quant finance (RSI, MACD, Bollinger %B, ATR, stochastic, ADX, OBV, VWAP, realized volatility, DC state machine, and more)
+- **Modular Design**: Core utilities, data pipeline, and model components are cleanly separated
+- **Hybrid Backbone**: CNN1D + StackedLSTM + AdditiveAttention with composable task heads
+- **4 Task Types**: Risk scoring, forecasting, policy learning (RL), and hierarchical cascade (Regime → Risk → Alpha → Policy)
+- **ONNX Export**: Conversion with verification and inference benchmarking
+- **Synthetic Data**: Built-in generators for testing and prototyping
+- **Training Infrastructure**: AMP support, gradient clipping, cosine scheduling, checkpointing, CLI interface
+- **324 Tests**: Comprehensive test suite across core utilities, data pipeline, models, training, export, and backtest
+- **YAML Configuration**: Declarative configs for different tasks and environments
 
 ## Quick Start
 
@@ -47,7 +47,7 @@ conda activate dignity
 # Install dependencies
 pip install -r requirements.txt
 
-# Or install package
+# Or install package (provides dignity-train, dignity-export, dignity-backtest)
 pip install -e .
 ```
 
@@ -63,11 +63,10 @@ gen = SyntheticGenerator(seed=42)
 dataset = gen.generate_dataset(
     num_normal=800,
     num_anomalous=200,
-    seq_length=1000
+    seq_len=100
 )
 
-print(f"Generated {len(dataset)} sequences")
-# Output: Generated 1000 sequences
+print(f"Generated {len(dataset)} rows")
 ```
 
 #### Privacy Operations
@@ -76,33 +75,35 @@ print(f"Generated {len(dataset)} sequences")
 from core.privacy import PrivacyManager
 import numpy as np
 
-# Initialize privacy manager
-pm = PrivacyManager(hash_salt="secure_salt_key")
-
 # Hash transaction identifiers
-tx_id = "0x1234abcd5678ef90"
-hashed = pm.hash_identifier(tx_id)
+hashed = PrivacyManager.hash_identifier("0x1234abcd5678ef90", salt="secure_salt")
 
 # Anonymize addresses
 addresses = ["0xabc123", "0xdef456", "0xghi789"]
-anonymized = pm.anonymize_addresses(addresses)
+anonymized = PrivacyManager.anonymize_addresses(addresses, salt="secure_salt")
 
-# Quantize amounts (reduce precision)
+# Quantize amounts (k-anonymity via binning)
 amounts = np.array([123.456, 789.012, 456.789])
-quantized = pm.quantize_amounts(amounts, precision=2)
+quantized = PrivacyManager.quantize_amounts(amounts, bins=10)
 
 # Add differential privacy noise
-noisy_amounts = pm.add_noise(amounts, epsilon=1.0)
+noisy = PrivacyManager.add_noise(amounts, epsilon=1.0, sensitivity=1.0)
+
+# Full sanitization pipeline
+result = PrivacyManager.sanitize_dataset(amounts, addresses, epsilon=0.1)
 ```
 
 #### Train a Model
 
 ```bash
-# Train risk model with default config
+# Train risk model
 dignity-train --config config/train_risk.yaml
 
 # Train forecasting model
 dignity-train --config config/train_forecast.yaml
+
+# Train cascade model (Regime → Risk → Alpha → Policy)
+dignity-train --config config/train_quant_paper.yaml
 
 # Train on Colab with optimized settings
 dignity-train --config config/colab.yaml
@@ -123,43 +124,46 @@ python -m export.to_onnx \
 ### Data Pipeline Flow
 
 ```
-Transaction Data Sources
+Data Sources
 ├── Synthetic Generator (testing/prototyping)
-├── Cryptocurrency APIs (BTC, ETH, SOL via data/source/crypto.py)
+├── Cryptocurrency APIs (CryptoSource, MetaApiSource)
 └── Custom Sources (via data/source/ extensibility)
                     ↓
 Privacy Operations (core/privacy.py)
-├── Hash transaction IDs
+├── Hash transaction IDs (SHA-256)
 ├── Anonymize addresses
-├── Quantize amounts
-└── Add differential privacy noise
+├── Quantize amounts (k-anonymity)
+└── Add differential privacy noise (Laplace)
                     ↓
 Signal Processing (core/signals.py)
-├── Volatility (rolling std)
-├── Entropy (Shannon entropy)
-├── Price momentum
-├── Directional change events
+├── 32 OHLCV-derived features
+├── Technical indicators: RSI, MACD, Bollinger, ATR, Stochastic, ADX
+├── Volume signals: OBV, VWAP, order flow imbalance
+├── Volatility: realized vol, vol ratio
+├── Momentum: ROC, price momentum
+├── DC state machine: directional change, overshoot, bars since event
 └── Regime detection (volatility clustering)
                     ↓
 Data Pipeline (data/pipeline.py)
-├── Signal computation
+├── Signal computation (SignalProcessor.process_sequence)
 ├── Feature scaling (RobustScaler)
 ├── Sequence windowing
-└── PyTorch Dataset/DataLoader
+└── PyTorch DataLoader
                     ↓
 Model Architecture (models/)
-├── Backbone: CNN1D + LSTM + Attention
-├── Task Heads: Risk | Forecast | Policy
-└── ~350K parameters (default config)
+├── Backbone: CNN1D → StackedLSTM → AdditiveAttention
+├── Task Heads: Risk | Forecast | Policy | Cascade
+└── ~500K+ parameters (default config)
                     ↓
 Training (train/engine.py + train/cli.py)
 ├── Mixed precision (AMP)
 ├── Gradient clipping
+├── Cosine LR scheduling
 ├── Checkpointing
-└── Validation loops
+└── Guided Learning (cascade)
                     ↓
 Export & Deploy (export/to_onnx.py)
-├── ONNX conversion
+├── ONNX conversion (with cascade wrapper)
 ├── Model verification
 └── Inference benchmarking
 ```
@@ -169,103 +173,123 @@ Export & Deploy (export/to_onnx.py)
 The core model implements a modular hybrid architecture:
 
 **Backbone** (`models/backbone/hybrid.py`):
-1. **CNN1D**: Multi-scale 1D convolution for local pattern extraction (~80 lines)
-2. **StackedLSTM**: Bidirectional LSTM for temporal dependencies (~100 lines)
-3. **AdditiveAttention**: Attention mechanism for feature weighting (~60 lines)
+1. **CNN1D**: 2-layer 1D convolution for local pattern extraction
+2. **StackedLSTM**: Unidirectional LSTM for temporal dependencies
+3. **AdditiveAttention**: Attention mechanism for feature weighting
 
 **Task Heads** (`models/head/`):
-- **RiskHead**: Binary risk scoring (0-1 probability)
-- **ForecastHead**: Multi-step time series forecasting
-- **PolicyHead**: RL policy outputs (actions + value estimate)
+- **RiskHead**: Dual sigmoid outputs — VaR estimate and position limit
+- **ForecastHead**: Multi-step time series forecasting (configurable features and horizon)
+- **PolicyHead**: RL actor-critic — action logits and value estimate
+- **RegimeHead**: Market regime classification (calm, trending, volatile, crisis)
+- **AlphaHead**: Risk-adjusted return prediction (tanh-bounded score)
 
 **Main Model** (`models/dignity.py`):
 - Composable: `Dignity(task='risk')` assembles backbone + appropriate head
-- Compact: ~350K parameters vs. 800+ line monolithic implementations
-- Flexible: Easy to swap heads or modify backbone components
+- Cascade mode: `Dignity(task='cascade')` chains Regime → Risk → Alpha → Policy heads
+- 4 tasks: `risk`, `forecast`, `policy`, `cascade`
+- `cascade_loss()` implements Guided Learning — auxiliary supervision at every head
 
 ### Privacy Operations
 
-Built-in privacy-preserving utilities in `core/privacy.py`:
+The `PrivacyManager` class in `core/privacy.py` provides:
 
-- **Hashing**: Secure transaction ID hashing with configurable salt
-- **Anonymization**: Address anonymization with collision detection
-- **Quantization**: Reduce amount precision to obscure exact values
-- **Differential Privacy**: Laplace noise injection with configurable epsilon
+- **Hashing**: `hash_identifier()` — SHA-256 with configurable salt
+- **Anonymization**: `anonymize_addresses()` — batch hash addresses
+- **Quantization**: `quantize_amounts()` — k-anonymity via binning
+- **Differential Privacy**: `add_noise()` — Laplace noise with configurable epsilon
+- **Rare Event Suppression**: `suppress_rare_events()` — k-threshold filtering
+- **Full Pipeline**: `sanitize_dataset()` — chains quantization, noise, and anonymization
 
 ### Signal Processing
 
-Specialized transaction sequence signals in `core/signals.py`:
+`SignalProcessor` in `core/signals.py` computes 32 features from OHLCV data:
 
-- **Volatility**: Rolling standard deviation with configurable windows
-- **Entropy**: Shannon entropy for measuring transaction pattern complexity
-- **Momentum**: Price momentum calculation
-- **Directional Change**: Event-based change detection (threshold-based)
-- **Regime Detection**: Volatility clustering for market state identification
+**Technical Indicators**: RSI, MACD (line/signal/histogram), Bollinger Bands (%B and width), ATR, Stochastic (%K/%D), ADX
+
+**Volume Signals**: OBV, VWAP, order flow imbalance
+
+**Volatility**: Realized volatility (5/20-bar), volatility ratio
+
+**Momentum**: ROC (5/20-bar), price momentum (10/20-bar)
+
+**Directional Change**: DC state machine with overshoot and bars-since-event tracking
+
+**Regime Detection**: Volatility-based classification into calm/normal/turbulent
+
+**Asset-Aware**: `AssetConfig` calibrates thresholds per instrument class (forex, crypto, equity, commodity)
 
 ## Repository Structure
 
 ```
 Dignity/
 ├── __init__.py               # Package root (v0.1.0)
-├── setup.py                  # Installation config
+├── setup.py                  # Installation config (console scripts: dignity-train, dignity-export, dignity-backtest)
 ├── requirements.txt          # Dependencies
 ├── pytest.ini                # Test configuration
-├── pyproject.toml            # Build system config
+├── pyproject.toml            # Ruff config
 │
-├── core/                     # Core utilities (3 modules)
+├── core/                     # Core utilities
 │   ├── config.py            # YAML-based configuration (DignityConfig)
-│   ├── signals.py           # Signal processing (volatility, entropy, momentum, regime)
-│   └── privacy.py           # Privacy operations (hashing, anonymization, noise)
+│   ├── signals.py           # 32-feature signal processor (SignalProcessor)
+│   └── privacy.py           # Privacy operations (PrivacyManager)
 │
-├── data/                     # Data pipeline (4 modules)
-│   ├── pipeline.py          # Preprocessing pipeline (signals, scaling, windowing)
-│   ├── loader.py            # PyTorch Dataset and DataLoader utilities
+├── data/                     # Data pipeline
+│   ├── pipeline.py          # TransactionPipeline (signals, scaling, windowing)
+│   ├── loader.py            # PyTorch Dataset and DataLoader
 │   └── source/
-│       ├── synthetic.py     # Synthetic transaction generator
-│       └── crypto.py        # Cryptocurrency data source
+│       ├── synthetic.py     # SyntheticGenerator (OHLCV + transaction data)
+│       ├── crypto.py        # CryptoSource (CSV and exchange data)
+│       └── metaapi.py       # MetaApiSource (live/historical forex data)
 │
-├── models/                   # Neural architectures (9 modules)
-│   ├── dignity.py           # Main model assembly (Backbone + Head)
+├── models/                   # Neural architectures
+│   ├── dignity.py           # Main model (Dignity class, cascade loss)
 │   ├── backbone/
-│   │   ├── cnn1d.py        # 1D-CNN for local patterns (~80 lines)
-│   │   ├── lstm.py         # Stacked LSTM for temporal modeling (~100 lines)
-│   │   ├── attention.py    # Additive attention mechanism (~60 lines)
-│   │   └── hybrid.py       # DignityBackbone (CNN+LSTM+Attention, ~90 lines)
+│   │   ├── cnn1d.py        # 1D-CNN for local patterns
+│   │   ├── lstm.py         # Stacked LSTM for temporal modeling
+│   │   ├── attention.py    # Additive attention mechanism
+│   │   └── hybrid.py       # DignityBackbone (CNN→LSTM→Attention)
 │   └── head/
-│       ├── risk.py         # Binary risk scoring head
+│       ├── risk.py         # Dual-output risk head (VaR + position limit)
 │       ├── forecast.py     # Multi-step forecasting head
-│       └── policy.py       # RL policy head (A3C/PPO)
+│       ├── policy.py       # Actor-critic policy head
+│       ├── regime.py       # Market regime classification head
+│       └── alpha.py        # Alpha scoring head
 │
-├── train/                    # Training infrastructure (2 modules)
+├── train/                    # Training infrastructure
 │   ├── engine.py            # Training/validation loops with AMP
-│   └── cli.py               # CLI interface (dignity-train)
+│   └── cli.py               # CLI entry point (dignity-train)
 │
-├── export/                   # Deployment (1 module)
-│   └── to_onnx.py           # ONNX export with verification
+├── export/                   # Deployment
+│   └── to_onnx.py           # ONNX export with verification and benchmarking
 │
-├── config/                   # YAML configurations (4 files)
+├── backtest/                 # Backtesting framework
+│
+├── config/                   # YAML configurations (6 files)
 │   ├── base.yaml            # Default configuration template
-│   ├── train_risk.yaml      # Risk scoring optimized
-│   ├── train_forecast.yaml  # Forecasting optimized
+│   ├── train_risk.yaml      # Risk scoring
+│   ├── train_forecast.yaml  # Forecasting
+│   ├── train_quant_paper.yaml  # Paper trading (cascade)
+│   ├── train_quant.yaml     # Live execution (gated)
 │   └── colab.yaml           # Google Colab optimized
 │
-├── tests/                    # Test suite (31 tests)
+├── tests/                    # Test suite (324 tests)
 │   ├── conftest.py          # Pytest fixtures
-│   ├── test_core.py         # Core utilities (11 tests)
-│   ├── test_data.py         # Data pipeline (9 tests)
-│   └── test_models.py       # Model components (11 tests)
+│   ├── test_core.py         # Core utilities
+│   ├── test_data.py         # Data pipeline
+│   ├── test_models.py       # Model components
+│   ├── test_train.py        # Training
+│   ├── test_export.py       # ONNX export
+│   └── test_backtest.py     # Backtesting
 │
 └── docs/                     # Documentation
-    ├── plans/               # Refactoring plans and summaries
-    ├── guides/              # User guides
-    └── api/                 # API reference
 ```
 
 **Package Stats:**
-- 28 Python modules (~2,800 lines of code)
-- 31 passing tests (100% coverage on critical paths)
-- 4 YAML configs for different tasks
-- ~350K parameters (default model)
+- 48 Python modules (~8,000 lines of code)
+- 324 tests across 6 test files
+- 6 YAML configs for different tasks and environments
+- 32 input features per timestep (default config)
 
 ## Advanced Usage
 
@@ -275,21 +299,27 @@ Dignity/
 from core.signals import SignalProcessor
 import numpy as np
 
-# Calculate volatility
-prices = np.array([100, 102, 98, 101, 99, 103])
+prices = np.array([100.0, 102.0, 98.0, 101.0, 99.0, 103.0])
+volumes = np.array([1000.0, 1200.0, 800.0, 1100.0, 900.0, 1300.0])
+
+# Technical indicators
+rsi = SignalProcessor.rsi(prices, period=14)
+macd_line, macd_signal, macd_hist = SignalProcessor.macd(prices)
+pct_b, bandwidth = SignalProcessor.bollinger_bands(prices, window=20)
+
+# Volatility and momentum
 vol = SignalProcessor.volatility(prices, window=3)
-
-# Compute entropy (market uncertainty)
-entropy = SignalProcessor.entropy(prices)
-
-# Detect price momentum
 momentum = SignalProcessor.price_momentum(prices, window=2)
+realized_vol = SignalProcessor.realized_volatility(prices, window=20)
 
-# Identify directional changes
-dc = SignalProcessor.directional_change(prices, threshold=0.015)
+# Directional change state machine
+dc = SignalProcessor.dc_state_machine(prices, threshold=0.005)
 
-# Regime detection (high/low volatility clustering)
-regime = SignalProcessor.regime_detection(prices, vol_window=10, threshold=1.5)
+# Regime detection
+regime = SignalProcessor.regime_detection(vol)
+
+# Full 32-feature computation
+signals = SignalProcessor.process_sequence(volumes, prices)
 ```
 
 ### Configuration Management
@@ -298,17 +328,17 @@ regime = SignalProcessor.regime_detection(prices, vol_window=10, threshold=1.5)
 from core.config import DignityConfig
 
 # Load config from YAML
-config = DignityConfig.from_yaml('config/train_risk.yaml')
+config = DignityConfig.from_yaml("config/train_risk.yaml")
 
 # Access nested configs
-print(f"Model task: {config.model.task}")
+print(f"Task: {config.model.task}")
 print(f"Hidden size: {config.model.hidden_size}")
 print(f"Batch size: {config.data.batch_size}")
 print(f"Learning rate: {config.train.lr}")
 
 # Save modified config
 config.train.epochs = 100
-config.to_yaml('config/custom_config.yaml')
+config.to_yaml("config/custom_config.yaml")
 ```
 
 ### Custom Data Source
@@ -320,7 +350,6 @@ import pandas as pd
 # Implement custom data source
 class CustomSource:
     def load_data(self, symbol: str, start_date: str, end_date: str) -> pd.DataFrame:
-        # Your custom logic here
         # Must return DataFrame with columns: timestamp, open, high, low, close, volume
         pass
 ```
@@ -333,20 +362,20 @@ import torch
 
 # Create model with custom config
 model = Dignity(
-    task='risk',
-    input_size=9,      # Number of features
-    hidden_size=256,   # Backbone hidden dimension
-    seq_len=100,       # Sequence length
+    task="risk",
+    input_size=32,      # Number of features
+    hidden_size=256,    # Backbone hidden dimension
+    n_layers=2,         # LSTM layers
     dropout=0.3
 )
 
 # Forward pass
-x = torch.randn(4, 100, 9)  # [batch, seq_len, features]
-output, attention = model(x)
+x = torch.randn(4, 100, 32)  # [batch, seq_len, features]
+predictions, attention_weights = model(x)
 
-# Access components
-backbone = model.backbone
-task_head = model.head
+# Cascade mode returns a dict
+cascade_model = Dignity(task="cascade", input_size=32)
+outputs = cascade_model(x)  # dict with regime_probs, var_estimate, alpha_score, etc.
 ```
 
 ### Running Tests
@@ -368,17 +397,17 @@ pytest tests/ --cov=. --cov-report=html
 
 **Dignity** is built on three principles:
 
-1. **Minimal**: ~2,800 lines vs. bloated research code. Every module has a single purpose.
+1. **Minimal**: ~8,000 lines of focused code. Every module has a single purpose.
 2. **Deniable**: Privacy-preserving operations baked in. Transaction hashing, anonymization, noise injection.
-3. **Deployable**: ONNX export, <10ms inference, production-ready from day one.
+3. **Deployable**: ONNX export, production-ready from day one.
 
 You are not refactoring code. You are **distilling intent**.
 
 ## Contributing
 
-Contributions are welcome! Please:
+Contributions are welcome. Please:
 - Run tests before submitting: `pytest tests/ -v`
-- Follow existing code style (ruff format)
+- Follow existing code style: `ruff format .` and `ruff check .`
 - Add tests for new features
 - Update docs accordingly
 

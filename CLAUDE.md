@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What This Is
 
-Dignity Core is a privacy-preserving deep learning framework for modeling transactional behavior patterns. Refactored from the Sequence research prototype into ~2,800 lines of focused, deployable code. Python 3.10+, PyTorch 2.1+.
+Dignity Core is a privacy-preserving deep learning framework for modeling transactional behavior patterns. Refactored from the Sequence research prototype into ~8,000 lines of focused, deployable code. Python 3.10+, PyTorch 2.1+.
 
 ## Commands
 
@@ -14,7 +14,7 @@ pip install -e .              # editable install
 pip install -e ".[dev]"       # with dev dependencies (pytest, ruff)
 
 # Test
-pytest tests/ -v              # all 31 tests
+pytest tests/ -v              # all 324 tests (6 test files)
 pytest tests/test_core.py -v  # core utilities only
 pytest tests/test_data.py -v  # data pipeline only
 pytest tests/test_models.py -v # model components only
@@ -52,18 +52,20 @@ Data Sources → Privacy (core/privacy.py) → Signals (core/signals.py)
 ### Key design decisions
 
 - **Backbone is a fixed composition**: `DignityBackbone` in `models/backbone/hybrid.py` always composes CNN1D → StackedLSTM → AdditiveAttention. The individual components are separate modules but the assembly order is not configurable — it's intentional, not a limitation.
-- **Task heads are swappable**: The `Dignity` model in `models/dignity.py` selects a head (risk/forecast/policy) based on `task` config. Adding a new task means adding a new head module and a branch in `Dignity.__init__`.
-- **Privacy is a preprocessing concern**: Privacy operations (hashing, anonymization, DP noise) happen before model training, not inside the model. `core/privacy.py` operates on raw data; the model never sees un-sanitized inputs.
-- **Signals are computed features**: `core/signals.py` transforms raw price/volume data into derived features (volatility, entropy, momentum, regime). These are computed by `TransactionPipeline` before sequence windowing.
-- **Configuration is YAML-declarative**: `DignityConfig` in `core/config.py` nests `ModelConfig`, `DataConfig`, and `TrainConfig` dataclasses. All four YAML presets in `config/` are valid starting points.
+- **Task heads are swappable**: The `Dignity` model in `models/dignity.py` selects a head based on `task` config (`risk`/`forecast`/`policy`/`cascade`). Adding a new task means adding a new head module and a branch in `Dignity.__init__`.
+- **Privacy is a preprocessing concern**: Privacy operations (hashing, anonymization, DP noise) happen before model training, not inside the model. `core/privacy.py` operates on raw data via the `PrivacyManager` class; the model never sees un-sanitized inputs.
+- **Signals are computed features**: `core/signals.py` provides `SignalProcessor` with 32 OHLCV-derived features (RSI, MACD, Bollinger, ATR, stochastic, ADX, OBV, VWAP, volatility, momentum, DC state machine, regime). These are computed by `TransactionPipeline` before sequence windowing.
+- **Configuration is YAML-declarative**: `DignityConfig` in `core/config.py` nests `ModelConfig`, `DataConfig`, `TrainConfig`, and `ExecutionConfig` dataclasses. All six YAML presets in `config/` are valid starting points.
+- **Cascade uses Guided Learning**: The `cascade` task chains Regime → Risk → Alpha → Policy heads. `cascade_loss()` applies auxiliary supervision at each head to prevent vanishing gradients.
 
 ### Tensor shapes
 
-Standard input: `[batch, seq_len, features]` = `[B, 100, 9]` by default.
-- Backbone outputs: `(context_vector [B, hidden*2], attention_weights [B, seq_len])`
-- RiskHead: `[B, 1]` sigmoid probability
-- ForecastHead: `[B, forecast_steps]`
-- PolicyHead: `(action_probs [B, n_actions], value [B, 1])`
+Standard input: `[batch, seq_len, features]` = `[B, 100, 32]` by default.
+- Backbone outputs: `(context_vector [B, hidden], attention_weights [B, seq_len])` (unidirectional LSTM)
+- RiskHead: `(var_estimate [B, 1], position_limit [B, 1])` — dual sigmoid
+- ForecastHead: `[B, pred_len, num_features]`
+- PolicyHead: `(action_logits [B, n_actions], value [B, 1])`
+- Cascade: dict with `regime_probs`, `var_estimate`, `position_limit`, `alpha_score`, `action_logits`, `value`, `attention_weights`
 
 ## Code Conventions
 
@@ -77,20 +79,19 @@ Standard input: `[batch, seq_len, features]` = `[B, 100, 9]` by default.
 ## Testing
 
 - `pytest.ini` sets `pythonpath = . run` — imports work from project root.
-- Fixtures in `tests/conftest.py`: `device`, `sample_sequence` ([4,100,9]), `sample_labels` ([4]), and auto-seeding (torch+numpy seed 42).
+- Fixtures in `tests/conftest.py`: `device`, `sample_sequence` ([4,100,32]), `sample_labels` ([4]), and auto-seeding (torch+numpy seed 42).
 - Markers: `unit`, `integration`, `slow`, `fast`, `real_api`, `regression`, `performance`. Timeouts are per-marker in conftest, not global.
-- Tests are organized by layer: `test_core.py` (signals, privacy, config), `test_data.py` (pipeline, loader, synthetic), `test_models.py` (backbone, heads, full model).
+- Tests are organized by layer: `test_core.py` (signals, privacy, config), `test_data.py` (pipeline, loader, synthetic), `test_models.py` (backbone, heads, full model), `test_train.py` (training loops), `test_export.py` (ONNX), `test_backtest.py` (backtesting).
 
 ## Privacy Model
 
-This is a core differentiator, not an afterthought. The privacy pipeline in `core/privacy.py` implements:
-- SHA-256 identifier hashing with configurable salt
-- Address anonymization with collision detection
-- k-anonymity via amount quantization (binning)
-- Epsilon-differential privacy via Laplace noise injection
-- k-threshold rare event suppression
+This is a core differentiator, not an afterthought. The `PrivacyManager` class in `core/privacy.py` implements:
+- SHA-256 identifier hashing with configurable salt (`hash_identifier()`, `anonymize_addresses()`)
+- k-anonymity via amount quantization (`quantize_amounts()`)
+- Epsilon-differential privacy via Laplace noise injection (`add_noise()`)
+- k-threshold rare event suppression (`suppress_rare_events()`)
 
-The `sanitize_dataset()` function chains all operations. Epsilon and k parameters are the main privacy-utility trade-off knobs.
+The `sanitize_dataset()` classmethod chains quantization, noise, and anonymization. Epsilon and k parameters are the main privacy-utility trade-off knobs.
 
 ## Production Path Gating
 

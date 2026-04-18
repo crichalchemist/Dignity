@@ -4,10 +4,10 @@ Get started with Dignity Core in 5 minutes.
 
 ## Installation
 
-### 1. Clone and Setup Environment
+### 1. Clone and Set Up Environment
 
 ```bash
-git clone <repository>
+git clone https://github.com/crichalchemist/Dignity.git
 cd Dignity
 
 # Create conda environment with Python 3.11
@@ -15,14 +15,16 @@ conda create -n dignity python=3.11 -y
 conda activate dignity
 ```
 
-### 2. Install Dependencies
+### 2. Install
 
 ```bash
-pip install -r requirements.txt
+pip install -e .
 ```
 
+This installs three console scripts: `dignity-train`, `dignity-export`, and `dignity-backtest`.
+
 **Core dependencies:**
-- PyTorch 2.2+
+- PyTorch 2.1+
 - pandas, numpy, scipy, scikit-learn
 - ONNX and onnxruntime (for export)
 - pytest, ruff (development)
@@ -34,25 +36,27 @@ pip install -r requirements.txt
 ```python
 from data.source.synthetic import SyntheticGenerator
 
-# Generate synthetic transaction data
-generator = SyntheticGenerator(
-    num_entities=100,
-    num_transactions=10000,
-    seed=42
-)
+gen = SyntheticGenerator(seed=42)
 
-data = generator.generate()
-print(f"Generated {len(data)} transactions")
+# Transaction sequences (for risk/forecast/policy tasks)
+df = gen.generate_dataset(num_normal=800, num_anomalous=200, seq_len=100)
+print(f"Generated {len(df)} rows")
+
+# OHLCV series (for cascade task)
+ohlcv = gen.generate_ohlcv(n_bars=2000, start_date="2016-01-01")
 ```
 
-### Configure and Train
+### Train a Model
 
 ```bash
-# Train a risk modeling task
-python -m train.cli \
-    --config config/train_risk.yaml \
-    --epochs 10 \
-    --batch-size 32
+# Risk scoring
+dignity-train --config config/train_risk.yaml
+
+# Forecasting
+dignity-train --config config/train_forecast.yaml
+
+# Cascade (paper trading)
+dignity-train --config config/train_quant_paper.yaml
 ```
 
 ### Minimal Training Script
@@ -60,78 +64,94 @@ python -m train.cli \
 ```python
 from core.config import DignityConfig
 from data.pipeline import TransactionPipeline
-from data.loader import create_dataloaders
-from models.dignity import create_dignity_model
+from data.loader import create_dataloader
+from models.dignity import Dignity
 from train.engine import train_epoch, validate_epoch
 import torch
 
 # Load configuration
-config = DignityConfig.from_yaml("config/base.yaml")
+config = DignityConfig.from_yaml("config/train_risk.yaml")
 
 # Prepare data
-pipeline = TransactionPipeline(config)
-transactions = pipeline.load_and_process("data/transactions.csv")
-train_loader, val_loader = create_dataloaders(
-    transactions, 
-    config, 
-    split=0.8
-)
+pipeline = TransactionPipeline(seq_len=config.data.seq_len, features=config.data.features)
+pipeline.fit(df_train)
+X_train = pipeline.transform(df_train)
+X_val = pipeline.transform(df_val)
+
+train_loader = create_dataloader(X_train, y_train, batch_size=config.data.batch_size)
+val_loader = create_dataloader(X_val, y_val, batch_size=config.data.batch_size)
 
 # Create model
-model = create_dignity_model(config, task="risk")
-optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)
+model = Dignity(
+    task=config.model.task,
+    input_size=len(pipeline.available_features),
+    hidden_size=config.model.hidden_size,
+)
+optimizer = torch.optim.AdamW(model.parameters(), lr=config.train.lr)
+criterion = torch.nn.BCELoss()
 
 # Training loop
 for epoch in range(10):
-    train_loss = train_epoch(model, train_loader, optimizer, config.device)
-    val_loss = validate_epoch(model, val_loader, config.device)
-    print(f"Epoch {epoch}: train={train_loss:.4f}, val={val_loss:.4f}")
+    train_metrics = train_epoch(model, train_loader, optimizer, criterion, config.device)
+    val_metrics = validate_epoch(model, val_loader, criterion, config.device)
+    print(f"Epoch {epoch}: train={train_metrics['loss']:.4f}, val={val_metrics['loss']:.4f}")
 ```
 
 ## Privacy Features
 
 ```python
-from core.privacy import (
-    hash_identifiers,
-    anonymize_amounts,
-    add_differential_privacy_noise
-)
+from core.privacy import PrivacyManager
+import numpy as np
 
-# Anonymize sensitive data
-df = hash_identifiers(df, columns=["user_id", "merchant_id"])
-df = anonymize_amounts(df, method="quantize", bins=10)
-df = add_differential_privacy_noise(df, columns=["amount"], epsilon=1.0)
+# Hash identifiers
+hashed = PrivacyManager.hash_identifier("user_123", salt="secret_salt")
+
+# Anonymize a list of addresses
+addresses = ["0xabc123", "0xdef456", "0xghi789"]
+anonymized = PrivacyManager.anonymize_addresses(addresses, salt="secret_salt")
+
+# Quantize amounts (k-anonymity)
+amounts = np.array([100.50, 250.75, 75.25])
+quantized = PrivacyManager.quantize_amounts(amounts, bins=10)
+
+# Add differential privacy noise
+noisy = PrivacyManager.add_noise(amounts, epsilon=1.0, sensitivity=1.0)
+
+# Full sanitization pipeline
+result = PrivacyManager.sanitize_dataset(amounts, addresses, epsilon=0.1)
 ```
 
 ## Export to ONNX
 
-```python
-from export.to_onnx import export_dignity_to_onnx
+```bash
+python -m export.to_onnx \
+    --checkpoint checkpoints/dignity_risk_best.pt \
+    --output dignity_risk.onnx \
+    --benchmark
+```
 
-# Export trained model
-export_dignity_to_onnx(
-    checkpoint_path="checkpoints/dignity_risk_best.pth",
-    output_path="dignity_risk.onnx",
-    opset_version=14
-)
+```python
+from export.to_onnx import export_to_onnx, benchmark_onnx_inference
+
+export_to_onnx(model, "model.onnx", input_shape=(1, 100, 32))
+stats = benchmark_onnx_inference("model.onnx")
+print(f"Mean inference: {stats['mean_ms']:.2f} ms")
 ```
 
 ## Next Steps
 
-- **[Configuration Guide](CONFIGURATION.md)** - Customize model architecture and training
-- **[Privacy Operations](PRIVACY.md)** - Deep dive into privacy features
-- **[Training Guide](TRAINING.md)** - Advanced training techniques
-- **[API Reference](API_REFERENCE.md)** - Complete API documentation
+- [Configuration Guide](CONFIGURATION.md) – Customize model architecture and training
+- [Privacy Operations](PRIVACY.md) – Deep dive into privacy features
+- [Signal Processing](SIGNALS.md) – Understand the 32-feature signal set
+- [Architecture Overview](ARCHITECTURE.md) – Model components and data flow
 
 ## Troubleshooting
 
-**Issue:** `ImportError: No module named 'torch'`
-- **Solution:** Install PyTorch: `pip install torch>=2.2.0`
+**ImportError: No module named 'torch'**
+Install PyTorch: `pip install torch>=2.1.0`
 
-**Issue:** Tests failing after installation
-- **Solution:** Run `pytest tests/` to verify all tests pass
+**Tests failing after installation**
+Run `pytest tests/ -v` to verify all tests pass.
 
-**Issue:** ONNX export errors
-- **Solution:** Ensure ONNX and onnxruntime are installed: `pip install onnx onnxruntime`
-
-For more help, see the [Testing Guide](TESTING.md).
+**ONNX export errors**
+Ensure ONNX and onnxruntime are installed: `pip install onnx onnxruntime`
