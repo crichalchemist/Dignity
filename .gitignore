@@ -68,3 +68,7 @@ Sequence/
 # Cloned Sequence repo (reference only)
 Sequence/
 .internal/
+
+# Agent tooling
+.remember/
+.serena/
