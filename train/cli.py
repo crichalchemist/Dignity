@@ -54,7 +54,9 @@ def main():
     # Prepare data pipeline
     print("Preprocessing data...")
     pipeline = TransactionPipeline(
-        seq_len=config.data.seq_len, features=config.data.features
+        seq_len=config.data.seq_len,
+        features=config.data.features,
+        privacy=config.privacy,
     )
 
     # Process training data
@@ -62,6 +64,10 @@ def main():
     X_train, y_train = pipeline.process(
         df_train.drop("label", axis=1, errors="ignore"), labels=labels, fit=True
     )
+
+    if pipeline.privacy_manager is not None:
+        budget = pipeline.privacy_manager.budget
+        print(f"Privacy: ε spent {budget.spent:.3f} of {budget.epsilon_total:.3f}")
 
     # Split train/val
     split_idx = int(len(X_train) * (1 - config.data.test_size))

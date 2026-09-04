@@ -36,5 +36,16 @@ train:
   log_interval: 10
   save_interval: 5
 
+# Privacy stage — commented out by default. No block => no privacy stage runs.
+# See docs/PRIVACY.md for what each mechanism guarantees.
+# privacy:
+#   key_env: DIGNITY_PRIVACY_KEY     # env var NAME holding the HMAC key; never the key itself
+#   epsilon_total: 1.0
+#   k: 5
+#   features:
+#     volume:   {mechanism: laplace, epsilon: 0.5, bounds: [0, 10000]}
+#     price:    {mechanism: laplace, epsilon: 0.5, bounds: [0, 1000]}
+#     fee_rate: {mechanism: generalize, bins: 10}
+
 device: cuda
 seed: 42

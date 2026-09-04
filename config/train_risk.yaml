@@ -36,5 +36,16 @@ train:
   log_interval: 10
   save_interval: 10
 
+# Privacy stage (see docs/PRIVACY.md). Runs on raw columns before signals.
+# bounds are public parameters chosen a priori for the synthetic generator:
+# volume walks from 100 with sigma 20/step; price walks from 100 at 1%/step.
+privacy:
+  epsilon_total: 1.0
+  k: 5
+  features:
+    volume:   {mechanism: laplace, epsilon: 0.5, bounds: [0, 1000]}
+    price:    {mechanism: laplace, epsilon: 0.5, bounds: [0, 500]}
+    fee_rate: {mechanism: generalize, bins: 10}
+
 device: cuda
 seed: 42

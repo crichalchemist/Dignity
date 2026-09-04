@@ -1,5 +1,7 @@
 """Test core utilities."""
 
+from pathlib import Path
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -128,6 +130,13 @@ class TestPrivacyConfig:
         cfg.to_yaml(str(out))
         again = DignityConfig.from_yaml(str(out))
         assert again.privacy.to_dict() == cfg.privacy.to_dict()
+
+    def test_shipped_configs_match_spec(self):
+        root = Path(__file__).resolve().parents[1] / "config"
+        assert (
+            DignityConfig.from_yaml(str(root / "train_risk.yaml")).privacy is not None
+        )
+        assert DignityConfig.from_yaml(str(root / "base.yaml")).privacy is None
 
     @pytest.mark.parametrize(
         "mutate,match",
