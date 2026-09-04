@@ -49,6 +49,7 @@ def export_to_onnx(
             "predictions": {0: "batch_size"},
             "attention_weights": {0: "batch_size", 1: "sequence_length"},
         },
+        dynamo=False,
     )
 
     print(f"Model exported successfully to {output_path}")
