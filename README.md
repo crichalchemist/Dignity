@@ -107,6 +107,9 @@ dignity-train --config config/train_forecast.yaml
 dignity-train --config config/colab.yaml
 ```
 
+Or open `notebooks/train_risk.ipynb` (Colab badge inside) for the same run with the
+loss curves, validation scores, attention plots and ONNX export shown step by step.
+
 #### Export to ONNX
 
 ```bash

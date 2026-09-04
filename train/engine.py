@@ -140,9 +140,10 @@ def validate_epoch(
         targets_cat = torch.cat(all_targets)
 
         # Add task-specific metrics
-        # For risk scoring (binary)
+        # For risk scoring (binary). Predictions were squeezed to [N] above when
+        # the head emits [N, 1], so a 1-D tensor is the single-output case too.
         if (
-            predictions_cat.size(-1) == 1  # Binary classification or regression
+            (predictions_cat.dim() == 1 or predictions_cat.size(-1) == 1)
             and targets_cat.max() <= 1
             and targets_cat.min() >= 0
         ):

@@ -32,9 +32,10 @@ env/
 # VSCode
 .vscode/
 
-# Jupyter
+# Jupyter (only notebooks/ is tracked)
 .ipynb_checkpoints
 *.ipynb
+!notebooks/*.ipynb
 
 # Pytest
 .pytest_cache/

@@ -34,8 +34,8 @@ Verify before claiming any test/train result actually ran.
 ## Commands
 
 ```bash
-# Tests (94 collected: test_core 21, test_data 23, test_models 11, test_privacy 34,
-# test_operator 4, test_docs 1)
+# Tests (95 collected: test_core 21, test_data 23, test_models 11, test_privacy 34,
+# test_operator 4, test_docs 1, test_train 1)
 pytest tests/ -v
 pytest tests/test_models.py -v                       # one file
 pytest tests/test_models.py::TestDignityModel::test_risk_model -v   # one test
@@ -52,6 +52,8 @@ pytest tests/ --cov --cov-fail-under=100
 # Train
 dignity-train --config config/train_risk.yaml        # or: python -m train.cli --config ...
 python -m train.cli --config config/colab.yaml
+# notebooks/train_risk.ipynb is the same run as a notebook (Colab badge inside). ruff lints
+# and formats .ipynb files too, so it must stay `ruff check`/`ruff format` clean.
 
 # ONNX export (run the module directly; see "Known breakage" below)
 python -m export.to_onnx --checkpoint checkpoints/dignity_risk_best.pt --output dignity_risk.onnx --benchmark
