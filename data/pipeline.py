@@ -1,9 +1,13 @@
 """Data pipeline for preprocessing transaction sequences."""
 
+import os
+
 import numpy as np
 import pandas as pd
 from sklearn.preprocessing import RobustScaler
 
+from core.config import PrivacyConfig
+from core.privacy import PrivacyBudget, PrivacyManager
 from core.signals import SignalProcessor
 
 
@@ -19,13 +23,20 @@ class TransactionPipeline:
     """
 
     def __init__(
-        self, seq_len: int = 100, features: list = None, scaler_type: str = "robust"
+        self,
+        seq_len: int = 100,
+        features: list = None,
+        scaler_type: str = "robust",
+        privacy: PrivacyConfig | None = None,
+        privacy_rng=None,
     ):
         """
         Args:
             seq_len: Sequence length for windowing
             features: List of features to use
             scaler_type: Scaler type ('robust', 'standard', 'minmax')
+            privacy: Optional privacy stage config. None => no stage runs.
+            privacy_rng: Test seam forwarded to PrivacyManager(rng=...). Leave None.
         """
         self.seq_len = seq_len
         self.features = features or [
@@ -54,6 +65,20 @@ class TransactionPipeline:
 
         self.signal_processor = SignalProcessor()
         self.fitted = False
+
+        self.privacy = privacy
+        self.privacy_manager = None
+        if privacy is not None:
+            key = None
+            if privacy.key_env is not None:
+                key = os.environ.get(privacy.key_env)
+                if key is None:
+                    raise ValueError(
+                        f"privacy.key_env={privacy.key_env!r} is not set in the environment"
+                    )
+            self.privacy_manager = PrivacyManager(
+                PrivacyBudget(privacy.epsilon_total), key=key, rng=privacy_rng
+            )
 
     def compute_signals(self, df: pd.DataFrame) -> pd.DataFrame:
         """
@@ -84,60 +109,67 @@ class TransactionPipeline:
 
         return result
 
+    def _apply_privacy(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Run the configured privacy mechanisms on raw columns.
+
+        Runs BEFORE compute_signals so derived features inherit the guarantee
+        by post-processing. Returns ``df`` itself when no privacy is configured.
+        """
+        if self.privacy_manager is None:
+            return df
+        result = df.copy()
+        for name, feat in self.privacy.features.items():
+            if name not in result.columns:
+                raise ValueError(f"privacy configured for column {name!r}, not in data")
+            col = result[name].to_numpy(dtype=float)
+            if feat.mechanism == "laplace":
+                result[name] = self.privacy_manager.add_laplace_noise(
+                    col, epsilon=feat.epsilon, bounds=feat.bounds
+                )
+            else:
+                result[name] = PrivacyManager.generalize_amounts(
+                    col, bins=feat.bins, k=self.privacy.k
+                )
+        return result
+
     def fit(self, df: pd.DataFrame) -> "TransactionPipeline":
-        """
-        Fit the scaler on training data.
+        """Fit the scaler on training data. Applies the privacy stage once."""
+        self._fit_on(self._apply_privacy(df))
+        return self
 
-        Args:
-            df: Training dataframe
+    def transform(self, df: pd.DataFrame) -> np.ndarray:
+        """Transform to a scaled feature array. Applies the privacy stage once."""
+        return self._transform_on(self._apply_privacy(df))
 
-        Returns:
-            self
-        """
-        # Compute signals first
+    def fit_transform(self, df: pd.DataFrame) -> np.ndarray:
+        """Fit and transform on one privacy release, so the scaler sees the same draw."""
+        prepared = self._apply_privacy(df)
+        self._fit_on(prepared)
+        return self._transform_on(prepared)
+
+    def _fit_on(self, df: pd.DataFrame) -> None:
+        """Fit the scaler. ``df`` must already have had privacy applied."""
         df = self.compute_signals(df)
 
-        # Select features that exist
         available_features = [f for f in self.features if f in df.columns]
-
         if not available_features:
             raise ValueError(
                 f"None of the specified features found in data: {self.features}"
             )
 
-        # Fit scaler
         X = df[available_features].values
         self.scaler.fit(X)
         self.fitted = True
         self.available_features = available_features
 
-        return self
-
-    def transform(self, df: pd.DataFrame) -> np.ndarray:
-        """
-        Transform dataframe to scaled feature array.
-
-        Args:
-            df: Dataframe to transform
-
-        Returns:
-            Scaled numpy array [n_samples, n_features]
-        """
+    def _transform_on(self, df: pd.DataFrame) -> np.ndarray:
+        """Scale features. ``df`` must already have had privacy applied."""
         if not self.fitted:
             raise RuntimeError("Pipeline must be fitted before transform")
 
-        # Compute signals
         df = self.compute_signals(df)
-
-        # Select and scale features
         X = df[self.available_features].values
-        X_scaled = self.scaler.transform(X)
-
-        return X_scaled
-
-    def fit_transform(self, df: pd.DataFrame) -> np.ndarray:
-        """Fit and transform in one step."""
-        return self.fit(df).transform(df)
+        return self.scaler.transform(X)
 
     def create_sequences(
         self, X: np.ndarray, y: np.ndarray | None = None, stride: int = 1
