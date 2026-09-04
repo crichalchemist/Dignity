@@ -1,266 +1,119 @@
 # Privacy Operations
 
-Dignity Core provides comprehensive privacy-preserving operations for sensitive transaction data.
+`core/privacy.py` implements two things, and claims exactly two things. Each
+sentence in **bold** below is backed by a named test in `tests/test_privacy.py`.
+For who these protect and from whom, read [THREAT-MODEL.md](THREAT-MODEL.md).
 
-## Overview
+## What is claimed
 
-The `core.privacy` module implements privacy techniques:
+| Guarantee | Mechanism | Wording we use | Wording we do not use |
+|---|---|---|---|
+| Identifier protection | HMAC-SHA256 with a required key | *keyed pseudonymization* | anonymization |
+| Value protection | Clipped Laplace noise, ε ledgered | *input-level ε-differential privacy* | any DP claim about the trained model |
+| Value protection | Quantile bins merged to ≥ k | *k-anonymity for the column as released* | k claims about derived features |
 
-- **Identity Protection** - Hash identifiers to prevent re-identification
-- **Data Anonymization** - Quantize or generalize sensitive values
-- **Differential Privacy** - Add calibrated noise for formal privacy guarantees
-- **Secure Aggregation** - Combine data without revealing individuals
-
-## Identity Hashing
-
-### Hash Entity Identifiers
-
-```python
-from core.privacy import hash_identifiers
-import pandas as pd
-
-df = pd.DataFrame(
-    {
-        "user_id": ["alice", "bob", "charlie"],
-        "merchant_id": ["shop_1", "shop_2", "shop_1"],
-        "amount": [100.0, 250.0, 75.0],
-    }
-)
-
-# Hash sensitive IDs
-df_hashed = hash_identifiers(
-    df,
-    columns=["user_id", "merchant_id"],
-    algorithm="sha256",
-    salt="dignity_secret_salt",
-)
-
-print(df_hashed["user_id"].head())
-# Output: ['2c26b46...', '81b637...', 'ba7816...']
-```
-
-**Parameters:**
-- `columns` - List of columns to hash
-- `algorithm` - Hash function: sha256, sha512, blake2b
-- `salt` - Secret salt for additional security
-
-## Amount Anonymization
-
-### Quantization
+## Setup
 
 ```python
-from core.privacy import anonymize_amounts
+import numpy as np
+from core.privacy import PrivacyBudget, PrivacyManager
 
-# Quantize amounts into bins
-df_quantized = anonymize_amounts(
-    df,
-    columns=["amount"],
-    method="quantize",
-    bins=10,  # Reduce to 10 discrete levels
-)
+# One budget per release. Epsilons add across calls; overspending raises.
+budget = PrivacyBudget(epsilon_total=1.0)
 
-# Original: [100.0, 250.0, 75.0]
-# Quantized: [2, 8, 1]  (bin indices)
+# The key is only needed for pseudonymization. Load it from the environment;
+# a literal here is for illustration only.
+pm = PrivacyManager(budget, key=b"replace-with-16+-random-bytes")
 ```
 
-### Generalization
+## Keyed pseudonymization
+
+**Same key, same identifier → same pseudonym. Different key → unrelated pseudonym.**
+The key is required at call time; there is no unkeyed fallback. Keys under 16
+bytes are rejected.
 
 ```python
-# Generalize to ranges
-df_generalized = anonymize_amounts(
-    df,
-    columns=["amount"],
-    method="generalize",
-    ranges=[(0, 100), (100, 500), (500, float("inf"))],
-)
-
-# Original: [100.0, 250.0, 75.0]
-# Generalized: ['0-100', '100-500', '0-100']
+pseudonym = pm.pseudonymize("0x1234abcd5678ef90")  # 64 hex chars
+many = pm.pseudonymize_many(["addr_a", "addr_b", "addr_a"])  # many[0] == many[2]
 ```
 
-### Rounding
+This is pseudonymization, not anonymization: anyone holding the key can link
+records. That is the intended property — it lets you join across your own
+datasets while making the pseudonyms useless to anyone without the key.
+
+## Bounded Laplace noise (input-level ε-DP)
+
+**Values are clipped to `bounds` before noising, so sensitivity is `hi - lo` and
+cannot be understated.** **ε is spent from the budget before any sample is drawn.**
+**Noise comes from `secrets.SystemRandom`, not a seedable PRNG.**
 
 ```python
-# Round to nearest value
-df_rounded = anonymize_amounts(
-    df,
-    columns=["amount"],
-    method="round",
-    precision=10,  # Round to nearest 10
-)
-
-# Original: [103.45, 257.89, 72.10]
-# Rounded: [100.0, 260.0, 70.0]
+amounts = np.array([123.4, 789.0, 456.7, 5000.0])  # 5000 will be clipped to 1000
+noisy = pm.add_laplace_noise(amounts, epsilon=0.5, bounds=(0.0, 1000.0))
+budget.spent  # 0.5
+budget.remaining  # 0.5
+pm.add_laplace_noise(
+    amounts, epsilon=0.6, bounds=(0.0, 1000.0)
+)  # raises BudgetExhausted
 ```
 
-## Differential Privacy
+Each released value is ε-differentially private for that feature (local DP).
+Spending ε₁ on one column and ε₂ on another composes to ε₁ + ε₂; the ledger
+enforces that the sum never exceeds `epsilon_total`.
 
-### Add Calibrated Noise
+`bounds` are **public parameters**. Do not derive them from the data — that leaks
+the extremes. Choose them from domain knowledge before you look.
+
+## k-anonymous generalization
+
+**Every output value is shared by at least k records.** Quantile edges start the
+bins balanced; any bin with fewer than k members is merged into its smaller
+neighbour until none remain. Each record becomes the midpoint of its class's
+min and max.
 
 ```python
-from core.privacy import add_differential_privacy_noise
-
-# Add Laplace noise for epsilon-DP
-df_private = add_differential_privacy_noise(
-    df,
-    columns=["amount"],
-    epsilon=1.0,  # Privacy budget (smaller = more private)
-    sensitivity=100.0,  # Maximum change from single record
-    mechanism="laplace",
-)
-
-# Noise magnitude: sensitivity / epsilon = 100 / 1.0 = 100
+volumes = np.random.default_rng(0).lognormal(3, 1, size=500)
+generalized = PrivacyManager.generalize_amounts(volumes, bins=10, k=5)
 ```
 
-### Gaussian Mechanism (for (ε,δ)-DP)
+This holds for the generalized column as released. Signals computed from it
+downstream (rolling volatility, momentum) are **not** covered by the k claim.
 
-```python
-df_private = add_differential_privacy_noise(
-    df,
-    columns=["amount"],
-    epsilon=1.0,
-    delta=1e-5,  # Failure probability
-    sensitivity=100.0,
-    mechanism="gaussian",
-)
+## The privacy stage in the pipeline
+
+`TransactionPipeline` applies these mechanisms to raw columns **before**
+computing signals, so derived features inherit the DP guarantee by
+post-processing. The stage runs exactly once per `fit`, `transform`, or
+`fit_transform`. It is driven by a `privacy:` block in the YAML config:
+
+```yaml
+privacy:
+  key_env: DIGNITY_PRIVACY_KEY       # env var NAME; never the key itself
+  epsilon_total: 1.0
+  k: 5
+  features:
+    volume:   {mechanism: laplace, epsilon: 0.5, bounds: [0, 1000]}
+    price:    {mechanism: laplace, epsilon: 0.5, bounds: [0, 500]}
+    fee_rate: {mechanism: generalize, bins: 10}
 ```
 
-**Privacy Parameters:**
-- `epsilon` - Privacy budget (0.1 = strong, 10.0 = weak)
-- `delta` - Failure probability (typically 1e-5 to 1e-7)
-- `sensitivity` - Maximum influence of single record
-- `mechanism` - Noise distribution: laplace, gaussian
+**No `privacy:` block means no privacy stage runs.** Misconfiguration — an unknown
+mechanism, ε ≤ 0, missing or inverted bounds, k < 2, or feature epsilons summing
+past `epsilon_total` — fails at config load, not mid-training.
 
-## Feature Clipping
+`dignity-train` prints `Privacy: ε spent X of Y` after preprocessing so the
+ledger is visible, not theoretical.
 
-```python
-from core.privacy import clip_features
+## What is not here
 
-# Clip outliers before adding noise
-df_clipped = clip_features(df, columns=["amount"], lower=0.0, upper=1000.0)
+- No differential privacy on the trained weights (no DP-SGD). The model itself
+  carries no DP guarantee.
+- No secure aggregation, no federated learning.
+- No snapping mechanism; see THREAT-MODEL.md on floating-point Laplace.
 
-# Values outside [0, 1000] are clipped
-```
+## Reference
 
-## Complete Privacy Pipeline
-
-```python
-from core.privacy import (
-    hash_identifiers,
-    anonymize_amounts,
-    add_differential_privacy_noise,
-    clip_features,
-)
-
-# Step 1: Hash identifiers
-df = hash_identifiers(df, ["user_id", "merchant_id"])
-
-# Step 2: Clip outliers
-df = clip_features(df, ["amount"], lower=0, upper=10000)
-
-# Step 3: Add differential privacy noise
-df = add_differential_privacy_noise(df, ["amount"], epsilon=1.0, sensitivity=100.0)
-
-# Step 4: Quantize for additional anonymization
-df = anonymize_amounts(df, ["amount"], method="quantize", bins=20)
-```
-
-## Privacy-Preserving Signal Computation
-
-```python
-from core.signals import compute_volatility
-from core.privacy import add_differential_privacy_noise
-
-# Compute signals
-signals = compute_volatility(df, window=10)
-
-# Add noise to signals for privacy
-signals = add_differential_privacy_noise(
-    signals, columns=["volatility"], epsilon=2.0, sensitivity=0.1
-)
-```
-
-## Privacy Budget Management
-
-```python
-class PrivacyBudget:
-    """Track cumulative privacy loss"""
-
-    def __init__(self, total_epsilon=10.0):
-        self.total_epsilon = total_epsilon
-        self.spent_epsilon = 0.0
-
-    def spend(self, epsilon):
-        if self.spent_epsilon + epsilon > self.total_epsilon:
-            raise ValueError("Privacy budget exceeded!")
-        self.spent_epsilon += epsilon
-
-    def remaining(self):
-        return self.total_epsilon - self.spent_epsilon
-
-
-# Usage
-budget = PrivacyBudget(total_epsilon=5.0)
-
-# Operation 1: epsilon=1.0
-df1 = add_differential_privacy_noise(df, ["amount"], epsilon=1.0)
-budget.spend(1.0)
-
-# Operation 2: epsilon=2.0
-df2 = add_differential_privacy_noise(df, ["balance"], epsilon=2.0)
-budget.spend(2.0)
-
-print(f"Remaining budget: {budget.remaining()}")  # 2.0
-```
-
-## Privacy Guarantees
-
-### Epsilon-Differential Privacy
-
-**Definition:** 
-For any two datasets differing in one record, the probability ratio of any output is bounded by:
-
-$$
-\\Pr[M(D_1) \\in S] \\leq e^{\\epsilon} \\cdot \\Pr[M(D_2) \\in S]
-$$
-
-**Interpretation:**
-- ε = 0.1: Very strong privacy
-- ε = 1.0: Strong privacy (recommended)
-- ε = 5.0: Moderate privacy
-- ε = 10.0: Weak privacy
-
-### Composition Theorems
-
-**Sequential Composition:**
-Running k mechanisms with budgets ε₁, ..., εₖ gives total privacy loss:
-$$
-\\epsilon_{\\text{total}} = \\sum_{i=1}^k \\epsilon_i
-$$
-
-**Parallel Composition:**
-Running mechanisms on disjoint data subsets uses maximum individual budget:
-$$
-\\epsilon_{\\text{total}} = \\max(\\epsilon_1, ..., \\epsilon_k)
-$$
-
-## Best Practices
-
-1. **Choose appropriate ε** - Start with ε=1.0, adjust based on privacy needs
-2. **Track budget** - Monitor cumulative privacy loss across operations
-3. **Minimize sensitivity** - Clip outliers before adding noise
-4. **Use parallel composition** - Process disjoint subsets when possible
-5. **Hash before aggregation** - Prevent identifier linkage
-6. **Validate privacy** - Test re-identification resistance
-
-## References
-
-- Dwork, C., & Roth, A. (2014). *The Algorithmic Foundations of Differential Privacy*
-- Abadi, M. et al. (2016). *Deep Learning with Differential Privacy*
-- McMahan, H. B. et al. (2017). *Learning Differentially Private Recurrent Language Models*
-
-## Next Steps
-
-- **[Signal Processing](SIGNALS.md)** - Combine privacy with signal computation
-- **[Data Pipeline](API_REFERENCE.md#data)** - Use privacy in data processing
-- **[Configuration Guide](CONFIGURATION.md)** - Configure privacy settings
+- Dwork & Roth, *The Algorithmic Foundations of Differential Privacy* (2014) —
+  Laplace mechanism (§3.3), sequential composition (§3.5), post-processing (Prop. 2.1).
+- Sweeney, *k-Anonymity: A Model for Protecting Privacy* (2002).
+- Mironov, *On Significance of the Least Significant Bits for Differential Privacy* (CCS 2012).

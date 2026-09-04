@@ -42,12 +42,13 @@ df = compute_volatility(df, window=20)
 df = compute_entropy(df, window=50, bins=10)
 ```
 
-**privacy.py** - Privacy operations
+**privacy.py** - Privacy primitives
 ```python
-from core.privacy import hash_identifiers, add_differential_privacy_noise
+from core.privacy import PrivacyBudget, PrivacyManager
 
-df = hash_identifiers(df, columns=["user_id"])
-df = add_differential_privacy_noise(df, columns=["amount"], epsilon=1.0)
+pm = PrivacyManager(PrivacyBudget(epsilon_total=1.0), key=b"16+-byte-secret-key")
+pseudonym = pm.pseudonymize("user_id_value")
+noisy = pm.add_laplace_noise(amounts, epsilon=0.5, bounds=(0.0, 1000.0))
 ```
 
 ### data/ - Data Processing
@@ -310,9 +311,12 @@ raw_data = {
     "timestamp": ["2024-01-01 10:00", "2024-01-01 10:30", "2024-01-01 11:00"],
 }
 
-# 2. Apply privacy
-data = hash_identifiers(data, ["user_id", "merchant_id"])
-data = add_differential_privacy_noise(data, ["amount"], epsilon=1.0)
+# 2. Apply privacy (see docs/PRIVACY.md) — normally done by TransactionPipeline's
+#    privacy stage from the `privacy:` config block, before signals are computed
+pm = PrivacyManager(PrivacyBudget(epsilon_total=1.0))
+amounts = pm.add_laplace_noise(
+    np.array(raw_data["amount"]), epsilon=1.0, bounds=(0.0, 500.0)
+)
 
 # 3. Compute signals
 data = compute_volatility(data, window=20)

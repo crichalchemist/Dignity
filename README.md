@@ -2,16 +2,16 @@
 
 [![PyTorch](https://img.shields.io/badge/PyTorch-2.2+-ee4c2c.svg)](https://pytorch.org/)
 [![Python](https://img.shields.io/badge/Python-3.10+-blue.svg)](https://python.org/)
-[![Tests](https://img.shields.io/badge/tests-31%20passing-brightgreen.svg)]()
+[![CI](https://github.com/crichalchemist/Dignity/actions/workflows/ci.yml/badge.svg)](https://github.com/crichalchemist/Dignity/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
-**Dignity** is a privacy-preserving deep learning framework for modeling transactional behavior patterns. It provides modular components for signal processing, data pipelines, and neural architectures with built-in privacy safeguards including differential privacy and secure data handling.
+**Dignity** is a privacy-preserving deep learning framework for modeling transactional behavior patterns. It provides modular components for signal processing, data pipelines, and neural architectures with an input-level differential-privacy stage, k-anonymous generalization, and keyed pseudonymization — each backed by a test.
 
 ## Overview
 
 Dignity Core implements privacy-first sequence modeling:
 
-- **Privacy-Preserving**: Built-in hashing, anonymization, quantization, and differential privacy operations
+- **Privacy-Preserving**: Keyed pseudonymization, k-anonymous generalization, and input-level ε-DP with a budget ledger
 - **Signal Processing**: Volatility, entropy, momentum, and regime detection utilities
 - **Modular Architecture**: Clean separation between data pipeline, model components, and training infrastructure
 - **Deployable**: ONNX export with verification and benchmarking for production inference
@@ -20,7 +20,7 @@ Dignity Core implements privacy-first sequence modeling:
 
 ## Key Features
 
-- ✅ **Privacy-First**: Hashing, anonymization, quantization, differential privacy for sensitive transaction data
+- ✅ **Privacy-First**: Keyed pseudonymization, bounded Laplace noise with ε accounting, k-anonymous generalization — see docs/PRIVACY.md
 - ✅ **Signal Processing**: Volatility, entropy, momentum, directional change, and regime detection
 - ✅ **Modular Design**: Core utilities, data pipeline, model components cleanly separated
 - ✅ **Flexible Architecture**: CNN1D + LSTM + Attention backbone with task-specific heads
@@ -69,27 +69,30 @@ print(f"Generated {len(dataset)} sequences")
 #### Privacy Operations
 
 ```python
-from core.privacy import PrivacyManager
 import numpy as np
+from core.privacy import PrivacyBudget, PrivacyManager
 
-# Initialize privacy manager
-pm = PrivacyManager(hash_salt="secure_salt_key")
+# One budget per release; epsilons add and overspending raises BudgetExhausted.
+pm = PrivacyManager(
+    PrivacyBudget(epsilon_total=1.0), key=b"load-this-from-the-environment"
+)
 
-# Hash transaction identifiers
-tx_id = "0x1234abcd5678ef90"
-hashed = pm.hash_identifier(tx_id)
+# Keyed pseudonymization (HMAC-SHA256): linkable under one key, unlinkable across keys
+pseudonym = pm.pseudonymize("0x1234abcd5678ef90")
 
-# Anonymize addresses
-addresses = ["0xabc123", "0xdef456", "0xghi789"]
-anonymized = pm.anonymize_addresses(addresses)
-
-# Quantize amounts (reduce precision)
+# Bounded Laplace noise: clipped to bounds, sensitivity = hi - lo, spends epsilon
 amounts = np.array([123.456, 789.012, 456.789])
-quantized = pm.quantize_amounts(amounts, precision=2)
+noisy = pm.add_laplace_noise(amounts, epsilon=0.5, bounds=(0.0, 1000.0))
 
-# Add differential privacy noise
-noisy_amounts = pm.add_noise(amounts, epsilon=1.0)
+# k-anonymous generalization: every output value is shared by >= k records
+generalized = PrivacyManager.generalize_amounts(
+    np.random.uniform(10, 100, 200), bins=10, k=5
+)
 ```
+
+In training, none of this is called by hand: a `privacy:` block in the config
+turns on a pipeline stage that runs before signals are computed. **No block, no
+stage.** See `config/train_risk.yaml` and [docs/PRIVACY.md](docs/PRIVACY.md).
 
 #### Train a Model
 
@@ -124,11 +127,9 @@ Transaction Data Sources
 ├── Cryptocurrency APIs (BTC, ETH, SOL via data/source/crypto.py)
 └── Custom Sources (via data/source/ extensibility)
                     ↓
-Privacy Operations (core/privacy.py)
-├── Hash transaction IDs
-├── Anonymize addresses
-├── Quantize amounts
-└── Add differential privacy noise
+Privacy Stage (core/privacy.py — optional, from the `privacy:` config block)
+├── Bounded Laplace noise (ε-DP, budget-ledgered)
+└── k-anonymous generalization (quantile bins)
                     ↓
 Signal Processing (core/signals.py)
 ├── Volatility (rolling std)
@@ -181,12 +182,13 @@ The core model implements a modular hybrid architecture:
 
 ### Privacy Operations
 
-Built-in privacy-preserving utilities in `core/privacy.py`:
+`core/privacy.py` claims exactly three things, each enforced by a test:
 
-- **Hashing**: Secure transaction ID hashing with configurable salt
-- **Anonymization**: Address anonymization with collision detection
-- **Quantization**: Reduce amount precision to obscure exact values
-- **Differential Privacy**: Laplace noise injection with configurable epsilon
+- **Keyed pseudonymization** (HMAC-SHA256, key required) — linkable under one key, unlinkable across keys
+- **Input-level ε-differential privacy** — clipped Laplace noise with sensitivity derived from public bounds and ε spent against a ledger that refuses to overspend
+- **k-anonymity** for generalized columns — quantile bins merged until every class has ≥ k records
+
+The stage runs on raw columns *before* signal computation, so derived features inherit the DP guarantee. What it does **not** claim — and why — is in [docs/THREAT-MODEL.md](docs/THREAT-MODEL.md).
 
 ### Signal Processing
 
@@ -366,7 +368,7 @@ pytest tests/ --cov=. --cov-report=html
 **Dignity** is built on three principles:
 
 1. **Minimal**: ~2,800 lines vs. bloated research code. Every module has a single purpose.
-2. **Deniable**: Privacy-preserving operations baked in. Transaction hashing, anonymization, noise injection.
+2. **Deniable**: Local-only inference, self-contained artifact, nothing phones home — three properties, three tests. Defined precisely in [docs/THREAT-MODEL.md](docs/THREAT-MODEL.md).
 3. **Deployable**: ONNX export, <10ms inference, production-ready from day one.
 
 You are not refactoring code. You are **distilling intent**.
@@ -374,8 +376,9 @@ You are not refactoring code. You are **distilling intent**.
 ## Contributing
 
 Contributions are welcome! Please:
+- Install the hooks once: `pip install pre-commit && pre-commit install`
 - Run tests before submitting: `pytest tests/ -v`
-- Follow existing code style (ruff format)
+- Style is enforced by ruff at line length 88; the hooks run it for you
 - Add tests for new features
 - Update docs accordingly
 

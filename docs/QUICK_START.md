@@ -82,17 +82,22 @@ for epoch in range(10):
 
 ## Privacy Features
 
-```python
-from core.privacy import (
-    hash_identifiers,
-    anonymize_amounts,
-    add_differential_privacy_noise,
-)
+Turn on the privacy stage with a `privacy:` block in your config; it runs on raw
+columns before signals are computed. See `config/train_risk.yaml` for a live
+example and [PRIVACY.md](PRIVACY.md) for what each mechanism guarantees.
 
-# Anonymize sensitive data
-df = hash_identifiers(df, columns=["user_id", "merchant_id"])
-df = anonymize_amounts(df, method="quantize", bins=10)
-df = add_differential_privacy_noise(df, columns=["amount"], epsilon=1.0)
+```python
+import numpy as np
+from core.privacy import PrivacyBudget, PrivacyManager
+
+pm = PrivacyManager(PrivacyBudget(epsilon_total=1.0), key=b"16+-byte-secret-key")
+pseudonyms = pm.pseudonymize_many(["user_a", "merchant_1"])
+noisy = pm.add_laplace_noise(
+    np.array([100.0, 250.0]), epsilon=1.0, bounds=(0.0, 1000.0)
+)
+generalized = PrivacyManager.generalize_amounts(
+    np.random.uniform(10, 100, 200), bins=10, k=5
+)
 ```
 
 ## Export to ONNX
