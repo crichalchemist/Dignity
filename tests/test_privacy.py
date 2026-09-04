@@ -122,11 +122,21 @@ class TestAddLaplaceNoise:
             pm.add_laplace_noise(np.ones(3), epsilon=0.1, bounds=(0.0, 1.0))
 
     def test_budget_is_spent_before_any_release(self):
-        # If the spend fails, nothing should have been sampled or returned.
-        pm = _manager(total=0.5, rng=_ZeroNoise())
+        # If the spend fails, nothing may be sampled: the rng must never be consulted.
+        class _Counting:
+            def __init__(self):
+                self.calls = 0
+
+            def random(self) -> float:
+                self.calls += 1
+                return 0.5
+
+        rng = _Counting()
+        pm = _manager(total=0.5, rng=rng)
         with pytest.raises(BudgetExhausted):
             pm.add_laplace_noise(np.ones(3), epsilon=1.0, bounds=(0.0, 1.0))
         assert pm.budget.spent == 0.0
+        assert rng.calls == 0
 
     @pytest.mark.parametrize("eps", [0.0, -0.1])
     def test_rejects_nonpositive_epsilon(self, eps):
