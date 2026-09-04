@@ -280,8 +280,7 @@ ordering testable bit-for-bit; `random.Random(42)` makes distributional tests re
 
 ### Count
 
-78 test functions; **89 collected** once parametrized cases expand — this work's own tests;
-the merged tree with `master`'s production-path suites collects 384 (test_privacy 34,
+78 test functions; **89 collected** once parametrized cases expand (test_privacy 34,
 test_core 21, test_data 18, test_models 11, test_operator 4, test_docs 1). Every new test
 maps to a sentence in §3, §6, or §7.
 
@@ -373,7 +372,7 @@ code. Without it CI reports; with it CI enforces.
 
 All verifiable by command; none by assertion.
 
-- [ ] `pytest tests/ -v` green (384 collected on the merged tree; 89 from this work), on Python 3.10 and 3.12.
+- [ ] `pytest tests/ -v` green, 89 collected, on Python 3.10 and 3.12.
 - [ ] `pytest tests/ --cov --cov-fail-under=100` passes (only `core/privacy.py` is measured).
 - [ ] `ruff check .` and `ruff format --check .` clean at width 88.
 - [ ] CI workflow green on both matrix legs on the PR.

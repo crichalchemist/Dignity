@@ -86,10 +86,7 @@ class TestOperatorLayer:
 
         monkeypatch.setattr(socket, "socket", refuse)
         out = _tiny_model().predict(torch.randn(2, 20, 4))
-        # Single-head tasks return a tensor or a tuple of tensors; either way the
-        # leading dimension is the batch.
-        first = out[0] if isinstance(out, tuple) else out
-        assert first.shape[0] == 2
+        assert out.shape[0] == 2
 
     def test_export_succeeds_with_sockets_disabled(self, monkeypatch, tmp_path):
         def refuse(*args, **kwargs):

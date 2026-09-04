@@ -24,7 +24,6 @@ If it is missing or points at a macOS path (the other boot rebuilt it), recreate
 python -m ensurepip --upgrade
 pip install torch --index-url https://download.pytorch.org/whl/cpu
 pip install -r requirements.txt && pip install -e . --no-deps
-# requirements.txt includes `backtesting`, which tests/test_backtest.py imports
 ```
 
 `torch>=2.5` is required (`torch.onnx.export(..., dynamo=False)` in `export/to_onnx.py`);
@@ -35,8 +34,8 @@ Verify before claiming any test/train result actually ran.
 ## Commands
 
 ```bash
-# Tests (384 collected: test_core 110, test_data 40, test_models 46, test_privacy 34,
-# test_operator 4, test_docs 1, test_export 8, test_train 21, test_backtest 120)
+# Tests (89 collected: test_core 21, test_data 18, test_models 11, test_privacy 34,
+# test_operator 4, test_docs 1)
 pytest tests/ -v
 pytest tests/test_models.py -v                       # one file
 pytest tests/test_models.py::TestDignityModel::test_risk_model -v   # one test
@@ -53,9 +52,6 @@ pytest tests/ --cov --cov-fail-under=100
 # Train
 dignity-train --config config/train_risk.yaml        # or: python -m train.cli --config ...
 python -m train.cli --config config/colab.yaml
-dignity-train --config config/train_quant_paper.yaml  # cascade, paper trading (safe default)
-dignity-train --config config/train_quant.yaml        # cascade, live execution (gated)
-dignity-backtest --help                              # backtest/ module (needs `backtesting`)
 
 # ONNX export (run the module directly; see "Known breakage" below)
 python -m export.to_onnx --checkpoint checkpoints/dignity_risk_best.pt --output dignity_risk.onnx --benchmark
@@ -68,9 +64,7 @@ why `E402` is ignored for `data/`, `train/`, `export/`-adjacent trees in `pyproj
 
 ## Architecture
 
-One data path, one backbone, interchangeable heads. `task` is one of `risk`, `forecast`,
-`policy`, or `cascade` (regime → risk → alpha → policy chained, trained by `_train_cascade`
-in `train/cli.py`). The pieces only make sense together:
+One data path, one backbone, three interchangeable heads. The pieces only make sense together:
 
 ```
 data/source/{synthetic,crypto}.py   →  raw DataFrame (volume, price, fee_rate, tx_count[, label])
@@ -83,11 +77,9 @@ export/to_onnx.py                   →  export + verify + benchmark
 ```
 
 **`Dignity(task=...)` is the only model entry point.** It composes `DignityBackbone`
-(CNN1D → StackedLSTM → AdditiveAttention, in `models/backbone/hybrid.py`) with one head from
-`models/head/` (`risk`, `forecast`, `policy`, `regime`, `alpha`). Backbone `forward` returns
-`(context [B,H], attn_weights [B,T])`; `Dignity.forward` returns `(predictions, attn_weights)` for
-single-head tasks and a dict of head outputs for `cascade`. `RiskHead` itself returns a pair of
-tensors, so `predict()` on a risk model is a tuple too. **Every caller must unpack** —
+(CNN1D → StackedLSTM → AdditiveAttention, in `models/backbone/hybrid.py`) with `RiskHead`,
+`ForecastHead`, or `PolicyHead`. Backbone `forward` returns `(context [B,H], attn_weights [B,T])`;
+`Dignity.forward` returns `(predictions, attn_weights)`. **Every caller must unpack the tuple** —
 this is the single most common source of shape bugs, and `train/engine.py` compensates with a
 `predictions.dim() > y.dim()` squeeze.
 
@@ -137,14 +129,9 @@ a mechanism, it needs a test in `tests/test_privacy.py` or CI's 100% gate on tha
   the linter. Both run in CI's `lint` job and in pre-commit. Width is settled; `pyproject.toml`
   and `.editorconfig` agree.
 - Type hints use modern union syntax (`np.ndarray | None`) — `target-version = "py310"`.
-- Config is dataclass-backed: `DignityConfig{model,data,train,privacy,execution}` in
-  `core/config.py`, loaded via `DignityConfig.from_yaml`. Add a field to the dataclass **and** to
-  `config/base.yaml`. Unknown keys under `data:`, `train:`, `privacy:`, `execution:` raise
-  `TypeError` at load; unknown keys under `model:` are **silently dropped** (`from_yaml` filters
-  them against `ModelConfig`'s fields).
-- Short per-directory `CLAUDE.md` files exist in `data/`, `data/source/`, `models/`,
-  `models/backbone/`, `train/`, `export/`, `tests/` (6-10 lines each). They predate this file;
-  when they disagree with it, this file wins — fix them in the same change.
+- Config is dataclass-backed: `DignityConfig{model,data,train}` in `core/config.py`, loaded via
+  `DignityConfig.from_yaml`. Add a field to the dataclass **and** to `config/base.yaml`; unknown
+  YAML keys raise `TypeError` at load.
 - A `privacy:` block in YAML is optional and validated at load (`PrivacyConfig`). No block =
   no privacy stage. `bounds` are public parameters chosen a priori — never derive them from data.
 - Tests are organized as classes (`TestSignalProcessor`, `TestDignityModel`, …); node ids are
