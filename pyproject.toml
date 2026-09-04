@@ -28,6 +28,9 @@ ignore = [
     "B008", # Do not perform function calls in argument defaults (common in dataclasses)
     "B904", # Within except clause, raise exceptions with raise ... from err
     "SIM108", # Use ternary operator (sometimes reduces readability)
+    "N803", # sklearn convention: X as an argument name
+    "N806", # sklearn convention: X, y as local variable names
+    "N999", # repo root directory is capitalized `Dignity`; every __init__.py inherits the path
 ]
 
 # Allow unused variables prefixed with underscore
