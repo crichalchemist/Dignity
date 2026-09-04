@@ -280,7 +280,9 @@ ordering testable bit-for-bit; `random.Random(42)` makes distributional tests re
 
 ### Count
 
-31 − 4 + 18 + 3 + 1 + 5 = **54**. Every new test maps to a sentence in §3, §6, or §7.
+73 test functions; **84 collected** once parametrized cases expand (test_privacy 32,
+test_core 19, test_data 18, test_models 11, test_operator 3, test_docs 1). Every new test
+maps to a sentence in §3, §6, or §7.
 
 ## 9. CI/CD
 
@@ -370,7 +372,7 @@ code. Without it CI reports; with it CI enforces.
 
 All verifiable by command; none by assertion.
 
-- [ ] `pytest tests/ -v` green, 54 tests, on Python 3.10 and 3.12.
+- [ ] `pytest tests/ -v` green, 84 collected, on Python 3.10 and 3.12.
 - [ ] `pytest tests/ --cov=core.privacy --cov-fail-under=100` passes.
 - [ ] `ruff check .` and `ruff format --check .` clean at width 88.
 - [ ] CI workflow green on both matrix legs on the PR.
