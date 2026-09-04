@@ -20,9 +20,10 @@ Located in `config/`:
 ```python
 @dataclass
 class DignityConfig:
-    model: ModelConfig       # Architecture parameters
-    data: DataConfig         # Data pipeline parameters
-    train: TrainConfig       # Training parameters
+    model: ModelConfig  # Architecture parameters
+    data: DataConfig  # Data pipeline parameters
+    train: TrainConfig  # Training parameters
+    privacy: PrivacyConfig | None = None  # Optional privacy stage; no block = no stage
     execution: ExecutionConfig  # Live/paper trading parameters
     device: str = "cuda"
     seed: int = 42
@@ -33,13 +34,13 @@ class DignityConfig:
 ```python
 @dataclass
 class ModelConfig:
-    task: str = "risk"            # risk, forecast, policy, cascade
-    input_size: int = 32          # Number of input features
-    hidden_size: int = 256        # Backbone hidden dimension
-    n_layers: int = 2             # LSTM layers
-    dropout: float = 0.1          # Dropout rate
-    cnn_kernel_size: int = 3      # CNN kernel size
-    task_weights: dict = {        # Cascade head weights
+    task: str = "risk"  # risk, forecast, policy, cascade
+    input_size: int = 32  # Number of input features
+    hidden_size: int = 256  # Backbone hidden dimension
+    n_layers: int = 2  # LSTM layers
+    dropout: float = 0.1  # Dropout rate
+    cnn_kernel_size: int = 3  # CNN kernel size
+    task_weights: dict = {  # Cascade head weights
         "regime": 0.2,
         "risk": 0.3,
         "alpha": 0.3,
@@ -52,13 +53,13 @@ class ModelConfig:
 ```python
 @dataclass
 class DataConfig:
-    source: str = "synthetic"     # synthetic, crypto, metaapi
-    seq_len: int = 100            # Sequence length for windowing
-    batch_size: int = 64          # Training batch size
-    test_size: float = 0.2        # Validation split fraction
-    num_workers: int = 4          # DataLoader workers
+    source: str = "synthetic"  # synthetic, crypto, metaapi
+    seq_len: int = 100  # Sequence length for windowing
+    batch_size: int = 64  # Training batch size
+    test_size: float = 0.2  # Validation split fraction
+    num_workers: int = 4  # DataLoader workers
     start_date: str = "2016-01-01"  # Historical data start
-    features: list = [...]        # 31 feature names (see below)
+    features: list = [...]  # 31 feature names (see below)
 ```
 
 Default feature list:
@@ -77,9 +78,9 @@ directional_change
 @dataclass
 class TrainConfig:
     epochs: int = 50
-    lr: float = 3e-4              # Learning rate
+    lr: float = 3e-4  # Learning rate
     weight_decay: float = 1e-5
-    use_amp: bool = True          # Automatic mixed precision
+    use_amp: bool = True  # Automatic mixed precision
     gradient_clip: float = 1.0
     checkpoint_dir: str = "./checkpoints"
     log_interval: int = 10
@@ -87,20 +88,40 @@ class TrainConfig:
     risk_gate_training: bool = True  # Suppress actions when VaR exceeds max_drawdown
 ```
 
+### PrivacyConfig
+
+Optional. No `privacy:` block in the YAML means no privacy stage runs — that is
+the default. See [PRIVACY.md](PRIVACY.md) for what each mechanism guarantees.
+
+```python
+@dataclass
+class PrivacyConfig:
+    epsilon_total: float  # Total epsilon ledger for this pipeline instance
+    k: int = 5  # Minimum equivalence-class size for `generalize`
+    key_env: str | None = None  # Env var NAME holding the HMAC key for pseudonymize()
+    features: dict = {}  # column -> {mechanism, epsilon, bounds, bins}
+```
+
+Each entry in `features` is a `PrivacyFeature`: `mechanism` is `"laplace"`
+(requires `epsilon > 0` and `bounds: [lo, hi]`) or `"generalize"` (requires
+`bins >= 2`, defaults to 10). Misconfiguration — an unknown mechanism,
+`epsilon <= 0`, missing or inverted bounds, `k < 2`, or feature epsilons
+summing past `epsilon_total` — raises at config load, not mid-training.
+
 ### ExecutionConfig
 
 ```python
 @dataclass
 class ExecutionConfig:
-    provider: str = "mock"        # metaapi or mock
+    provider: str = "mock"  # metaapi or mock
     metaapi_token: str = ""
     account_id: str = ""
     symbols: list = ["EURUSD"]
-    asset_class: str = "forex"    # forex, crypto, equity, commodity
+    asset_class: str = "forex"  # forex, crypto, equity, commodity
     max_drawdown: float = 0.05
     max_position_size: float = 1.0
     risk_sdk_enabled: bool = True
-    paper_trading: bool = True    # Must explicitly set False for live
+    paper_trading: bool = True  # Must explicitly set False for live
 ```
 
 ## Task-Specific Configurations
@@ -121,6 +142,15 @@ data:
 train:
   epochs: 50
   lr: 3e-4
+
+privacy:
+  epsilon_total: 1.0
+  k: 5
+  features:
+    volume:   {mechanism: laplace, epsilon: 0.5, bounds: [0, 1000]}
+    price:    {mechanism: laplace, epsilon: 0.5, bounds: [0, 500]}
+    fee_rate: {mechanism: generalize, bins: 10}
+    tx_count: {mechanism: generalize, bins: 10}
 ```
 
 ### Forecasting (train_forecast.yaml)

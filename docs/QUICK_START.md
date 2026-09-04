@@ -24,7 +24,7 @@ pip install -e .
 This installs three console scripts: `dignity-train`, `dignity-export`, and `dignity-backtest`.
 
 **Core dependencies:**
-- PyTorch 2.1+
+- PyTorch 2.5+
 - pandas, numpy, scipy, scikit-learn
 - ONNX and onnxruntime (for export)
 - pytest, ruff (development)
@@ -73,7 +73,9 @@ import torch
 config = DignityConfig.from_yaml("config/train_risk.yaml")
 
 # Prepare data
-pipeline = TransactionPipeline(seq_len=config.data.seq_len, features=config.data.features)
+pipeline = TransactionPipeline(
+    seq_len=config.data.seq_len, features=config.data.features
+)
 pipeline.fit(df_train)
 X_train = pipeline.transform(df_train)
 X_val = pipeline.transform(df_val)
@@ -92,33 +94,33 @@ criterion = torch.nn.BCELoss()
 
 # Training loop
 for epoch in range(10):
-    train_metrics = train_epoch(model, train_loader, optimizer, criterion, config.device)
+    train_metrics = train_epoch(
+        model, train_loader, optimizer, criterion, config.device
+    )
     val_metrics = validate_epoch(model, val_loader, criterion, config.device)
-    print(f"Epoch {epoch}: train={train_metrics['loss']:.4f}, val={val_metrics['loss']:.4f}")
+    print(
+        f"Epoch {epoch}: train={train_metrics['loss']:.4f}, val={val_metrics['loss']:.4f}"
+    )
 ```
 
 ## Privacy Features
 
+Turn on the privacy stage with a `privacy:` block in your config; it runs on raw
+columns before signals are computed. See `config/train_risk.yaml` for a live
+example and [PRIVACY.md](PRIVACY.md) for what each mechanism guarantees.
+
 ```python
-from core.privacy import PrivacyManager
 import numpy as np
+from core.privacy import PrivacyBudget, PrivacyManager
 
-# Hash identifiers
-hashed = PrivacyManager.hash_identifier("user_123", salt="secret_salt")
-
-# Anonymize a list of addresses
-addresses = ["0xabc123", "0xdef456", "0xghi789"]
-anonymized = PrivacyManager.anonymize_addresses(addresses, salt="secret_salt")
-
-# Quantize amounts (k-anonymity)
-amounts = np.array([100.50, 250.75, 75.25])
-quantized = PrivacyManager.quantize_amounts(amounts, bins=10)
-
-# Add differential privacy noise
-noisy = PrivacyManager.add_noise(amounts, epsilon=1.0, sensitivity=1.0)
-
-# Full sanitization pipeline
-result = PrivacyManager.sanitize_dataset(amounts, addresses, epsilon=0.1)
+pm = PrivacyManager(PrivacyBudget(epsilon_total=1.0), key=b"16+-byte-secret-key")
+pseudonyms = pm.pseudonymize_many(["user_a", "merchant_1"])
+noisy = pm.add_laplace_noise(
+    np.array([100.0, 250.0]), epsilon=1.0, bounds=(0.0, 1000.0)
+)
+generalized = PrivacyManager.generalize_amounts(
+    np.random.uniform(10, 100, 200), bins=10, k=5
+)
 ```
 
 ## Export to ONNX
@@ -148,7 +150,7 @@ print(f"Mean inference: {stats['mean_ms']:.2f} ms")
 ## Troubleshooting
 
 **ImportError: No module named 'torch'**
-Install PyTorch: `pip install torch>=2.1.0`
+Install PyTorch: `pip install torch>=2.5.0`
 
 **Tests failing after installation**
 Run `pytest tests/ -v` to verify all tests pass.

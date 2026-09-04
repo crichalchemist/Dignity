@@ -60,9 +60,9 @@ def _build_cascade_labels(
     # alpha: n-step forward return tanh-normalized to [-1, 1]
     fwd = np.zeros(n, dtype=np.float32)
     if alpha_horizon < n:
-        fwd[:-alpha_horizon] = (prices[alpha_horizon:] - prices[:-alpha_horizon]) / np.maximum(
-            prices[:-alpha_horizon], 1e-9
-        )
+        fwd[:-alpha_horizon] = (
+            prices[alpha_horizon:] - prices[:-alpha_horizon]
+        ) / np.maximum(prices[:-alpha_horizon], 1e-9)
     alpha = np.tanh(fwd * 20).reshape(-1, 1)
 
     # action: price-direction proxy (0=HOLD, 1=BUY, 2=SELL)
@@ -115,7 +115,9 @@ def _process_cascade_data(
 
     prices = df["close"].values if "close" in df.columns else df["price"].values
     regime_raw = (
-        df_signals["regime"].values if "regime" in df_signals.columns else np.zeros(len(prices))
+        df_signals["regime"].values
+        if "regime" in df_signals.columns
+        else np.zeros(len(prices))
     )
     labels_raw = _build_cascade_labels(prices, regime_raw)
 
@@ -123,7 +125,9 @@ def _process_cascade_data(
     n_seq = len(X_seq)
 
     # Align labels to sequence END (stride=1: seq i ends at i + seq_len - 1)
-    labels_seq = {k: v[seq_len - 1 : seq_len - 1 + n_seq] for k, v in labels_raw.items()}
+    labels_seq = {
+        k: v[seq_len - 1 : seq_len - 1 + n_seq] for k, v in labels_raw.items()
+    }
     return X_seq, labels_seq
 
 
@@ -178,7 +182,9 @@ def _train_cascade(config: DignityConfig, device: torch.device, resume: str | No
             account_id=config.execution.account_id,
             symbol=symbol,
         )
-        df_raw = asyncio.run(_fetch_history(src, start_time=config.data.start_date + "T00:00:00Z"))
+        df_raw = asyncio.run(
+            _fetch_history(src, start_time=config.data.start_date + "T00:00:00Z")
+        )
         print(f"Fetched {len(df_raw)} bars from MetaApi ({symbol})")
     else:
         print("\nGenerating synthetic OHLCV (no MetaApi credentials)...")
@@ -193,9 +199,12 @@ def _train_cascade(config: DignityConfig, device: torch.device, resume: str | No
     pipeline = TransactionPipeline(
         seq_len=config.data.seq_len,
         features=config.data.features,
+        privacy=config.privacy,
     )
 
-    X_seq, labels_seq = _process_cascade_data(df_raw, config, asset_cfg, pipeline, fit=True)
+    X_seq, labels_seq = _process_cascade_data(
+        df_raw, config, asset_cfg, pipeline, fit=True
+    )
 
     split_idx = int(len(X_seq) * (1 - config.data.test_size))
     X_train = X_seq[:split_idx]
@@ -325,6 +334,7 @@ def _train_single_head(config: DignityConfig, device: torch.device, resume: str 
     pipeline = TransactionPipeline(
         seq_len=config.data.seq_len,
         features=config.data.features,
+        privacy=config.privacy,
     )
 
     labels = df_train["label"].values if "label" in df_train.columns else None
@@ -334,16 +344,28 @@ def _train_single_head(config: DignityConfig, device: torch.device, resume: str 
         fit=True,
     )
 
+    if pipeline.privacy_manager is not None:
+        budget = pipeline.privacy_manager.budget
+        print(f"Privacy: ε spent {budget.spent:.3f} of {budget.epsilon_total:.3f}")
+
     split_idx = int(len(X_train) * (1 - config.data.test_size))
-    X_val, y_val = X_train[split_idx:], (y_train[split_idx:] if y_train is not None else None)
-    X_train, y_train = X_train[:split_idx], (y_train[:split_idx] if y_train is not None else None)
+    X_val, y_val = (
+        X_train[split_idx:],
+        (y_train[split_idx:] if y_train is not None else None),
+    )
+    X_train, y_train = (
+        X_train[:split_idx],
+        (y_train[:split_idx] if y_train is not None else None),
+    )
 
     print(f"Train sequences: {len(X_train)}, Val sequences: {len(X_val)}")
 
     train_loader = create_dataloader(
         X_train, y_train, batch_size=config.data.batch_size, shuffle=True
     )
-    val_loader = create_dataloader(X_val, y_val, batch_size=config.data.batch_size, shuffle=False)
+    val_loader = create_dataloader(
+        X_val, y_val, batch_size=config.data.batch_size, shuffle=False
+    )
 
     print("\nInitializing model...")
     model = Dignity(
@@ -402,7 +424,11 @@ def _train_single_head(config: DignityConfig, device: torch.device, resume: str 
         if epoch % config.train.save_interval == 0:
             path = checkpoint_dir / f"dignity_{config.model.task}_epoch{epoch}.pt"
             save_checkpoint(
-                model, optimizer, epoch, {"train": train_metrics, "val": val_metrics}, str(path)
+                model,
+                optimizer,
+                epoch,
+                {"train": train_metrics, "val": val_metrics},
+                str(path),
             )
             print(f"Checkpoint saved to {path}")
 

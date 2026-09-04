@@ -1,12 +1,13 @@
 [tool.ruff]
 # Exclude external/vendored code
-extend-exclude = ["models/timesFM", ".venvx", "build", "dist"]
+# docs/superpowers and docs/plans are design records whose code fences are fragments
+extend-exclude = ["models/timesFM", ".venvx", "build", "dist", "docs/superpowers", "docs/plans"]
 
 # Python version target
 target-version = "py310"
 
 # Line length (match Black default)
-line-length = 100
+line-length = 88
 
 [tool.ruff.lint]
 # Enable rule categories
@@ -28,6 +29,9 @@ ignore = [
     "B008", # Do not perform function calls in argument defaults (common in dataclasses)
     "B904", # Within except clause, raise exceptions with raise ... from err
     "SIM108", # Use ternary operator (sometimes reduces readability)
+    "N803", # sklearn convention: X as an argument name
+    "N806", # sklearn convention: X, y as local variable names
+    "N999", # repo root directory is capitalized `Dignity`; every __init__.py inherits the path
 ]
 
 # Allow unused variables prefixed with underscore
@@ -74,3 +78,9 @@ indent-style = "space"
 skip-magic-trailing-comma = false
 # Auto-detect line ending
 line-ending = "auto"
+
+[tool.coverage.run]
+# Measure only the privacy module, by path. `--cov=core.privacy` (dotted module) makes
+# coverage import `core` before pytest does and corrupts numpy's _NoValue sentinel under
+# coverage 7.16 / pytest-cov 7.1 (13 spurious "_NoValueType" failures). Path include avoids it.
+include = ["core/privacy.py"]

@@ -138,7 +138,9 @@ class SyntheticGenerator:
         anomaly_types = ["volume_spike", "price_manipulation", "fee_evasion"]
         for _ in range(num_anomalous):
             anomaly_type = np.random.choice(anomaly_types)
-            data = self.generate_anomalous_sequence(length=seq_len, anomaly_type=anomaly_type)
+            data = self.generate_anomalous_sequence(
+                length=seq_len, anomaly_type=anomaly_type
+            )
             sequences.append(data)
             labels.append(1)  # Anomalous
 
@@ -219,7 +221,9 @@ class SyntheticGenerator:
         open_[0] = close[0]
 
         # Volume correlates with price movement magnitude
-        volume = rng.uniform(1000, 5000, n_bars) * (1 + 2 * np.abs(returns) / max(vol, 1e-9))
+        volume = rng.uniform(1000, 5000, n_bars) * (
+            1 + 2 * np.abs(returns) / max(vol, 1e-9)
+        )
 
         idx = pd.date_range(start=start_date, periods=n_bars, freq=freq, tz="UTC")
         return pd.DataFrame(

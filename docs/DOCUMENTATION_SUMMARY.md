@@ -20,11 +20,11 @@
    - Programmatic configuration
 
 3. **PRIVACY.md** - Privacy operations guide
-   - Identity hashing
-   - Amount anonymization (quantization, generalization, rounding)
-   - Differential privacy (Laplace, Gaussian mechanisms)
-   - Privacy budget management
-   - Mathematical guarantees
+   - Keyed pseudonymization (HMAC-SHA256)
+   - Bounded Laplace noise with an ε ledger
+   - k-anonymous generalization
+   - What the shipped config does
+   - Known limitations
 
 4. **SIGNALS.md** - Signal processing reference
    - Volatility computation (std, variance, EWM)

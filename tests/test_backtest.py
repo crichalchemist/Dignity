@@ -216,7 +216,9 @@ class TestRunBacktest:
 
 
 class TestDignityStrategy:
-    def _run(self, action: int, var: float = 0.01, max_drawdown: float = 0.05) -> pd.Series:
+    def _run(
+        self, action: int, var: float = 0.01, max_drawdown: float = 0.05
+    ) -> pd.Series:
         signals = _make_signals(150, action=action)
         signals["var"] = np.full(150, var)
         config = BacktestConfig(max_drawdown=max_drawdown)
@@ -368,7 +370,9 @@ class TestComputeGateMetrics:
         return pd.Series(base)
 
     def test_arr_converted_from_percent(self):
-        m = compute_gate_metrics(self._make_stats(), {"var": np.zeros(100)}, BacktestConfig())
+        m = compute_gate_metrics(
+            self._make_stats(), {"var": np.zeros(100)}, BacktestConfig()
+        )
         assert m["arr"] == pytest.approx(0.20)
 
     def test_max_drawdown_is_absolute_fraction(self):
@@ -505,7 +509,9 @@ class TestWriteBacktestReport:
 
 class TestMetaApiSourceDateRange:
     def test_date_range_stored_on_construction(self):
-        src = MetaApiSource("tok", "acc", "EURUSD", date_range=("2020-01-01", "2022-12-31"))
+        src = MetaApiSource(
+            "tok", "acc", "EURUSD", date_range=("2020-01-01", "2022-12-31")
+        )
         assert src.date_range == ("2020-01-01", "2022-12-31")
 
     def test_no_date_range_defaults_to_none(self):
@@ -691,7 +697,9 @@ class TestAppendBarLog:
     def test_creates_file_if_absent(self):
         with tempfile.TemporaryDirectory() as tmp:
             log_path = Path(tmp) / "soak.jsonl"
-            append_bar_log(log_path, {"timestamp": "2026-01-01T00:00:00", "action": "HOLD"})
+            append_bar_log(
+                log_path, {"timestamp": "2026-01-01T00:00:00", "action": "HOLD"}
+            )
             assert log_path.exists()
 
     def test_each_line_is_valid_json(self):
@@ -849,7 +857,8 @@ class TestComputeRollingDrawdown:
     def test_excludes_entries_outside_window(self):
         # 10 days of data, window=3 — only last 3 days should count
         entries = [
-            {"timestamp": f"2026-01-{i:02d}T00:00:00", "realized_pnl": -0.10} for i in range(1, 11)
+            {"timestamp": f"2026-01-{i:02d}T00:00:00", "realized_pnl": -0.10}
+            for i in range(1, 11)
         ]
         result = compute_rolling_drawdown(entries, days=3)
         assert result == pytest.approx(-0.30)
@@ -951,7 +960,9 @@ class TestGoLiveCheck:
                 "win_rate": 0.55,
                 "gate_trigger_rate": 0.05,
             }
-            (d / "backtest_report_2026-01-01.json").write_text(json.dumps({"metrics": metrics}))
+            (d / "backtest_report_2026-01-01.json").write_text(
+                json.dumps({"metrics": metrics})
+            )
             self._write_valid_paper_log(d)
             assert run_checks(reports_dir=d) is False
 

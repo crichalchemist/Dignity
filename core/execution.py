@@ -47,7 +47,9 @@ def check_risk_gate(
         threshold; otherwise allowed=True with adjusted_size capped at max.
     """
     if var_estimate > max_drawdown:
-        return GateDecision(allowed=False, reason="drawdown_exceeded", adjusted_size=0.0)
+        return GateDecision(
+            allowed=False, reason="drawdown_exceeded", adjusted_size=0.0
+        )
 
     capped = min(float(position_size), float(max_position_size))
     return GateDecision(allowed=True, reason="ok", adjusted_size=capped)

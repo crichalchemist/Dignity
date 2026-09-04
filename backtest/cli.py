@@ -80,15 +80,21 @@ def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(
         description="Backtest a trained Dignity cascade model against historical OHLCV data."
     )
-    parser.add_argument("--checkpoint", required=True, help="Path to model checkpoint .pt file")
+    parser.add_argument(
+        "--checkpoint", required=True, help="Path to model checkpoint .pt file"
+    )
     parser.add_argument("--data", required=True, help="Path to OHLCV CSV file")
     parser.add_argument("--config", required=True, help="Path to DignityConfig YAML")
     parser.add_argument("--cash", type=float, default=10_000.0)
     parser.add_argument("--commission", type=float, default=0.0002)
     parser.add_argument("--spread", type=float, default=0.0001)
     parser.add_argument("--max-drawdown", type=float, default=0.05)
-    parser.add_argument("--plot", action="store_true", help="Generate interactive HTML plot")
-    parser.add_argument("--plot-path", default="backtest.html", help="Output path for HTML plot")
+    parser.add_argument(
+        "--plot", action="store_true", help="Generate interactive HTML plot"
+    )
+    parser.add_argument(
+        "--plot-path", default="backtest.html", help="Output path for HTML plot"
+    )
     args = parser.parse_args(argv)
 
     dignity_config = DignityConfig.from_yaml(args.config)
@@ -105,7 +111,9 @@ def main(argv: list[str] | None = None) -> None:
     )
 
     print("Running backtest ...")
-    stats = run_backtest(ohlcv, signals, config=bt_config, plot=args.plot, plot_path=args.plot_path)
+    stats = run_backtest(
+        ohlcv, signals, config=bt_config, plot=args.plot, plot_path=args.plot_path
+    )
 
     keys = [
         "Return [%]",

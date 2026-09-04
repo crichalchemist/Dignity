@@ -1,13 +1,16 @@
 """Test core utilities."""
 
+from pathlib import Path
+
 import numpy as np
 import pandas as pd
 import pytest
+import yaml
 
-from core.config import DignityConfig
+from core.config import DignityConfig, PrivacyConfig
 from core.execution import MAX_POSITION_FRACTION, apply_live_position_cap
-from core.privacy import PrivacyManager
 from core.signals import ASSET_CONFIGS, AssetConfig, SignalProcessor
+from data.source.synthetic import SyntheticGenerator
 
 
 class TestSignalProcessor:
@@ -71,56 +74,6 @@ class TestSignalProcessor:
         assert np.any(regimes == 2)  # High vol regime
 
 
-class TestPrivacyManager:
-    """Test privacy-preserving operations."""
-
-    def test_hash_identifier(self):
-        """Test identifier hashing."""
-        addr1 = "0x1234567890abcdef"
-        addr2 = "0x1234567890abcdef"
-        addr3 = "0xfedcba0987654321"
-
-        hash1 = PrivacyManager.hash_identifier(addr1)
-        hash2 = PrivacyManager.hash_identifier(addr2)
-        hash3 = PrivacyManager.hash_identifier(addr3)
-
-        # Same input = same hash
-        assert hash1 == hash2
-        # Different input = different hash
-        assert hash1 != hash3
-        # Hash is hex string
-        assert len(hash1) == 64
-
-    def test_anonymize_addresses(self):
-        """Test batch address anonymization."""
-        addresses = ["addr1", "addr2", "addr3"]
-        hashed = PrivacyManager.anonymize_addresses(addresses)
-
-        assert len(hashed) == len(addresses)
-        assert all(len(h) == 64 for h in hashed)
-        assert len(set(hashed)) == len(addresses)  # All unique
-
-    def test_quantize_amounts(self):
-        """Test amount quantization."""
-        amounts = np.random.uniform(10, 100, 1000)
-        quantized = PrivacyManager.quantize_amounts(amounts, bins=10)
-
-        # Should have fewer unique values
-        assert len(np.unique(quantized)) <= 10
-        # Values should be within original range
-        assert np.min(quantized) >= np.min(amounts)
-        assert np.max(quantized) <= np.max(amounts)
-
-    def test_add_noise(self):
-        """Test differential privacy noise."""
-        values = np.array([100.0, 200.0, 300.0])
-        noisy = PrivacyManager.add_noise(values, epsilon=1.0)
-
-        # Should be different but similar
-        assert not np.array_equal(values, noisy)
-        assert np.allclose(values, noisy, atol=50)  # Reasonable noise
-
-
 class TestDignityConfig:
     """Test configuration management."""
 
@@ -147,12 +100,97 @@ class TestDignityConfig:
         assert config2.data.seq_len == config1.data.seq_len
 
 
+def _valid_privacy_block():
+    return {
+        "epsilon_total": 1.0,
+        "k": 5,
+        "key_env": None,
+        "features": {
+            "volume": {"mechanism": "laplace", "epsilon": 0.5, "bounds": [0, 1000]},
+            "price": {"mechanism": "laplace", "epsilon": 0.5, "bounds": [0, 500]},
+            "fee_rate": {"mechanism": "generalize", "bins": 10},
+        },
+    }
+
+
+class TestPrivacyConfig:
+    """Misconfiguration fails at load time, and absence means no privacy stage."""
+
+    def test_absent_block_yields_none(self, tmp_path):
+        path = tmp_path / "c.yaml"
+        path.write_text(yaml.dump({"model": {"task": "risk"}}))
+        assert DignityConfig.from_yaml(str(path)).privacy is None
+
+    def test_present_but_empty_block_is_rejected(self, tmp_path):
+        path = tmp_path / "cfg.yaml"
+        path.write_text(yaml.safe_dump({"privacy": {}}))
+        with pytest.raises(TypeError):
+            DignityConfig.from_yaml(str(path))
+
+    def test_valid_block_round_trips_through_yaml(self, tmp_path):
+        path = tmp_path / "c.yaml"
+        path.write_text(yaml.dump({"privacy": _valid_privacy_block()}))
+        cfg = DignityConfig.from_yaml(str(path))
+        assert cfg.privacy is not None
+        assert cfg.privacy.features["volume"].bounds == (0.0, 1000.0)
+
+        out = tmp_path / "out.yaml"
+        cfg.to_yaml(str(out))
+        again = DignityConfig.from_yaml(str(out))
+        assert again.privacy.to_dict() == cfg.privacy.to_dict()
+
+    def test_shipped_configs_match_spec(self):
+        root = Path(__file__).resolve().parents[1] / "config"
+        assert (
+            DignityConfig.from_yaml(str(root / "train_risk.yaml")).privacy is not None
+        )
+        assert DignityConfig.from_yaml(str(root / "base.yaml")).privacy is None
+
+    def test_shipped_risk_config_covers_every_raw_model_input(self):
+        root = Path(__file__).resolve().parents[1] / "config"
+        cfg = DignityConfig.from_yaml(str(root / "train_risk.yaml"))
+        raw_columns = set(SyntheticGenerator(seed=0).generate_normal_sequence(length=8))
+        raw_inputs = (raw_columns - {"label"}) & set(cfg.data.features)
+        assert raw_inputs, (
+            "shipped features must include at least one raw source column"
+        )
+        assert raw_inputs <= set(cfg.privacy.features)
+
+    @pytest.mark.parametrize(
+        "mutate,match",
+        [
+            (
+                lambda b: b["features"]["volume"].update(mechanism="gaussian"),
+                "unknown mechanism",
+            ),
+            (lambda b: b["features"]["volume"].update(epsilon=0.0), "epsilon > 0"),
+            (lambda b: b["features"]["volume"].pop("bounds"), "requires bounds"),
+            (lambda b: b["features"]["volume"].update(bounds=[10, 10]), "lo < hi"),
+            (lambda b: b["features"]["fee_rate"].update(epsilon=0.1), "bins only"),
+            (lambda b: b["features"]["fee_rate"].update(bounds=[0, 1]), "bins only"),
+            (lambda b: b.update(k=1), "k must be"),
+            (lambda b: b["features"]["fee_rate"].update(bins=1), "bins must be"),
+            (
+                lambda b: b["features"]["volume"].update(epsilon=0.9),
+                "exceeds epsilon_total",
+            ),
+        ],
+    )
+    def test_rejects_bad_privacy_block(self, mutate, match):
+        block = _valid_privacy_block()
+        mutate(block)
+        with pytest.raises(ValueError, match=match):
+            PrivacyConfig(**block)
+
+
 # ---------------------------------------------------------------------------
 # Helpers shared across new signal tests
 # ---------------------------------------------------------------------------
 
 
-def _make_ohlcv(n: int = 200) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+def _make_ohlcv(
+    n: int = 200,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """Return (open, high, low, close, volume) arrays of length n."""
     rng = np.random.default_rng(42)
     close = np.cumprod(1 + rng.normal(0, 0.005, n)) * 100.0
@@ -179,7 +217,10 @@ class TestAssetConfig:
             assert isinstance(cfg, AssetConfig)
 
     def test_crypto_dc_threshold_10x_larger_than_forex(self):
-        assert ASSET_CONFIGS["crypto"].dc_threshold >= ASSET_CONFIGS["forex"].dc_threshold * 5
+        assert (
+            ASSET_CONFIGS["crypto"].dc_threshold
+            >= ASSET_CONFIGS["forex"].dc_threshold * 5
+        )
 
     def test_crypto_rsi_period_shorter_than_forex(self):
         assert ASSET_CONFIGS["crypto"].rsi_period < ASSET_CONFIGS["forex"].rsi_period
@@ -240,12 +281,16 @@ class TestNewSignals:
     # --- Bollinger Bands ---
 
     def test_bollinger_returns_two_arrays(self):
-        pct_b, bandwidth = SignalProcessor.bollinger_bands(self.close, window=20, n_std=2.0)
+        pct_b, bandwidth = SignalProcessor.bollinger_bands(
+            self.close, window=20, n_std=2.0
+        )
         assert pct_b.shape == self.close.shape
         assert bandwidth.shape == self.close.shape
 
     def test_bollinger_no_nan(self):
-        pct_b, bandwidth = SignalProcessor.bollinger_bands(self.close, window=20, n_std=2.0)
+        pct_b, bandwidth = SignalProcessor.bollinger_bands(
+            self.close, window=20, n_std=2.0
+        )
         assert not np.any(np.isnan(pct_b))
         assert not np.any(np.isnan(bandwidth))
 
@@ -448,7 +493,9 @@ class TestDCSignalExact:
 
     def test_downward_dc_fires_at_correct_bar(self):
         # Upward DC at bar 4, then downward DC at bar 8 (price drops 10% from new extreme)
-        prices = np.array([100.0, 101.0, 103.0, 106.0, 111.0, 108.0, 105.0, 101.0, 99.9])
+        prices = np.array(
+            [100.0, 101.0, 103.0, 106.0, 111.0, 108.0, 105.0, 101.0, 99.9]
+        )
         result = SignalProcessor.dc_state_machine(prices, threshold=self.THRESHOLD)
         assert result["dc_direction"][4] == pytest.approx(1.0)
         assert result["dc_direction"][8] == pytest.approx(-1.0)
@@ -487,7 +534,9 @@ class TestDCSignalExact:
 
     def test_bars_since_event_counts_up_between_events(self):
         # Upward DC at bar 4, then free run — count goes 0, 1, 2, ...
-        prices = np.array([100.0, 101.0, 103.0, 106.0, 111.0, 108.0, 105.0, 101.0, 99.9])
+        prices = np.array(
+            [100.0, 101.0, 103.0, 106.0, 111.0, 108.0, 105.0, 101.0, 99.9]
+        )
         result = SignalProcessor.dc_state_machine(prices, threshold=self.THRESHOLD)
         # After upward DC at bar 4: bars 5, 6, 7 → 1, 2, 3
         assert result["bars_since_event"][5] == pytest.approx(1.0)
@@ -497,13 +546,17 @@ class TestDCSignalExact:
         assert result["bars_since_event"][8] == pytest.approx(0.0)
 
     def test_dc_direction_only_takes_values_minus1_0_plus1(self):
-        prices = np.array([100.0, 101.0, 103.0, 106.0, 111.0, 108.0, 105.0, 101.0, 99.9])
+        prices = np.array(
+            [100.0, 101.0, 103.0, 106.0, 111.0, 108.0, 105.0, 101.0, 99.9]
+        )
         result = SignalProcessor.dc_state_machine(prices, threshold=self.THRESHOLD)
         unique_vals = set(np.unique(result["dc_direction"]))
         assert unique_vals.issubset({-1.0, 0.0, 1.0})
 
     def test_no_nan_in_any_dc_output(self):
-        prices = np.array([100.0, 101.0, 103.0, 106.0, 111.0, 108.0, 105.0, 101.0, 99.9])
+        prices = np.array(
+            [100.0, 101.0, 103.0, 106.0, 111.0, 108.0, 105.0, 101.0, 99.9]
+        )
         result = SignalProcessor.dc_state_machine(prices, threshold=self.THRESHOLD)
         for key, arr in result.items():
             assert not np.any(np.isnan(arr)), f"NaN in {key}"
@@ -643,7 +696,10 @@ class TestCheckRiskGate:
         from core.execution import check_risk_gate
 
         decision = check_risk_gate(
-            var_estimate=0.06, position_size=1.0, max_drawdown=0.05, max_position_size=2.0
+            var_estimate=0.06,
+            position_size=1.0,
+            max_drawdown=0.05,
+            max_position_size=2.0,
         )
         assert decision.allowed is False
         assert decision.adjusted_size == 0.0
@@ -653,7 +709,10 @@ class TestCheckRiskGate:
         from core.execution import check_risk_gate
 
         decision = check_risk_gate(
-            var_estimate=0.03, position_size=0.5, max_drawdown=0.05, max_position_size=2.0
+            var_estimate=0.03,
+            position_size=0.5,
+            max_drawdown=0.05,
+            max_position_size=2.0,
         )
         assert decision.allowed is True
         assert decision.reason == "ok"
@@ -663,7 +722,10 @@ class TestCheckRiskGate:
         from core.execution import check_risk_gate
 
         decision = check_risk_gate(
-            var_estimate=0.05, position_size=0.5, max_drawdown=0.05, max_position_size=2.0
+            var_estimate=0.05,
+            position_size=0.5,
+            max_drawdown=0.05,
+            max_position_size=2.0,
         )
         assert decision.allowed is True
 
@@ -671,7 +733,10 @@ class TestCheckRiskGate:
         from core.execution import check_risk_gate
 
         decision = check_risk_gate(
-            var_estimate=0.01, position_size=5.0, max_drawdown=0.05, max_position_size=1.0
+            var_estimate=0.01,
+            position_size=5.0,
+            max_drawdown=0.05,
+            max_position_size=1.0,
         )
         assert decision.adjusted_size == pytest.approx(1.0)
 
@@ -679,7 +744,10 @@ class TestCheckRiskGate:
         from core.execution import check_risk_gate
 
         decision = check_risk_gate(
-            var_estimate=0.01, position_size=0.3, max_drawdown=0.05, max_position_size=1.0
+            var_estimate=0.01,
+            position_size=0.3,
+            max_drawdown=0.05,
+            max_position_size=1.0,
         )
         assert decision.adjusted_size == pytest.approx(0.3)
 
@@ -687,7 +755,10 @@ class TestCheckRiskGate:
         from core.execution import check_risk_gate
 
         decision = check_risk_gate(
-            var_estimate=0.01, position_size=0.5, max_drawdown=0.05, max_position_size=1.0
+            var_estimate=0.01,
+            position_size=0.5,
+            max_drawdown=0.05,
+            max_position_size=1.0,
         )
         with pytest.raises((TypeError, AttributeError)):
             decision.allowed = False  # type: ignore[misc]
@@ -696,7 +767,10 @@ class TestCheckRiskGate:
         from core.execution import check_risk_gate
 
         decision = check_risk_gate(
-            var_estimate=0.0, position_size=0.1, max_drawdown=0.05, max_position_size=1.0
+            var_estimate=0.0,
+            position_size=0.1,
+            max_drawdown=0.05,
+            max_position_size=1.0,
         )
         assert decision.allowed is True
 
@@ -723,24 +797,32 @@ class TestMetaApiExecutorGate:
 
     def test_buy_blocked_by_gate_returns_none(self):
         ex = self._make_executor(max_drawdown=0.05)
-        result = self._run(ex.execute(action_idx=1, position_size=0.1, var_estimate=0.10))
+        result = self._run(
+            ex.execute(action_idx=1, position_size=0.1, var_estimate=0.10)
+        )
         assert result is None
 
     def test_buy_allowed_by_gate_returns_order(self):
         ex = self._make_executor(max_drawdown=0.05)
-        result = self._run(ex.execute(action_idx=1, position_size=0.1, var_estimate=0.02))
+        result = self._run(
+            ex.execute(action_idx=1, position_size=0.1, var_estimate=0.02)
+        )
         assert result is not None
         assert result["action"] == "BUY"
 
     def test_sell_blocked_by_gate_returns_none(self):
         ex = self._make_executor(max_drawdown=0.05)
-        result = self._run(ex.execute(action_idx=2, position_size=0.1, var_estimate=0.10))
+        result = self._run(
+            ex.execute(action_idx=2, position_size=0.1, var_estimate=0.10)
+        )
         assert result is None
 
     def test_hold_always_returns_none_regardless_of_var(self):
         """HOLD short-circuits before gate check."""
         ex = self._make_executor(max_drawdown=0.05)
-        result = self._run(ex.execute(action_idx=0, position_size=0.1, var_estimate=0.99))
+        result = self._run(
+            ex.execute(action_idx=0, position_size=0.1, var_estimate=0.99)
+        )
         assert result is None
 
 

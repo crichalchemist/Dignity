@@ -159,7 +159,9 @@ def run_backtest(
 
     # Inject pre-computed signals as class-level state on DignityStrategy.
     # backtesting.py calls Strategy.init() once, which wraps these via I().
-    DignityStrategy._signals = {k: np.asarray(v, dtype=np.float64) for k, v in signals.items()}
+    DignityStrategy._signals = {
+        k: np.asarray(v, dtype=np.float64) for k, v in signals.items()
+    }
 
     # Stamp optimizable parameters onto the class so bt.optimize() can vary them
     DignityStrategy.max_drawdown = config.max_drawdown
@@ -234,7 +236,9 @@ def validate_backtest_results(metrics: dict[str, float]) -> None:
     if metrics.get("arr", 0.0) < BACKTEST_MIN_ARR:
         failures.append(f"ARR {metrics['arr']:.1%} < required {BACKTEST_MIN_ARR:.0%}")
     if metrics.get("sharpe", 0.0) < BACKTEST_MIN_SHARPE:
-        failures.append(f"Sharpe {metrics['sharpe']:.2f} < required {BACKTEST_MIN_SHARPE:.1f}")
+        failures.append(
+            f"Sharpe {metrics['sharpe']:.2f} < required {BACKTEST_MIN_SHARPE:.1f}"
+        )
     if metrics.get("max_drawdown", 1.0) > BACKTEST_MAX_DRAWDOWN:
         failures.append(
             f"Max drawdown {metrics['max_drawdown']:.1%} > allowed {BACKTEST_MAX_DRAWDOWN:.0%}"

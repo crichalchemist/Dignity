@@ -69,7 +69,9 @@ def run_checks(reports_dir: Path = _REPORTS_DIR) -> bool:
         print("FAIL  paper_trading_log: file missing or empty")
         passed = False
     else:
-        backtest_gate_rate = metrics.get("gate_trigger_rate", 0.0) if "metrics" in locals() else 0.0
+        backtest_gate_rate = (
+            metrics.get("gate_trigger_rate", 0.0) if "metrics" in locals() else 0.0
+        )
         soak = evaluate_soak_gate(entries, backtest_gate_rate=backtest_gate_rate)
 
         for criterion, ok in soak.items():

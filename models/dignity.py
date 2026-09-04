@@ -111,7 +111,8 @@ class Dignity(nn.Module):
                 dropout=dropout,
             )
             self.policy_head = PolicyHead(
-                input_size=hidden_size + 2,  # context + alpha_score + var_estimate [B, 258]
+                input_size=hidden_size
+                + 2,  # context + alpha_score + var_estimate [B, 258]
                 n_actions=n_actions,
                 hidden_size=head_hidden,
                 dropout=dropout,
@@ -159,7 +160,9 @@ class Dignity(nn.Module):
         alpha_score = self.alpha_head(alpha_input)  # [B, 1]
 
         # Stage 4 — policy conditioned on alpha + var (quality + risk gate signal)
-        policy_input = torch.cat([context, alpha_score, var_estimate], dim=-1)  # [B, hidden+2]
+        policy_input = torch.cat(
+            [context, alpha_score, var_estimate], dim=-1
+        )  # [B, hidden+2]
         action_logits, value = self.policy_head(policy_input)  # [B, n_actions], [B, 1]
 
         return {

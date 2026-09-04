@@ -168,7 +168,9 @@ class SignalProcessor:
         return bars_since
 
     @staticmethod
-    def regime_detection(volatility: np.ndarray, vol_threshold: float = 0.5) -> np.ndarray:
+    def regime_detection(
+        volatility: np.ndarray, vol_threshold: float = 0.5
+    ) -> np.ndarray:
         """Classify regime: 0=calm, 1=normal, 2=turbulent."""
         if len(volatility) == 0:
             return np.zeros(0, dtype=int)
@@ -235,7 +237,9 @@ class SignalProcessor:
         return pct_b.astype(np.float64), band_width.astype(np.float64)
 
     @staticmethod
-    def atr(high: np.ndarray, low: np.ndarray, close: np.ndarray, period: int = 14) -> np.ndarray:
+    def atr(
+        high: np.ndarray, low: np.ndarray, close: np.ndarray, period: int = 14
+    ) -> np.ndarray:
         """Average True Range — smoothed via EMA."""
         high = high.astype(np.float64)
         low = low.astype(np.float64)
@@ -271,7 +275,9 @@ class SignalProcessor:
         return k, d
 
     @staticmethod
-    def adx(high: np.ndarray, low: np.ndarray, close: np.ndarray, period: int = 14) -> np.ndarray:
+    def adx(
+        high: np.ndarray, low: np.ndarray, close: np.ndarray, period: int = 14
+    ) -> np.ndarray:
         """Average Directional Index in [0, 100]. Measures trend strength."""
         high = high.astype(np.float64)
         low = low.astype(np.float64)
@@ -348,7 +354,9 @@ class SignalProcessor:
         return SignalProcessor.volatility(log_returns, window)
 
     @staticmethod
-    def vol_ratio(prices: np.ndarray, short_window: int = 5, long_window: int = 20) -> np.ndarray:
+    def vol_ratio(
+        prices: np.ndarray, short_window: int = 5, long_window: int = 20
+    ) -> np.ndarray:
         """Ratio of short-term to long-term realized volatility."""
         short_vol = SignalProcessor.realized_volatility(prices, short_window)
         long_vol = SignalProcessor.realized_volatility(prices, long_window)
@@ -365,7 +373,9 @@ class SignalProcessor:
         return signed.astype(np.float64)
 
     @staticmethod
-    def dc_state_machine(prices: np.ndarray, threshold: float = 0.0005) -> dict[str, np.ndarray]:
+    def dc_state_machine(
+        prices: np.ndarray, threshold: float = 0.0005
+    ) -> dict[str, np.ndarray]:
         """Directional-change intrinsic time (dense enrichment mode).
 
         Tracks a DC state machine: emits an event when price moves by
@@ -450,7 +460,11 @@ class SignalProcessor:
         fees = fees.astype(np.float64) if fees is not None else np.zeros_like(volumes)
         _high = high.astype(np.float64) if high is not None else prices
         _low = low.astype(np.float64) if low is not None else prices
-        tx_count = tx_count.astype(np.float64) if tx_count is not None else np.zeros_like(volumes)
+        tx_count = (
+            tx_count.astype(np.float64)
+            if tx_count is not None
+            else np.zeros_like(volumes)
+        )
 
         # --- Feature Computation ---
         vol_raw = cls.volatility(prices)
@@ -458,7 +472,9 @@ class SignalProcessor:
         macd_line, macd_sig, macd_hist = cls.macd(prices, 12, 26, 9)
         pct_b, bw = cls.bollinger_bands(prices, window=cfg.bollinger_window, n_std=2.0)
         stoch_k, stoch_d = cls.stochastic(_high, _low, prices, 14, 3)
-        bars_since = cls.bars_since_significant_move(prices, vol_window=20, vol_multiplier=1.0)
+        bars_since = cls.bars_since_significant_move(
+            prices, vol_window=20, vol_multiplier=1.0
+        )
 
         # --- Assemble final 32-feature dictionary ---
         signals = {
@@ -492,10 +508,15 @@ class SignalProcessor:
             "dc_bars_since_event": dc["bars_since_event"],
             "volume_volatility": cls.volatility(volumes),
             "volume_entropy": np.array(
-                [cls.entropy(volumes[max(0, i - 50) : i + 1]) for i in range(len(volumes))]
+                [
+                    cls.entropy(volumes[max(0, i - 50) : i + 1])
+                    for i in range(len(volumes))
+                ]
             ),
             "price_change": np.gradient(prices),
-            "directional_change": cls.directional_change(prices, threshold=cfg.dc_threshold),
+            "directional_change": cls.directional_change(
+                prices, threshold=cfg.dc_threshold
+            ),
             "regime": cls.regime_detection(vol_raw).astype(np.float64),
         }
 

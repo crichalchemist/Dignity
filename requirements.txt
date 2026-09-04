@@ -1,5 +1,6 @@
 # Core ML Framework
-torch>=2.2.0
+# dynamo= kwarg on torch.onnx.export (export/to_onnx.py)
+torch>=2.5.0
 
 # Data Science
 pandas>=2.0.0
@@ -23,3 +24,6 @@ pytest-cov>=4.1.0
 
 # Code Quality
 ruff>=0.6.0
+
+# Backtesting (backtest/ module and tests/test_backtest.py)
+backtesting>=0.3.3

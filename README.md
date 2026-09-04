@@ -1,17 +1,17 @@
 # Dignity Core – Privacy-Preserving Sequence Modeling for Transactional Behavior
 
-[![PyTorch](https://img.shields.io/badge/PyTorch-2.1+-ee4c2c.svg)](https://pytorch.org/)
+[![PyTorch](https://img.shields.io/badge/PyTorch-2.5+-ee4c2c.svg)](https://pytorch.org/)
 [![Python](https://img.shields.io/badge/Python-3.10+-blue.svg)](https://python.org/)
-[![Tests](https://img.shields.io/badge/tests-324%20passing-brightgreen.svg)]()
+[![CI](https://github.com/crichalchemist/Dignity/actions/workflows/ci.yml/badge.svg)](https://github.com/crichalchemist/Dignity/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
-**Dignity** is a privacy-preserving deep learning framework for modeling transactional behavior patterns. It provides modular components for signal processing, data pipelines, and neural architectures with built-in privacy safeguards including differential privacy and secure data handling.
+**Dignity** is a privacy-preserving deep learning framework for modeling transactional behavior patterns. It provides modular components for signal processing, data pipelines, and neural architectures with an input-level differential-privacy stage, k-anonymous generalization, and keyed pseudonymization — each backed by a test.
 
 ## Overview
 
 Dignity Core implements privacy-first sequence modeling:
 
-- **Privacy-Preserving**: Built-in hashing, anonymization, quantization, and differential privacy via `PrivacyManager`
+- **Privacy-Preserving**: Keyed pseudonymization, k-anonymous generalization, and input-level ε-DP with a budget ledger
 - **Signal Processing**: 32 quant finance features — RSI, MACD, Bollinger Bands, ATR, stochastic, ADX, OBV, VWAP, volatility, momentum, regime detection, and more
 - **Modular Architecture**: Clean separation between data pipeline, model components, and training infrastructure
 - **Deployable**: ONNX export with verification and benchmarking for production inference
@@ -20,7 +20,7 @@ Dignity Core implements privacy-first sequence modeling:
 
 ## Key Features
 
-- **Privacy-First**: SHA-256 hashing, address anonymization, k-anonymity quantization, Laplace differential privacy
+- **Privacy-First**: Keyed pseudonymization, bounded Laplace noise with ε accounting, k-anonymous generalization — see docs/PRIVACY.md
 - **32 Signal Features**: Full OHLCV-derived feature set for quant finance (RSI, MACD, Bollinger %B, ATR, stochastic, ADX, OBV, VWAP, realized volatility, DC state machine, and more)
 - **Modular Design**: Core utilities, data pipeline, and model components are cleanly separated
 - **Hybrid Backbone**: CNN1D + StackedLSTM + AdditiveAttention with composable task heads
@@ -28,7 +28,7 @@ Dignity Core implements privacy-first sequence modeling:
 - **ONNX Export**: Conversion with verification and inference benchmarking
 - **Synthetic Data**: Built-in generators for testing and prototyping
 - **Training Infrastructure**: AMP support, gradient clipping, cosine scheduling, checkpointing, CLI interface
-- **324 Tests**: Comprehensive test suite across core utilities, data pipeline, models, training, export, and backtest
+- **384 Tests**: Comprehensive test suite across core utilities, data pipeline, models, training, export, and backtest
 - **YAML Configuration**: Declarative configs for different tasks and environments
 
 ## Quick Start
@@ -60,11 +60,7 @@ from data.source.synthetic import SyntheticGenerator
 
 # Generate synthetic transaction sequences
 gen = SyntheticGenerator(seed=42)
-dataset = gen.generate_dataset(
-    num_normal=800,
-    num_anomalous=200,
-    seq_len=100
-)
+dataset = gen.generate_dataset(num_normal=800, num_anomalous=200, seq_len=100)
 
 print(f"Generated {len(dataset)} rows")
 ```
@@ -72,26 +68,30 @@ print(f"Generated {len(dataset)} rows")
 #### Privacy Operations
 
 ```python
-from core.privacy import PrivacyManager
 import numpy as np
+from core.privacy import PrivacyBudget, PrivacyManager
 
-# Hash transaction identifiers
-hashed = PrivacyManager.hash_identifier("0x1234abcd5678ef90", salt="secure_salt")
+# One budget per release; epsilons add and overspending raises BudgetExhausted.
+pm = PrivacyManager(
+    PrivacyBudget(epsilon_total=1.0), key=b"load-this-from-the-environment"
+)
 
-# Anonymize addresses
-addresses = ["0xabc123", "0xdef456", "0xghi789"]
-anonymized = PrivacyManager.anonymize_addresses(addresses, salt="secure_salt")
+# Keyed pseudonymization (HMAC-SHA256): linkable under one key, unlinkable across keys
+pseudonym = pm.pseudonymize("0x1234abcd5678ef90")
 
-# Quantize amounts (k-anonymity via binning)
+# Bounded Laplace noise: clipped to bounds, sensitivity = hi - lo, spends epsilon
 amounts = np.array([123.456, 789.012, 456.789])
-quantized = PrivacyManager.quantize_amounts(amounts, bins=10)
+noisy = pm.add_laplace_noise(amounts, epsilon=0.5, bounds=(0.0, 1000.0))
 
-# Add differential privacy noise
-noisy = PrivacyManager.add_noise(amounts, epsilon=1.0, sensitivity=1.0)
-
-# Full sanitization pipeline
-result = PrivacyManager.sanitize_dataset(amounts, addresses, epsilon=0.1)
+# k-anonymous generalization: every output value is shared by >= k records
+generalized = PrivacyManager.generalize_amounts(
+    np.random.uniform(10, 100, 200), bins=10, k=5
+)
 ```
+
+In training, none of this is called by hand: a `privacy:` block in the config
+turns on a pipeline stage that runs before signals are computed. **No block, no
+stage.** See `config/train_risk.yaml` and [docs/PRIVACY.md](docs/PRIVACY.md).
 
 #### Train a Model
 
@@ -129,11 +129,9 @@ Data Sources
 ├── Cryptocurrency APIs (CryptoSource, MetaApiSource)
 └── Custom Sources (via data/source/ extensibility)
                     ↓
-Privacy Operations (core/privacy.py)
-├── Hash transaction IDs (SHA-256)
-├── Anonymize addresses
-├── Quantize amounts (k-anonymity)
-└── Add differential privacy noise (Laplace)
+Privacy Stage (core/privacy.py — optional, from the `privacy:` config block)
+├── Bounded Laplace noise (ε-DP, budget-ledgered)
+└── k-anonymous generalization (quantile bins)
                     ↓
 Signal Processing (core/signals.py)
 ├── 32 OHLCV-derived features
@@ -192,14 +190,13 @@ The core model implements a modular hybrid architecture:
 
 ### Privacy Operations
 
-The `PrivacyManager` class in `core/privacy.py` provides:
+`core/privacy.py` claims exactly three things, each enforced by a test:
 
-- **Hashing**: `hash_identifier()` — SHA-256 with configurable salt
-- **Anonymization**: `anonymize_addresses()` — batch hash addresses
-- **Quantization**: `quantize_amounts()` — k-anonymity via binning
-- **Differential Privacy**: `add_noise()` — Laplace noise with configurable epsilon
-- **Rare Event Suppression**: `suppress_rare_events()` — k-threshold filtering
-- **Full Pipeline**: `sanitize_dataset()` — chains quantization, noise, and anonymization
+- **Keyed pseudonymization** (HMAC-SHA256, key required) — linkable under one key, unlinkable across keys
+- **Input-level ε-differential privacy** — clipped Laplace noise with sensitivity derived from public bounds and ε spent against a ledger that refuses to overspend
+- **k-anonymity** for generalized columns — quantile bins merged until every class has ≥ k records
+
+The stage runs on raw columns *before* signal computation, so derived features inherit the DP guarantee. What it does **not** claim — and why — is in [docs/THREAT-MODEL.md](docs/THREAT-MODEL.md).
 
 ### Signal Processing
 
@@ -232,7 +229,7 @@ Dignity/
 ├── core/                     # Core utilities
 │   ├── config.py            # YAML-based configuration (DignityConfig)
 │   ├── signals.py           # 32-feature signal processor (SignalProcessor)
-│   └── privacy.py           # Privacy operations (PrivacyManager)
+│   └── privacy.py           # Privacy primitives (pseudonymization, Laplace, k-anonymity)
 │
 ├── data/                     # Data pipeline
 │   ├── pipeline.py          # TransactionPipeline (signals, scaling, windowing)
@@ -273,7 +270,7 @@ Dignity/
 │   ├── train_quant.yaml     # Live execution (gated)
 │   └── colab.yaml           # Google Colab optimized
 │
-├── tests/                    # Test suite (324 tests)
+├── tests/                    # Test suite (384 tests)
 │   ├── conftest.py          # Pytest fixtures
 │   ├── test_core.py         # Core utilities
 │   ├── test_data.py         # Data pipeline
@@ -287,7 +284,7 @@ Dignity/
 
 **Package Stats:**
 - 48 Python modules (~8,000 lines of code)
-- 324 tests across 6 test files
+- 384 tests collected; 100% line coverage enforced on core/privacy.py in CI
 - 6 YAML configs for different tasks and environments
 - 32 input features per timestep (default config)
 
@@ -347,6 +344,7 @@ config.to_yaml("config/custom_config.yaml")
 from data.source.crypto import CryptoSource
 import pandas as pd
 
+
 # Implement custom data source
 class CustomSource:
     def load_data(self, symbol: str, start_date: str, end_date: str) -> pd.DataFrame:
@@ -363,10 +361,10 @@ import torch
 # Create model with custom config
 model = Dignity(
     task="risk",
-    input_size=32,      # Number of features
-    hidden_size=256,    # Backbone hidden dimension
-    n_layers=2,         # LSTM layers
-    dropout=0.3
+    input_size=32,  # Number of features
+    hidden_size=256,  # Backbone hidden dimension
+    n_layers=2,  # LSTM layers
+    dropout=0.3,
 )
 
 # Forward pass
@@ -398,7 +396,7 @@ pytest tests/ --cov=. --cov-report=html
 **Dignity** is built on three principles:
 
 1. **Minimal**: ~8,000 lines of focused code. Every module has a single purpose.
-2. **Deniable**: Privacy-preserving operations baked in. Transaction hashing, anonymization, noise injection.
+2. **Deniable**: Local-only inference, self-contained artifact, nothing phones home — three properties, three tests. Defined precisely in [docs/THREAT-MODEL.md](docs/THREAT-MODEL.md).
 3. **Deployable**: ONNX export, production-ready from day one.
 
 You are not refactoring code. You are **distilling intent**.
@@ -407,6 +405,7 @@ You are not refactoring code. You are **distilling intent**.
 
 Contributions are welcome. Please:
 - Run tests before submitting: `pytest tests/ -v`
+- Install the hooks once: `pip install pre-commit && pre-commit install`
 - Follow existing code style: `ruff format .` and `ruff check .`
 - Add tests for new features
 - Update docs accordingly

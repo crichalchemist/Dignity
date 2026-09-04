@@ -15,9 +15,9 @@ Different instrument classes need different signal parameters. `AssetConfig` cal
 ```python
 from core.signals import ASSET_CONFIGS
 
-forex_cfg = ASSET_CONFIGS["forex"]      # DC threshold: 0.0005
-crypto_cfg = ASSET_CONFIGS["crypto"]    # DC threshold: 0.005
-equity_cfg = ASSET_CONFIGS["equity"]    # DC threshold: 0.001
+forex_cfg = ASSET_CONFIGS["forex"]  # DC threshold: 0.0005
+crypto_cfg = ASSET_CONFIGS["crypto"]  # DC threshold: 0.005
+equity_cfg = ASSET_CONFIGS["equity"]  # DC threshold: 0.001
 commodity_cfg = ASSET_CONFIGS["commodity"]  # DC threshold: 0.002
 ```
 
@@ -234,7 +234,9 @@ from core.config import DignityConfig
 from core.signals import ASSET_CONFIGS
 
 config = DignityConfig.from_yaml("config/base.yaml")
-pipeline = TransactionPipeline(seq_len=config.data.seq_len, features=config.data.features)
+pipeline = TransactionPipeline(
+    seq_len=config.data.seq_len, features=config.data.features
+)
 
 # compute_signals uses SignalProcessor.process_sequence internally
 df_with_signals = pipeline.compute_signals(df, asset_config=ASSET_CONFIGS["forex"])

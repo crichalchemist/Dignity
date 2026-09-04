@@ -185,12 +185,16 @@ def bars_to_tensor(bar_buffer: list[pd.Series], input_size: int) -> torch.Tensor
         low=lows,
     )
     matrix = np.stack(list(signals.values()), axis=1)  # [seq_len, features]
-    return torch.tensor(matrix, dtype=torch.float32).unsqueeze(0)  # [1, seq_len, features]
+    return torch.tensor(matrix, dtype=torch.float32).unsqueeze(
+        0
+    )  # [1, seq_len, features]
 
 
 def _send_macos_alert(message: str) -> None:
     """Fire a macOS notification via osascript (best-effort, non-blocking)."""
-    os.system(f'osascript -e \'display notification "{message}" with title "Dignity Soak"\'')
+    os.system(
+        f'osascript -e \'display notification "{message}" with title "Dignity Soak"\''
+    )
 
 
 def _setup_rotating_logger(log_path: Path) -> logging.Logger:
@@ -304,7 +308,9 @@ async def run_paper_loop(config: SoakConfig) -> None:
 
                 if gate.allowed and action_idx != 0:
                     order = await executor.execute(action_idx, position_size, var_est)
-                    simulated_pnl = float(order.get("simulated_pnl", 0.0)) if order else 0.0
+                    simulated_pnl = (
+                        float(order.get("simulated_pnl", 0.0)) if order else 0.0
+                    )
                     action_str = _ACTION_STRINGS.get(action_idx, "HOLD")
                 elif not gate.allowed:
                     action_str = "BLOCKED"
@@ -314,7 +320,11 @@ async def run_paper_loop(config: SoakConfig) -> None:
                 gate_passed = False
                 write_alert(alerts_log, f"executor error: {exc}")
 
-            ts = bar.name.isoformat() if hasattr(bar.name, "isoformat") else str(bar.name)
+            ts = (
+                bar.name.isoformat()
+                if hasattr(bar.name, "isoformat")
+                else str(bar.name)
+            )
             day = ts[:10]
             daily_pnl[day] = daily_pnl.get(day, 0.0) + simulated_pnl
 

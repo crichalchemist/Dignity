@@ -63,7 +63,9 @@ class MetaApiSource:
         self._account_id = account_id
         self.symbol = symbol
         self.timeframe = timeframe
-        self.date_range = date_range  # (start_iso, end_iso) for temporal split enforcement
+        self.date_range = (
+            date_range  # (start_iso, end_iso) for temporal split enforcement
+        )
         self._api = None
         self._account = None
         self._connection = None
@@ -73,7 +75,9 @@ class MetaApiSource:
         from metaapi_cloud_sdk import MetaApi  # type: ignore[import]
 
         self._api = MetaApi(self._token)
-        self._account = await self._api.metatrader_account_api.get_account(self._account_id)
+        self._account = await self._api.metatrader_account_api.get_account(
+            self._account_id
+        )
         await self._account.deploy()
         await self._account.wait_connected()
         self._connection = self._account.get_rpc_connection()
@@ -248,7 +252,9 @@ class MetaApiExecutor:
             raise RuntimeError("Call connect() before execute() in live mode.")
 
         if action == "BUY":
-            result = await self._connection.create_market_buy_order(self.symbol, gate.adjusted_size)
+            result = await self._connection.create_market_buy_order(
+                self.symbol, gate.adjusted_size
+            )
         else:
             result = await self._connection.create_market_sell_order(
                 self.symbol, gate.adjusted_size

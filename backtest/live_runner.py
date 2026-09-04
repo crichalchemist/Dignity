@@ -193,7 +193,11 @@ async def run_live_loop(config: LiveConfig) -> None:
                 gate_passed = False
                 write_alert(alerts_log, f"live executor error: {exc}")
 
-            ts = bar.name.isoformat() if hasattr(bar.name, "isoformat") else str(bar.name)
+            ts = (
+                bar.name.isoformat()
+                if hasattr(bar.name, "isoformat")
+                else str(bar.name)
+            )
 
             entry = {
                 "timestamp": ts,

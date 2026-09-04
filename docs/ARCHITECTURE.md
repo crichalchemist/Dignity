@@ -11,7 +11,7 @@ Input Data → Privacy → Signals → Pipeline → Model → Export
 Data flows left to right. Each stage is independent and testable.
 
 1. Load transaction data (synthetic, CSV, MetaApi)
-2. Apply privacy operations (hashing, anonymization, DP noise)
+2. Apply the privacy stage (Laplace noise, k-anonymous generalization)
 3. Compute 32 signal features (RSI, MACD, Bollinger, volatility, regime, etc.)
 4. Scale features and create sliding-window sequences
 5. Feed sequences to neural network model
@@ -28,9 +28,9 @@ Data flows left to right. Each stage is independent and testable.
 from core.config import DignityConfig
 
 config = DignityConfig.from_yaml("config/base.yaml")
-print(config.model.task)         # "risk"
+print(config.model.task)  # "risk"
 print(config.model.hidden_size)  # 256
-print(config.data.batch_size)    # 64
+print(config.data.batch_size)  # 64
 ```
 
 **signals.py** – 32-feature signal processor.
@@ -51,16 +51,16 @@ vol = SignalProcessor.volatility(prices, window=3)
 signals = SignalProcessor.process_sequence(volumes, prices)
 ```
 
-**privacy.py** – Privacy operations via `PrivacyManager` class.
+**privacy.py** – Privacy primitives via `PrivacyManager` class.
 
 ```python
-from core.privacy import PrivacyManager
+from core.privacy import PrivacyBudget, PrivacyManager
 import numpy as np
 
-hashed = PrivacyManager.hash_identifier("user_123", salt="secret")
 amounts = np.array([100.0, 250.0, 75.0])
-quantized = PrivacyManager.quantize_amounts(amounts, bins=10)
-noisy = PrivacyManager.add_noise(amounts, epsilon=1.0)
+pm = PrivacyManager(PrivacyBudget(epsilon_total=1.0), key=b"16+-byte-secret-key")
+pseudonym = pm.pseudonymize("user_123")
+noisy = pm.add_laplace_noise(amounts, epsilon=0.5, bounds=(0.0, 1000.0))
 ```
 
 ### data/ – Data Processing
@@ -220,7 +220,9 @@ model = Dignity(task="policy", input_size=32, hidden_size=256)
 
 # Cascade: Regime → Risk → Alpha → Policy
 model = Dignity(task="cascade", input_size=32, hidden_size=256)
-outputs = model(x)  # dict with regime_probs, var_estimate, alpha_score, action_logits, value
+outputs = model(
+    x
+)  # dict with regime_probs, var_estimate, alpha_score, action_logits, value
 ```
 
 ### train/ – Training
@@ -235,7 +237,9 @@ train_metrics = train_epoch(model, train_loader, optimizer, criterion, device)
 val_metrics = validate_epoch(model, val_loader, criterion, device)
 
 # Cascade (Guided Learning)
-train_metrics = train_cascade_epoch(model, train_loader, optimizer, task_weights, device=device)
+train_metrics = train_cascade_epoch(
+    model, train_loader, optimizer, task_weights, device=device
+)
 ```
 
 **cli.py** – Command-line interface.
@@ -354,7 +358,9 @@ import torch
 config = DignityConfig.from_yaml("config/train_risk.yaml")
 
 # 2. Prepare data
-pipeline = TransactionPipeline(seq_len=config.data.seq_len, features=config.data.features)
+pipeline = TransactionPipeline(
+    seq_len=config.data.seq_len, features=config.data.features
+)
 pipeline.fit(df_train)
 X_train = pipeline.transform(df_train)
 X_val = pipeline.transform(df_val)
@@ -375,9 +381,13 @@ criterion = torch.nn.BCELoss()
 
 # 5. Training loop
 for epoch in range(config.train.epochs):
-    train_metrics = train_epoch(model, train_loader, optimizer, criterion, config.device)
+    train_metrics = train_epoch(
+        model, train_loader, optimizer, criterion, config.device
+    )
     val_metrics = validate_epoch(model, val_loader, criterion, config.device)
-    print(f"Epoch {epoch}: train={train_metrics['loss']:.4f}, val={val_metrics['loss']:.4f}")
+    print(
+        f"Epoch {epoch}: train={train_metrics['loss']:.4f}, val={val_metrics['loss']:.4f}"
+    )
 ```
 
 ## Performance Considerations

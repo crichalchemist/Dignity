@@ -17,10 +17,14 @@ def make_cosine_scheduler(
     optionally cycles back up. Stable multi-task convergence requires a
     smooth LR schedule — cosine annealing avoids the abrupt drops of step LR.
     """
-    return torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=T_max, eta_min=eta_min)
+    return torch.optim.lr_scheduler.CosineAnnealingLR(
+        optimizer, T_max=T_max, eta_min=eta_min
+    )
 
 
-_GATE_SUPPRESSION_FACTOR = 0.1  # scale factor applied to non-HOLD logits under risk gate
+_GATE_SUPPRESSION_FACTOR = (
+    0.1  # scale factor applied to non-HOLD logits under risk gate
+)
 
 
 def train_cascade_epoch(
@@ -97,7 +101,9 @@ def train_cascade_epoch(
                     non_hold * _GATE_SUPPRESSION_FACTOR,
                     non_hold,
                 )
-                gated_logits = torch.cat([outputs["action_logits"][:, :1], suppressed], dim=-1)
+                gated_logits = torch.cat(
+                    [outputs["action_logits"][:, :1], suppressed], dim=-1
+                )
                 outputs = {**outputs, "action_logits": gated_logits}
 
             loss, per_head = model.cascade_loss(outputs, labels, task_weights)
@@ -128,6 +134,18 @@ def train_cascade_epoch(
         "loss": total_loss / denom,
         **{k: v / denom for k, v in head_totals.items()},
     }
+
+
+def _primary_output(predictions):
+    """Return the tensor a single-head loss should score.
+
+    RiskHead returns (var_estimate, position_limit) and PolicyHead returns
+    (action_logits, value); the first element is the supervised output in both
+    cases. ForecastHead already returns a bare tensor.
+    """
+    if isinstance(predictions, tuple):
+        return predictions[0]
+    return predictions
 
 
 def train_epoch(
@@ -179,6 +197,7 @@ def train_epoch(
         # Forward pass with AMP
         with autocast("cuda", enabled=use_amp):
             predictions, _ = model(x)
+            predictions = _primary_output(predictions)
             # Squeeze predictions if they have an extra dimension
             if predictions.dim() > y.dim():
                 predictions = predictions.squeeze(-1)
@@ -243,6 +262,7 @@ def validate_epoch(
 
             # Forward pass
             predictions, _ = model(x)
+            predictions = _primary_output(predictions)
 
             # Compute loss
             if y is not None:
@@ -264,7 +284,11 @@ def validate_epoch(
         targets_cat = torch.cat(all_targets)
 
         # Add task-specific metrics
-        if predictions_cat.size(-1) == 1 and targets_cat.max() <= 1 and targets_cat.min() >= 0:
+        if (
+            predictions_cat.size(-1) == 1
+            and targets_cat.max() <= 1
+            and targets_cat.min() >= 0
+        ):
             # Binary classification accuracy
             preds_binary = (predictions_cat > 0.5).float()
             accuracy = (preds_binary == targets_cat).float().mean().item()

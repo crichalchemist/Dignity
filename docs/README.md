@@ -9,7 +9,7 @@
 - [Configuration Guide](CONFIGURATION.md) – YAML configuration reference
 
 ### Core Concepts
-- [Privacy Operations](PRIVACY.md) – Hashing, anonymization, differential privacy
+- [Privacy](PRIVACY.md) – Input-level DP, k-anonymity, keyed pseudonymization
 - [Signal Processing](SIGNALS.md) – 32 OHLCV-derived features
 - [Architecture Overview](ARCHITECTURE.md) – Models, backbones, and heads
 

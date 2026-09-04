@@ -14,6 +14,8 @@ from train.engine import (
     make_cosine_scheduler,
     save_checkpoint,
     train_cascade_epoch,
+    train_epoch,
+    validate_epoch,
 )
 
 # ---------------------------------------------------------------------------
@@ -23,7 +25,9 @@ from train.engine import (
 _TASK_WEIGHTS = {"regime": 0.2, "risk": 0.3, "alpha": 0.3, "policy": 0.2}
 
 
-def _cascade_loader(n_batches: int = 3, B: int = 4, seq_len: int = 50, features: int = 32):
+def _cascade_loader(
+    n_batches: int = 3, B: int = 4, seq_len: int = 50, features: int = 32
+):
     """Return a list acting as a DataLoader: each item is (x, cascade_labels)."""
     batches = []
     for _ in range(n_batches):
@@ -116,7 +120,8 @@ class TestTrainCascadeEpoch:
         )
         params_after = list(model.parameters())
         changed = any(
-            not torch.equal(b, a.detach()) for b, a in zip(params_before, params_after, strict=True)
+            not torch.equal(b, a.detach())
+            for b, a in zip(params_before, params_after, strict=True)
         )
         assert changed, "no model parameters changed after training step"
 
@@ -246,7 +251,9 @@ class TestRiskGateTraining:
 # ---------------------------------------------------------------------------
 
 
-def _fixed_loader(n_batches: int = 4, B: int = 8, seq_len: int = 50, features: int = 32) -> list:
+def _fixed_loader(
+    n_batches: int = 4, B: int = 8, seq_len: int = 50, features: int = 32
+) -> list:
     """Pre-seeded dataset — same tensors every call, required for convergence assertions."""
     torch.manual_seed(42)
     batches = []
@@ -263,7 +270,9 @@ def _fixed_loader(n_batches: int = 4, B: int = 8, seq_len: int = 50, features: i
 
 
 def _no_dropout_model() -> Dignity:
-    return Dignity(task="cascade", input_size=32, hidden_size=64, n_layers=1, dropout=0.0)
+    return Dignity(
+        task="cascade", input_size=32, hidden_size=64, n_layers=1, dropout=0.0
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -338,7 +347,9 @@ class TestConvergenceSmoke:
                 correct += (preds == labels["regime"]).sum().item()
                 total += labels["regime"].numel()
         accuracy = correct / total
-        assert accuracy > 0.25, f"regime accuracy {accuracy:.3f} not above 4-class chance"
+        assert accuracy > 0.25, (
+            f"regime accuracy {accuracy:.3f} not above 4-class chance"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -357,7 +368,9 @@ class TestCheckpointRoundTrip:
             save_checkpoint(model, opt, epoch=1, metrics={"loss": 0.5}, path=ckpt_path)
 
             model2 = _small_cascade_model()
-            load_checkpoint(model2, optimizer=None, path=ckpt_path, device=torch.device("cpu"))
+            load_checkpoint(
+                model2, optimizer=None, path=ckpt_path, device=torch.device("cpu")
+            )
 
             model.train(False)
             model2.train(False)
@@ -367,7 +380,9 @@ class TestCheckpointRoundTrip:
                 out2 = model2(x)
 
         for key in out1:
-            assert torch.allclose(out1[key], out2[key]), f"output mismatch after reload: '{key}'"
+            assert torch.allclose(out1[key], out2[key]), (
+                f"output mismatch after reload: '{key}'"
+            )
 
     def test_checkpoint_contains_required_keys(self):
         model = _small_cascade_model()
@@ -393,3 +408,48 @@ class TestCheckpointRoundTrip:
             )
 
         assert epoch == 7
+
+
+# ---------------------------------------------------------------------------
+# Single-head path (dignity-train --config config/train_risk.yaml)
+# ---------------------------------------------------------------------------
+
+
+def _single_head_loader(label_shape, n_batches: int = 3, B: int = 4, seq_len: int = 20):
+    """(x [B, seq_len, 4], y) batches; y is binary for risk, a forecast block otherwise."""
+    torch.manual_seed(0)
+    batches = []
+    for _ in range(n_batches):
+        x = torch.randn(B, seq_len, 4)
+        y = torch.randint(0, 2, (B, *label_shape)).float()
+        batches.append((x, y))
+    return batches
+
+
+class TestSingleHeadTrainEpoch:
+    """train_epoch/validate_epoch must accept heads that return a tuple."""
+
+    @pytest.mark.parametrize(
+        "task,criterion,label_shape",
+        [
+            ("risk", nn.BCELoss(), ()),  # RiskHead returns a tuple; BCE on var_estimate
+            (
+                "forecast",
+                nn.MSELoss(),
+                (5, 3),
+            ),  # ForecastHead returns [B, pred_len, features]
+        ],
+    )
+    def test_epoch_runs_and_reports_finite_loss(self, task, criterion, label_shape):
+        model = Dignity(task=task, input_size=4, hidden_size=16, n_layers=1)
+        optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)
+        loader = _single_head_loader(label_shape)
+        device = torch.device("cpu")
+
+        train_metrics = train_epoch(
+            model, loader, optimizer, criterion, device, use_amp=False, log_interval=100
+        )
+        val_metrics = validate_epoch(model, loader, criterion, device)
+
+        assert math.isfinite(train_metrics["loss"])
+        assert math.isfinite(val_metrics["loss"])
