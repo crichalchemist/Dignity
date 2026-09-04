@@ -60,11 +60,7 @@ from data.source.synthetic import SyntheticGenerator
 
 # Generate synthetic transaction sequences
 gen = SyntheticGenerator(seed=42)
-dataset = gen.generate_dataset(
-    num_normal=800,
-    num_anomalous=200,
-    seq_length=1000
-)
+dataset = gen.generate_dataset(num_normal=800, num_anomalous=200, seq_length=1000)
 
 print(f"Generated {len(dataset)} sequences")
 # Output: Generated 1000 sequences
@@ -298,7 +294,7 @@ regime = SignalProcessor.regime_detection(prices, vol_window=10, threshold=1.5)
 from core.config import DignityConfig
 
 # Load config from YAML
-config = DignityConfig.from_yaml('config/train_risk.yaml')
+config = DignityConfig.from_yaml("config/train_risk.yaml")
 
 # Access nested configs
 print(f"Model task: {config.model.task}")
@@ -308,7 +304,7 @@ print(f"Learning rate: {config.train.lr}")
 
 # Save modified config
 config.train.epochs = 100
-config.to_yaml('config/custom_config.yaml')
+config.to_yaml("config/custom_config.yaml")
 ```
 
 ### Custom Data Source
@@ -316,6 +312,7 @@ config.to_yaml('config/custom_config.yaml')
 ```python
 from data.source.crypto import CryptoSource
 import pandas as pd
+
 
 # Implement custom data source
 class CustomSource:
@@ -333,11 +330,11 @@ import torch
 
 # Create model with custom config
 model = Dignity(
-    task='risk',
-    input_size=9,      # Number of features
-    hidden_size=256,   # Backbone hidden dimension
-    seq_len=100,       # Sequence length
-    dropout=0.3
+    task="risk",
+    input_size=9,  # Number of features
+    hidden_size=256,  # Backbone hidden dimension
+    seq_len=100,  # Sequence length
+    dropout=0.3,
 )
 
 # Forward pass

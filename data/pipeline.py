@@ -187,8 +187,7 @@ class TransactionPipeline:
                 y_seq = np.array(
                     [
                         y[
-                            i * stride
-                            + self.seq_len : i * stride
+                            i * stride + self.seq_len : i * stride
                             + self.seq_len
                             + pred_len
                         ]

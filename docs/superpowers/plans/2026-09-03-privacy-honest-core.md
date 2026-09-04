@@ -522,7 +522,9 @@ class PrivacyManager:
         """
         if self._key is None:
             raise ValueError("pseudonymize requires a key")
-        return hmac.new(self._key, identifier.encode("utf-8"), hashlib.sha256).hexdigest()
+        return hmac.new(
+            self._key, identifier.encode("utf-8"), hashlib.sha256
+        ).hexdigest()
 
     def pseudonymize_many(self, identifiers: list[str]) -> list[str]:
         return [self.pseudonymize(i) for i in identifiers]
@@ -661,46 +663,48 @@ Expected: `AttributeError: 'PrivacyManager' object has no attribute 'add_laplace
 In `core/privacy.py`, delete the `add_noise` static method and add, inside `PrivacyManager` after `pseudonymize_many`:
 
 ```python
-    # -- differential privacy -------------------------------------------------
+# -- differential privacy -------------------------------------------------
 
-    def add_laplace_noise(
-        self,
-        values: np.ndarray,
-        *,
-        epsilon: float,
-        bounds: tuple[float, float],
-    ) -> np.ndarray:
-        """Clip ``values`` to ``bounds`` and add Laplace noise for epsilon-DP.
 
-        Sensitivity is the width of ``bounds``; the caller cannot understate it
-        by omission. ``epsilon`` is spent from the budget before any sampling,
-        so a refused spend releases nothing. Floating-point implementation:
-        see docs/THREAT-MODEL.md for the Mironov (2012) caveat.
+def add_laplace_noise(
+    self,
+    values: np.ndarray,
+    *,
+    epsilon: float,
+    bounds: tuple[float, float],
+) -> np.ndarray:
+    """Clip ``values`` to ``bounds`` and add Laplace noise for epsilon-DP.
 
-        Returns a new array; ``values`` is not modified.
-        """
-        if epsilon <= 0:
-            raise ValueError("epsilon must be positive")
-        lo, hi = bounds
-        if lo >= hi:
-            raise ValueError("bounds must satisfy lo < hi")
-        self.budget.spend(epsilon)
-        scale = (hi - lo) / epsilon
-        clipped = np.clip(np.asarray(values, dtype=float), lo, hi)
-        noise = np.fromiter(
-            (self._laplace(scale) for _ in range(clipped.size)),
-            dtype=float,
-            count=clipped.size,
-        ).reshape(clipped.shape)
-        return clipped + noise
+    Sensitivity is the width of ``bounds``; the caller cannot understate it
+    by omission. ``epsilon`` is spent from the budget before any sampling,
+    so a refused spend releases nothing. Floating-point implementation:
+    see docs/THREAT-MODEL.md for the Mironov (2012) caveat.
 
-    def _laplace(self, scale: float) -> float:
-        """One Laplace(0, scale) draw by inverse CDF from a uniform in [0, 1)."""
-        while True:
-            u = self._rng.random() - 0.5
-            if abs(u) < 0.5:
-                break
-        return -scale * math.copysign(1.0, u) * math.log(1.0 - 2.0 * abs(u))
+    Returns a new array; ``values`` is not modified.
+    """
+    if epsilon <= 0:
+        raise ValueError("epsilon must be positive")
+    lo, hi = bounds
+    if lo >= hi:
+        raise ValueError("bounds must satisfy lo < hi")
+    self.budget.spend(epsilon)
+    scale = (hi - lo) / epsilon
+    clipped = np.clip(np.asarray(values, dtype=float), lo, hi)
+    noise = np.fromiter(
+        (self._laplace(scale) for _ in range(clipped.size)),
+        dtype=float,
+        count=clipped.size,
+    ).reshape(clipped.shape)
+    return clipped + noise
+
+
+def _laplace(self, scale: float) -> float:
+    """One Laplace(0, scale) draw by inverse CDF from a uniform in [0, 1)."""
+    while True:
+        u = self._rng.random() - 0.5
+        if abs(u) < 0.5:
+            break
+    return -scale * math.copysign(1.0, u) * math.log(1.0 - 2.0 * abs(u))
 ```
 
 Ensure `import math` is present at the top of the file.
@@ -790,7 +794,9 @@ class TestGeneralizeAmounts:
     @pytest.mark.parametrize("kwargs", [{"k": 1}, {"bins": 1}])
     def test_rejects_degenerate_parameters(self, kwargs):
         with pytest.raises(ValueError):
-            PrivacyManager.generalize_amounts(np.arange(50.0), **{"bins": 5, "k": 5, **kwargs})
+            PrivacyManager.generalize_amounts(
+                np.arange(50.0), **{"bins": 5, "k": 5, **kwargs}
+            )
 
     def test_small_bins_merge_rather_than_drop_records(self):
         # 3 outliers can't form their own class at k=5; they must join a neighbour.
@@ -810,63 +816,64 @@ Expected: `AttributeError: type object 'PrivacyManager' has no attribute 'genera
 In `core/privacy.py`, delete the `quantize_amounts` static method and add inside `PrivacyManager`:
 
 ```python
-    # -- k-anonymity ----------------------------------------------------------
+# -- k-anonymity ----------------------------------------------------------
 
-    @staticmethod
-    def generalize_amounts(
-        values: np.ndarray,
-        *,
-        bins: int = 10,
-        k: int = 5,
-    ) -> np.ndarray:
-        """Generalize ``values`` so every output value is shared by >= ``k`` records.
 
-        Quantile (equal-frequency) edges give balanced bins; any bin with fewer
-        than ``k`` members is merged into its smaller neighbour until none
-        remain. Each record is replaced by the midpoint of its class's min and
-        max, a function of the class alone. This is k-anonymity for this column
-        as released; features derived from it downstream carry no k claim.
-        """
-        if k < 2:
-            raise ValueError("k must be at least 2")
-        if bins < 2:
-            raise ValueError("bins must be at least 2")
-        x = np.asarray(values, dtype=float).ravel()
-        n = x.size
-        if n < k:
-            raise ValueError(f"need at least k={k} records, got {n}")
+@staticmethod
+def generalize_amounts(
+    values: np.ndarray,
+    *,
+    bins: int = 10,
+    k: int = 5,
+) -> np.ndarray:
+    """Generalize ``values`` so every output value is shared by >= ``k`` records.
 
-        edges = np.unique(np.quantile(x, np.linspace(0.0, 1.0, bins + 1)))
-        if edges.size < 2:
-            # every value identical: one class of size n >= k
-            return np.full(np.shape(values), x[0])
+    Quantile (equal-frequency) edges give balanced bins; any bin with fewer
+    than ``k`` members is merged into its smaller neighbour until none
+    remain. Each record is replaced by the midpoint of its class's min and
+    max, a function of the class alone. This is k-anonymity for this column
+    as released; features derived from it downstream carry no k claim.
+    """
+    if k < 2:
+        raise ValueError("k must be at least 2")
+    if bins < 2:
+        raise ValueError("bins must be at least 2")
+    x = np.asarray(values, dtype=float).ravel()
+    n = x.size
+    if n < k:
+        raise ValueError(f"need at least k={k} records, got {n}")
 
-        # bin i covers [edges[i], edges[i+1]); the last bin is closed on the right
-        idx = np.searchsorted(edges, x, side="right") - 1
-        idx = np.clip(idx, 0, edges.size - 2)
+    edges = np.unique(np.quantile(x, np.linspace(0.0, 1.0, bins + 1)))
+    if edges.size < 2:
+        # every value identical: one class of size n >= k
+        return np.full(np.shape(values), x[0])
 
-        while True:
-            counts = np.bincount(idx, minlength=edges.size - 1)
-            small = np.flatnonzero((counts > 0) & (counts < k))
-            if small.size == 0:
-                break
-            i = small[0]
-            nonempty = np.flatnonzero(counts > 0)
-            lower = nonempty[nonempty < i]
-            upper = nonempty[nonempty > i]
-            candidates = []
-            if lower.size:
-                candidates.append(lower[-1])
-            if upper.size:
-                candidates.append(upper[0])
-            target = min(candidates, key=lambda b: (counts[b], b))
-            idx[idx == i] = target
+    # bin i covers [edges[i], edges[i+1]); the last bin is closed on the right
+    idx = np.searchsorted(edges, x, side="right") - 1
+    idx = np.clip(idx, 0, edges.size - 2)
 
-        out = np.empty(n)
-        for b in np.unique(idx):
-            members = idx == b
-            out[members] = (x[members].min() + x[members].max()) / 2.0
-        return out.reshape(np.shape(values))
+    while True:
+        counts = np.bincount(idx, minlength=edges.size - 1)
+        small = np.flatnonzero((counts > 0) & (counts < k))
+        if small.size == 0:
+            break
+        i = small[0]
+        nonempty = np.flatnonzero(counts > 0)
+        lower = nonempty[nonempty < i]
+        upper = nonempty[nonempty > i]
+        candidates = []
+        if lower.size:
+            candidates.append(lower[-1])
+        if upper.size:
+            candidates.append(upper[0])
+        target = min(candidates, key=lambda b: (counts[b], b))
+        idx[idx == i] = target
+
+    out = np.empty(n)
+    for b in np.unique(idx):
+        members = idx == b
+        out[members] = (x[members].min() + x[members].max()) / 2.0
+    return out.reshape(np.shape(values))
 ```
 
 Why it terminates: each iteration merges one non-empty bin into another, so the count of non-empty bins strictly decreases. If only one non-empty bin remains, it holds all `n ≥ k` records and `small` is empty. `candidates` is never empty when `small` is non-empty, because a lone non-empty bin would have `n ≥ k` members.
@@ -948,13 +955,18 @@ class TestPrivacyConfig:
 
     def test_shipped_configs_match_spec(self):
         root = Path(__file__).resolve().parents[1] / "config"
-        assert DignityConfig.from_yaml(str(root / "train_risk.yaml")).privacy is not None
+        assert (
+            DignityConfig.from_yaml(str(root / "train_risk.yaml")).privacy is not None
+        )
         assert DignityConfig.from_yaml(str(root / "base.yaml")).privacy is None
 
     @pytest.mark.parametrize(
         "mutate,match",
         [
-            (lambda b: b["features"]["volume"].update(mechanism="gaussian"), "unknown mechanism"),
+            (
+                lambda b: b["features"]["volume"].update(mechanism="gaussian"),
+                "unknown mechanism",
+            ),
             (lambda b: b["features"]["volume"].update(epsilon=0.0), "epsilon > 0"),
             (lambda b: b["features"]["volume"].pop("bounds"), "requires bounds"),
             (lambda b: b["features"]["volume"].update(bounds=[10, 10]), "lo < hi"),
@@ -962,7 +974,10 @@ class TestPrivacyConfig:
             (lambda b: b["features"]["fee_rate"].update(bounds=[0, 1]), "bins only"),
             (lambda b: b.update(k=1), "k must be"),
             (lambda b: b["features"]["fee_rate"].update(bins=1), "bins must be"),
-            (lambda b: b["features"]["volume"].update(epsilon=0.9), "exceeds epsilon_total"),
+            (
+                lambda b: b["features"]["volume"].update(epsilon=0.9),
+                "exceeds epsilon_total",
+            ),
         ],
     )
     def test_rejects_bad_privacy_block(self, mutate, match):
@@ -1072,11 +1087,9 @@ In `DignityConfig`, after `train: TrainConfig = field(default_factory=TrainConfi
 In `from_yaml`, inside the `return cls(` call, after `train=TrainConfig(**config_dict.get("train", {})),` add:
 
 ```python
-            privacy=(
-                PrivacyConfig(**config_dict["privacy"])
-                if config_dict.get("privacy")
-                else None
-            ),
+privacy = (
+    (PrivacyConfig(**config_dict["privacy"]) if config_dict.get("privacy") else None),
+)
 ```
 
 In `to_yaml`, after `config_dict = {...}` is built and before the `Path(path).parent.mkdir(...)` line, add:
@@ -1149,7 +1162,9 @@ def _frame(n: int = 60) -> pd.DataFrame:
 def _laplace_price(eps_total: float = 1.0, eps: float = 1.0) -> PrivacyConfig:
     return PrivacyConfig(
         epsilon_total=eps_total,
-        features={"price": {"mechanism": "laplace", "epsilon": eps, "bounds": [50.0, 150.0]}},
+        features={
+            "price": {"mechanism": "laplace", "epsilon": eps, "bounds": [50.0, 150.0]}
+        },
     )
 
 
@@ -1170,25 +1185,33 @@ class TestPrivacyStage:
         # prices must produce identical output — which is only true if clipping
         # happened BEFORE volatility was computed.
         pre_clipped = df.assign(price=df["price"].clip(50.0, 150.0))
-        x_ref, _ = TransactionPipeline(seq_len=10, features=["price", "volatility"]).process(
-            pre_clipped
-        )
+        x_ref, _ = TransactionPipeline(
+            seq_len=10, features=["price", "volatility"]
+        ).process(pre_clipped)
         np.testing.assert_allclose(x_priv, x_ref)
 
         # and it must differ from the unclipped run, or the stage did nothing
-        x_raw, _ = TransactionPipeline(seq_len=10, features=["price", "volatility"]).process(df)
+        x_raw, _ = TransactionPipeline(
+            seq_len=10, features=["price", "volatility"]
+        ).process(df)
         assert not np.allclose(x_priv, x_raw)
 
     def test_fit_transform_spends_budget_exactly_once(self):
         priv = TransactionPipeline(
-            seq_len=10, features=["price"], privacy=_laplace_price(), privacy_rng=_ZeroNoise()
+            seq_len=10,
+            features=["price"],
+            privacy=_laplace_price(),
+            privacy_rng=_ZeroNoise(),
         )
         priv.process(_frame(), fit=True)
         assert priv.privacy_manager.budget.spent == pytest.approx(1.0)
 
     def test_budget_exhausted_propagates_from_transform(self):
         priv = TransactionPipeline(
-            seq_len=10, features=["price"], privacy=_laplace_price(), privacy_rng=_ZeroNoise()
+            seq_len=10,
+            features=["price"],
+            privacy=_laplace_price(),
+            privacy_rng=_ZeroNoise(),
         )
         priv.process(_frame(), fit=True)  # spends the whole budget
         with pytest.raises(BudgetExhausted):
@@ -1202,7 +1225,9 @@ class TestPrivacyStage:
 
     def test_generalize_column_is_k_anonymous_in_output(self):
         cfg = PrivacyConfig(
-            epsilon_total=1.0, k=5, features={"fee_rate": {"mechanism": "generalize", "bins": 4}}
+            epsilon_total=1.0,
+            k=5,
+            features={"fee_rate": {"mechanism": "generalize", "bins": 4}},
         )
         priv = TransactionPipeline(seq_len=10, features=["fee_rate"], privacy=cfg)
         generalized = priv._apply_privacy(_frame())["fee_rate"].to_numpy()
@@ -1212,7 +1237,9 @@ class TestPrivacyStage:
     def test_missing_privacy_column_raises(self):
         cfg = PrivacyConfig(
             epsilon_total=1.0,
-            features={"nope": {"mechanism": "laplace", "epsilon": 1.0, "bounds": [0, 1]}},
+            features={
+                "nope": {"mechanism": "laplace", "epsilon": 1.0, "bounds": [0, 1]}
+            },
         )
         priv = TransactionPipeline(seq_len=10, features=["price"], privacy=cfg)
         with pytest.raises(ValueError, match="'nope'"):
@@ -1300,67 +1327,72 @@ At the end of `__init__`, after `self.fitted = False`, add:
 Replace the existing `fit`, `transform`, and `fit_transform` methods (lines 87-140) with:
 
 ```python
-    def _apply_privacy(self, df: pd.DataFrame) -> pd.DataFrame:
-        """Run the configured privacy mechanisms on raw columns.
+def _apply_privacy(self, df: pd.DataFrame) -> pd.DataFrame:
+    """Run the configured privacy mechanisms on raw columns.
 
-        Runs BEFORE compute_signals so derived features inherit the guarantee
-        by post-processing. Returns ``df`` itself when no privacy is configured.
-        """
-        if self.privacy_manager is None:
-            return df
-        result = df.copy()
-        for name, feat in self.privacy.features.items():
-            if name not in result.columns:
-                raise ValueError(f"privacy configured for column {name!r}, not in data")
-            col = result[name].to_numpy(dtype=float)
-            if feat.mechanism == "laplace":
-                result[name] = self.privacy_manager.add_laplace_noise(
-                    col, epsilon=feat.epsilon, bounds=feat.bounds
-                )
-            else:
-                result[name] = PrivacyManager.generalize_amounts(
-                    col, bins=feat.bins, k=self.privacy.k
-                )
-        return result
-
-    def fit(self, df: pd.DataFrame) -> "TransactionPipeline":
-        """Fit the scaler on training data. Applies the privacy stage once."""
-        self._fit_on(self._apply_privacy(df))
-        return self
-
-    def transform(self, df: pd.DataFrame) -> np.ndarray:
-        """Transform to a scaled feature array. Applies the privacy stage once."""
-        return self._transform_on(self._apply_privacy(df))
-
-    def fit_transform(self, df: pd.DataFrame) -> np.ndarray:
-        """Fit and transform on one privacy release, so the scaler sees the same draw."""
-        prepared = self._apply_privacy(df)
-        self._fit_on(prepared)
-        return self._transform_on(prepared)
-
-    def _fit_on(self, df: pd.DataFrame) -> None:
-        """Fit the scaler. ``df`` must already have had privacy applied."""
-        df = self.compute_signals(df)
-
-        available_features = [f for f in self.features if f in df.columns]
-        if not available_features:
-            raise ValueError(
-                f"None of the specified features found in data: {self.features}"
+    Runs BEFORE compute_signals so derived features inherit the guarantee
+    by post-processing. Returns ``df`` itself when no privacy is configured.
+    """
+    if self.privacy_manager is None:
+        return df
+    result = df.copy()
+    for name, feat in self.privacy.features.items():
+        if name not in result.columns:
+            raise ValueError(f"privacy configured for column {name!r}, not in data")
+        col = result[name].to_numpy(dtype=float)
+        if feat.mechanism == "laplace":
+            result[name] = self.privacy_manager.add_laplace_noise(
+                col, epsilon=feat.epsilon, bounds=feat.bounds
             )
+        else:
+            result[name] = PrivacyManager.generalize_amounts(
+                col, bins=feat.bins, k=self.privacy.k
+            )
+    return result
 
-        X = df[available_features].values
-        self.scaler.fit(X)
-        self.fitted = True
-        self.available_features = available_features
 
-    def _transform_on(self, df: pd.DataFrame) -> np.ndarray:
-        """Scale features. ``df`` must already have had privacy applied."""
-        if not self.fitted:
-            raise RuntimeError("Pipeline must be fitted before transform")
+def fit(self, df: pd.DataFrame) -> "TransactionPipeline":
+    """Fit the scaler on training data. Applies the privacy stage once."""
+    self._fit_on(self._apply_privacy(df))
+    return self
 
-        df = self.compute_signals(df)
-        X = df[self.available_features].values
-        return self.scaler.transform(X)
+
+def transform(self, df: pd.DataFrame) -> np.ndarray:
+    """Transform to a scaled feature array. Applies the privacy stage once."""
+    return self._transform_on(self._apply_privacy(df))
+
+
+def fit_transform(self, df: pd.DataFrame) -> np.ndarray:
+    """Fit and transform on one privacy release, so the scaler sees the same draw."""
+    prepared = self._apply_privacy(df)
+    self._fit_on(prepared)
+    return self._transform_on(prepared)
+
+
+def _fit_on(self, df: pd.DataFrame) -> None:
+    """Fit the scaler. ``df`` must already have had privacy applied."""
+    df = self.compute_signals(df)
+
+    available_features = [f for f in self.features if f in df.columns]
+    if not available_features:
+        raise ValueError(
+            f"None of the specified features found in data: {self.features}"
+        )
+
+    X = df[available_features].values
+    self.scaler.fit(X)
+    self.fitted = True
+    self.available_features = available_features
+
+
+def _transform_on(self, df: pd.DataFrame) -> np.ndarray:
+    """Scale features. ``df`` must already have had privacy applied."""
+    if not self.fitted:
+        raise RuntimeError("Pipeline must be fitted before transform")
+
+    df = self.compute_signals(df)
+    X = df[self.available_features].values
+    return self.scaler.transform(X)
 ```
 
 `create_sequences` and `process` are unchanged; `process` still calls `fit_transform` / `transform`, which is why it spends exactly once.
@@ -1579,10 +1611,16 @@ class TestOperatorLayer:
         assert external == [], "ONNX must not reference external data files"
 
         text = " ".join(
-            [model.doc_string, model.graph.doc_string, *(p.value for p in model.metadata_props)]
+            [
+                model.doc_string,
+                model.graph.doc_string,
+                *(p.value for p in model.metadata_props),
+            ]
         )
         assert "://" not in text, "artifact metadata must not embed URLs"
-        assert not ABSOLUTE_PATH.search(text), "artifact metadata must not embed local paths"
+        assert not ABSOLUTE_PATH.search(text), (
+            "artifact metadata must not embed local paths"
+        )
 
     def test_predict_succeeds_with_sockets_disabled(self, monkeypatch):
         def refuse(*args, **kwargs):
@@ -1749,7 +1787,7 @@ The key is required at call time; there is no unkeyed fallback. Keys under 16
 bytes are rejected.
 
 ```python
-pseudonym = pm.pseudonymize("0x1234abcd5678ef90")          # 64 hex chars
+pseudonym = pm.pseudonymize("0x1234abcd5678ef90")  # 64 hex chars
 many = pm.pseudonymize_many(["addr_a", "addr_b", "addr_a"])  # many[0] == many[2]
 ```
 
@@ -1764,11 +1802,13 @@ cannot be understated.** **ε is spent from the budget before any sample is draw
 **Noise comes from `secrets.SystemRandom`, not a seedable PRNG.**
 
 ```python
-amounts = np.array([123.4, 789.0, 456.7, 5000.0])   # 5000 will be clipped to 1000
+amounts = np.array([123.4, 789.0, 456.7, 5000.0])  # 5000 will be clipped to 1000
 noisy = pm.add_laplace_noise(amounts, epsilon=0.5, bounds=(0.0, 1000.0))
-budget.spent      # 0.5
+budget.spent  # 0.5
 budget.remaining  # 0.5
-pm.add_laplace_noise(amounts, epsilon=0.6, bounds=(0.0, 1000.0))  # raises BudgetExhausted
+pm.add_laplace_noise(
+    amounts, epsilon=0.6, bounds=(0.0, 1000.0)
+)  # raises BudgetExhausted
 ```
 
 Each released value is ε-differentially private for that feature (local DP).

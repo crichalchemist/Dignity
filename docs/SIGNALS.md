@@ -19,17 +19,19 @@ The `core.signals` module computes:
 from core.signals import compute_volatility
 import pandas as pd
 
-df = pd.DataFrame({
-    "timestamp": pd.date_range("2024-01-01", periods=100, freq="h"),
-    "amount": np.random.randn(100).cumsum() + 100
-})
+df = pd.DataFrame(
+    {
+        "timestamp": pd.date_range("2024-01-01", periods=100, freq="h"),
+        "amount": np.random.randn(100).cumsum() + 100,
+    }
+)
 
 # Compute rolling volatility
 volatility = compute_volatility(
     df,
     column="amount",
     window=20,  # 20-period rolling window
-    method="std"  # Standard deviation
+    method="std",  # Standard deviation
 )
 
 print(volatility["volatility"].head())
@@ -46,10 +48,10 @@ vol_var = compute_volatility(df, window=20, method="variance")
 
 # Exponentially weighted
 vol_ewm = compute_volatility(
-    df, 
-    window=20, 
+    df,
+    window=20,
     method="ewm",
-    alpha=0.1  # Decay factor
+    alpha=0.1,  # Decay factor
 )
 ```
 
@@ -70,7 +72,7 @@ entropy = compute_entropy(
     df,
     column="amount",
     window=50,
-    bins=10  # Discretize into 10 bins
+    bins=10,  # Discretize into 10 bins
 )
 
 print(f"Average entropy: {entropy['entropy'].mean():.3f}")
@@ -81,11 +83,7 @@ print(f"Average entropy: {entropy['entropy'].mean():.3f}")
 ```python
 # Entropy conditioned on time-of-day
 entropy = compute_entropy(
-    df,
-    column="amount",
-    window=50,
-    bins=10,
-    condition_column="hour_of_day"
+    df, column="amount", window=50, bins=10, condition_column="hour_of_day"
 )
 ```
 
@@ -104,7 +102,7 @@ from core.signals import compute_momentum
 momentum = compute_momentum(
     df,
     column="amount",
-    periods=[5, 10, 20]  # Multiple time horizons
+    periods=[5, 10, 20],  # Multiple time horizons
 )
 
 # Returns: momentum_5, momentum_10, momentum_20
@@ -114,20 +112,10 @@ momentum = compute_momentum(
 
 ```python
 # Percentage change momentum
-momentum = compute_momentum(
-    df,
-    column="amount",
-    periods=[10],
-    method="pct_change"
-)
+momentum = compute_momentum(df, column="amount", periods=[10], method="pct_change")
 
 # Absolute difference momentum
-momentum = compute_momentum(
-    df,
-    column="amount",
-    periods=[10],
-    method="diff"
-)
+momentum = compute_momentum(df, column="amount", periods=[10], method="diff")
 ```
 
 ## Regime Detection
@@ -143,7 +131,7 @@ regimes = detect_regime(
     column="amount",
     method="volatility",
     window=20,
-    thresholds=[0.33, 0.67]  # Quantile thresholds
+    thresholds=[0.33, 0.67],  # Quantile thresholds
 )
 
 # Returns: 0 (low), 1 (medium), 2 (high)
@@ -154,12 +142,7 @@ print(regimes["regime"].value_counts())
 
 ```python
 # Classify as uptrend, sideways, downtrend
-regimes = detect_regime(
-    df,
-    column="amount",
-    method="trend",
-    window=20
-)
+regimes = detect_regime(df, column="amount", method="trend", window=20)
 
 # Returns: -1 (downtrend), 0 (sideways), 1 (uptrend)
 ```
@@ -172,7 +155,7 @@ regimes = detect_regime(
     df,
     column="amount",
     method="hmm",
-    num_states=3  # Number of hidden states
+    num_states=3,  # Number of hidden states
 )
 ```
 
@@ -183,30 +166,32 @@ from core.signals import (
     compute_volatility,
     compute_entropy,
     compute_momentum,
-    detect_regime
+    detect_regime,
 )
+
 
 def compute_all_signals(df):
     """Compute comprehensive signal suite"""
-    
+
     # Volatility
     df = compute_volatility(df, column="amount", window=20)
-    
+
     # Entropy
     df = compute_entropy(df, column="amount", window=50, bins=10)
-    
+
     # Momentum (multiple horizons)
     df = compute_momentum(df, column="amount", periods=[5, 10, 20])
-    
+
     # Regime detection
     df = detect_regime(df, column="amount", method="volatility")
-    
+
     return df
+
 
 # Apply to data
 df_with_signals = compute_all_signals(df)
 print(df_with_signals.columns)
-# ['timestamp', 'amount', 'volatility', 'entropy', 
+# ['timestamp', 'amount', 'volatility', 'entropy',
 #  'momentum_5', 'momentum_10', 'momentum_20', 'regime']
 ```
 
@@ -217,25 +202,16 @@ from core.signals import normalize_signals
 
 # Z-score normalization
 df_norm = normalize_signals(
-    df,
-    columns=["volatility", "entropy", "momentum_10"],
-    method="zscore"
+    df, columns=["volatility", "entropy", "momentum_10"], method="zscore"
 )
 
 # Min-max scaling
 df_norm = normalize_signals(
-    df,
-    columns=["volatility", "entropy"],
-    method="minmax",
-    feature_range=(0, 1)
+    df, columns=["volatility", "entropy"], method="minmax", feature_range=(0, 1)
 )
 
 # Robust scaling (median and IQR)
-df_norm = normalize_signals(
-    df,
-    columns=["volatility"],
-    method="robust"
-)
+df_norm = normalize_signals(df, columns=["volatility"], method="robust")
 ```
 
 ## Time-Based Features
@@ -249,7 +225,7 @@ from core.signals import extract_temporal_features
 df = extract_temporal_features(
     df,
     timestamp_column="timestamp",
-    features=["hour", "dayofweek", "month", "is_weekend"]
+    features=["hour", "dayofweek", "month", "is_weekend"],
 )
 
 print(df[["timestamp", "hour", "dayofweek", "is_weekend"]].head())
@@ -260,10 +236,7 @@ print(df[["timestamp", "hour", "dayofweek", "is_weekend"]].head())
 ```python
 # Encode cyclical features (hour, month) as sin/cos
 df = extract_temporal_features(
-    df,
-    timestamp_column="timestamp",
-    features=["hour", "month"],
-    cyclical=True
+    df, timestamp_column="timestamp", features=["hour", "month"], cyclical=True
 )
 
 # Creates: hour_sin, hour_cos, month_sin, month_cos
@@ -281,7 +254,7 @@ df = compute_cross_sectional_signals(
     df,
     group_column="entity_id",
     value_column="amount",
-    signals=["rank", "percentile", "zscore"]
+    signals=["rank", "percentile", "zscore"],
 )
 
 # rank: within-group rank
@@ -295,9 +268,7 @@ df = compute_cross_sectional_signals(
 from core.signals import compute_signal_quality
 
 quality = compute_signal_quality(
-    df,
-    signal_columns=["volatility", "momentum_10"],
-    target_column="future_return"
+    df, signal_columns=["volatility", "momentum_10"], target_column="future_return"
 )
 
 print(quality)
@@ -323,7 +294,7 @@ config.signals = {
     "detect_regime": True,
     "volatility_window": 20,
     "entropy_bins": 10,
-    "momentum_periods": [5, 10, 20]
+    "momentum_periods": [5, 10, 20],
 }
 
 # Pipeline automatically computes signals
@@ -340,18 +311,20 @@ print(data.columns)
 ```python
 from core.signals import register_custom_signal
 
+
 @register_custom_signal
 def compute_custom_signal(df, column, window=20):
     """Custom signal function"""
     # Example: Kurtosis-based signal
     from scipy.stats import kurtosis
-    
-    rolling_kurtosis = df[column].rolling(window).apply(
-        lambda x: kurtosis(x, fisher=True)
+
+    rolling_kurtosis = (
+        df[column].rolling(window).apply(lambda x: kurtosis(x, fisher=True))
     )
-    
+
     df["custom_kurtosis"] = rolling_kurtosis
     return df
+
 
 # Use in pipeline
 df = compute_custom_signal(df, column="amount", window=20)
@@ -363,16 +336,18 @@ df = compute_custom_signal(df, column="amount", window=20)
 # Vectorized computation for large datasets
 import numpy as np
 
+
 def fast_rolling_volatility(values, window):
     """Optimized rolling volatility"""
     n = len(values)
     result = np.empty(n)
-    result[:window-1] = np.nan
-    
-    for i in range(window-1, n):
-        result[i] = np.std(values[i-window+1:i+1])
-    
+    result[: window - 1] = np.nan
+
+    for i in range(window - 1, n):
+        result[i] = np.std(values[i - window + 1 : i + 1])
+
     return result
+
 
 df["volatility"] = fast_rolling_volatility(df["amount"].values, 20)
 ```

@@ -186,14 +186,8 @@ from core.config import DignityConfig
 # Create custom config programmatically
 config = DignityConfig(
     data={"window_size": 30, "feature_dim": 15},
-    model={
-        "backbone": {
-            "hidden_dim": 256,
-            "num_layers": 3,
-            "dropout": 0.2
-        }
-    },
-    training={"batch_size": 64, "epochs": 200}
+    model={"backbone": {"hidden_dim": 256, "num_layers": 3, "dropout": 0.2}},
+    training={"batch_size": 64, "epochs": 200},
 )
 
 # Save to YAML

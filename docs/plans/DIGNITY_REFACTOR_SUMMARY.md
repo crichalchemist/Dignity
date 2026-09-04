@@ -162,7 +162,7 @@ python -m dignity.export.to_onnx \
 ```python
 from dignity.models.dignity import Dignity
 
-model = Dignity(task='risk', input_size=9, hidden_size=256)
+model = Dignity(task="risk", input_size=9, hidden_size=256)
 predictions, attention = model(sequences)
 ```
 

@@ -90,24 +90,14 @@ prices = load_crypto_prices(symbols=["BTC", "ETH"], start_date="2024-01-01")
 ```python
 from models.backbone.cnn import CNN1D
 
-backbone = CNN1D(
-    input_dim=12,
-    hidden_dim=128,
-    num_layers=3,
-    kernel_size=3
-)
+backbone = CNN1D(input_dim=12, hidden_dim=128, num_layers=3, kernel_size=3)
 ```
 
 **backbone/lstm.py** - Stacked LSTM
 ```python
 from models.backbone.lstm import StackedLSTM
 
-backbone = StackedLSTM(
-    input_dim=12,
-    hidden_dim=128,
-    num_layers=2,
-    dropout=0.1
-)
+backbone = StackedLSTM(input_dim=12, hidden_dim=128, num_layers=2, dropout=0.1)
 ```
 
 **backbone/attention.py** - Additive Attention
@@ -123,11 +113,7 @@ from models.backbone.dignity import DignityBackbone
 
 # CNN + LSTM + Attention
 backbone = DignityBackbone(
-    input_dim=12,
-    hidden_dim=128,
-    num_layers=2,
-    dropout=0.1,
-    use_attention=True
+    input_dim=12, hidden_dim=128, num_layers=2, dropout=0.1, use_attention=True
 )
 ```
 
@@ -140,7 +126,7 @@ from models.head.risk import RiskHead
 head = RiskHead(
     input_dim=128,
     hidden_dim=64,
-    num_classes=3  # low, medium, high
+    num_classes=3,  # low, medium, high
 )
 ```
 
@@ -151,7 +137,7 @@ from models.head.forecast import ForecastHead
 head = ForecastHead(
     input_dim=128,
     hidden_dim=128,
-    forecast_horizon=5  # Predict next 5 timesteps
+    forecast_horizon=5,  # Predict next 5 timesteps
 )
 ```
 
@@ -159,11 +145,7 @@ head = ForecastHead(
 ```python
 from models.head.policy import PolicyHead
 
-head = PolicyHead(
-    input_dim=128,
-    hidden_dim=64,
-    num_actions=4
-)
+head = PolicyHead(input_dim=128, hidden_dim=64, num_actions=4)
 ```
 
 #### Complete Model
@@ -175,7 +157,7 @@ from models.dignity import create_dignity_model
 # Automatically combines backbone + head
 model = create_dignity_model(
     config,
-    task="risk"  # or "forecast", "policy"
+    task="risk",  # or "forecast", "policy"
 )
 ```
 
@@ -204,8 +186,7 @@ python -m train.cli \
 from export.to_onnx import export_dignity_to_onnx
 
 export_dignity_to_onnx(
-    checkpoint_path="checkpoints/dignity_risk_best.pth",
-    output_path="dignity_risk.onnx"
+    checkpoint_path="checkpoints/dignity_risk_best.pth", output_path="dignity_risk.onnx"
 )
 ```
 
@@ -300,19 +281,18 @@ model = create_dignity_model(config, task="risk")
 model = model.to(config.training.device)
 
 # 5. Setup optimizer and loss
-optimizer = torch.optim.AdamW(
-    model.parameters(),
-    lr=config.training.learning_rate
-)
+optimizer = torch.optim.AdamW(model.parameters(), lr=config.training.learning_rate)
 criterion = torch.nn.CrossEntropyLoss()
 
 # 6. Training loop
 for epoch in range(config.training.epochs):
-    train_loss = train_epoch(model, train_loader, optimizer, criterion, config.training.device)
+    train_loss = train_epoch(
+        model, train_loader, optimizer, criterion, config.training.device
+    )
     val_loss = validate_epoch(model, val_loader, criterion, config.training.device)
-    
+
     print(f"Epoch {epoch}: train_loss={train_loss:.4f}, val_loss={val_loss:.4f}")
-    
+
     # Save best model
     if val_loss < best_val_loss:
         torch.save(model.state_dict(), "checkpoints/best_model.pth")
@@ -327,7 +307,7 @@ raw_data = {
     "user_id": ["alice", "bob", "charlie"],
     "merchant_id": ["shop_1", "shop_2", "shop_1"],
     "amount": [100.50, 250.75, 75.25],
-    "timestamp": ["2024-01-01 10:00", "2024-01-01 10:30", "2024-01-01 11:00"]
+    "timestamp": ["2024-01-01 10:00", "2024-01-01 10:30", "2024-01-01 11:00"],
 }
 
 # 2. Apply privacy
@@ -359,15 +339,16 @@ optimizer.step()
 ```python
 import torch.nn as nn
 
+
 class CustomBackbone(nn.Module):
     def __init__(self, input_dim, hidden_dim):
         super().__init__()
         self.encoder = nn.Sequential(
             nn.Linear(input_dim, hidden_dim),
             nn.ReLU(),
-            nn.Linear(hidden_dim, hidden_dim)
+            nn.Linear(hidden_dim, hidden_dim),
         )
-    
+
     def forward(self, x):
         # x: (batch, seq_len, input_dim)
         # Average pool across sequence
@@ -385,9 +366,9 @@ class CustomHead(nn.Module):
             nn.Linear(input_dim, 128),
             nn.ReLU(),
             nn.Dropout(0.2),
-            nn.Linear(128, output_dim)
+            nn.Linear(128, output_dim),
         )
-    
+
     def forward(self, x):
         return self.head(x)
 ```

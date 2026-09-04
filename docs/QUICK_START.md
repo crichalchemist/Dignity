@@ -35,11 +35,7 @@ pip install -r requirements.txt
 from data.source.synthetic import SyntheticGenerator
 
 # Generate synthetic transaction data
-generator = SyntheticGenerator(
-    num_entities=100,
-    num_transactions=10000,
-    seed=42
-)
+generator = SyntheticGenerator(num_entities=100, num_transactions=10000, seed=42)
 
 data = generator.generate()
 print(f"Generated {len(data)} transactions")
@@ -71,11 +67,7 @@ config = DignityConfig.from_yaml("config/base.yaml")
 # Prepare data
 pipeline = TransactionPipeline(config)
 transactions = pipeline.load_and_process("data/transactions.csv")
-train_loader, val_loader = create_dataloaders(
-    transactions, 
-    config, 
-    split=0.8
-)
+train_loader, val_loader = create_dataloaders(transactions, config, split=0.8)
 
 # Create model
 model = create_dignity_model(config, task="risk")
@@ -94,7 +86,7 @@ for epoch in range(10):
 from core.privacy import (
     hash_identifiers,
     anonymize_amounts,
-    add_differential_privacy_noise
+    add_differential_privacy_noise,
 )
 
 # Anonymize sensitive data
@@ -112,7 +104,7 @@ from export.to_onnx import export_dignity_to_onnx
 export_dignity_to_onnx(
     checkpoint_path="checkpoints/dignity_risk_best.pth",
     output_path="dignity_risk.onnx",
-    opset_version=14
+    opset_version=14,
 )
 ```
 

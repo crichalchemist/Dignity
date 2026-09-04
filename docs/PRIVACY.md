@@ -19,18 +19,20 @@ The `core.privacy` module implements privacy techniques:
 from core.privacy import hash_identifiers
 import pandas as pd
 
-df = pd.DataFrame({
-    "user_id": ["alice", "bob", "charlie"],
-    "merchant_id": ["shop_1", "shop_2", "shop_1"],
-    "amount": [100.0, 250.0, 75.0]
-})
+df = pd.DataFrame(
+    {
+        "user_id": ["alice", "bob", "charlie"],
+        "merchant_id": ["shop_1", "shop_2", "shop_1"],
+        "amount": [100.0, 250.0, 75.0],
+    }
+)
 
 # Hash sensitive IDs
 df_hashed = hash_identifiers(
-    df, 
+    df,
     columns=["user_id", "merchant_id"],
     algorithm="sha256",
-    salt="dignity_secret_salt"
+    salt="dignity_secret_salt",
 )
 
 print(df_hashed["user_id"].head())
@@ -54,7 +56,7 @@ df_quantized = anonymize_amounts(
     df,
     columns=["amount"],
     method="quantize",
-    bins=10  # Reduce to 10 discrete levels
+    bins=10,  # Reduce to 10 discrete levels
 )
 
 # Original: [100.0, 250.0, 75.0]
@@ -69,7 +71,7 @@ df_generalized = anonymize_amounts(
     df,
     columns=["amount"],
     method="generalize",
-    ranges=[(0, 100), (100, 500), (500, float('inf'))]
+    ranges=[(0, 100), (100, 500), (500, float("inf"))],
 )
 
 # Original: [100.0, 250.0, 75.0]
@@ -84,7 +86,7 @@ df_rounded = anonymize_amounts(
     df,
     columns=["amount"],
     method="round",
-    precision=10  # Round to nearest 10
+    precision=10,  # Round to nearest 10
 )
 
 # Original: [103.45, 257.89, 72.10]
@@ -102,9 +104,9 @@ from core.privacy import add_differential_privacy_noise
 df_private = add_differential_privacy_noise(
     df,
     columns=["amount"],
-    epsilon=1.0,      # Privacy budget (smaller = more private)
-    sensitivity=100.0, # Maximum change from single record
-    mechanism="laplace"
+    epsilon=1.0,  # Privacy budget (smaller = more private)
+    sensitivity=100.0,  # Maximum change from single record
+    mechanism="laplace",
 )
 
 # Noise magnitude: sensitivity / epsilon = 100 / 1.0 = 100
@@ -119,7 +121,7 @@ df_private = add_differential_privacy_noise(
     epsilon=1.0,
     delta=1e-5,  # Failure probability
     sensitivity=100.0,
-    mechanism="gaussian"
+    mechanism="gaussian",
 )
 ```
 
@@ -135,12 +137,7 @@ df_private = add_differential_privacy_noise(
 from core.privacy import clip_features
 
 # Clip outliers before adding noise
-df_clipped = clip_features(
-    df,
-    columns=["amount"],
-    lower=0.0,
-    upper=1000.0
-)
+df_clipped = clip_features(df, columns=["amount"], lower=0.0, upper=1000.0)
 
 # Values outside [0, 1000] are clipped
 ```
@@ -152,7 +149,7 @@ from core.privacy import (
     hash_identifiers,
     anonymize_amounts,
     add_differential_privacy_noise,
-    clip_features
+    clip_features,
 )
 
 # Step 1: Hash identifiers
@@ -162,12 +159,7 @@ df = hash_identifiers(df, ["user_id", "merchant_id"])
 df = clip_features(df, ["amount"], lower=0, upper=10000)
 
 # Step 3: Add differential privacy noise
-df = add_differential_privacy_noise(
-    df, 
-    ["amount"], 
-    epsilon=1.0, 
-    sensitivity=100.0
-)
+df = add_differential_privacy_noise(df, ["amount"], epsilon=1.0, sensitivity=100.0)
 
 # Step 4: Quantize for additional anonymization
 df = anonymize_amounts(df, ["amount"], method="quantize", bins=20)
@@ -184,10 +176,7 @@ signals = compute_volatility(df, window=10)
 
 # Add noise to signals for privacy
 signals = add_differential_privacy_noise(
-    signals,
-    columns=["volatility"],
-    epsilon=2.0,
-    sensitivity=0.1
+    signals, columns=["volatility"], epsilon=2.0, sensitivity=0.1
 )
 ```
 
@@ -196,18 +185,19 @@ signals = add_differential_privacy_noise(
 ```python
 class PrivacyBudget:
     """Track cumulative privacy loss"""
-    
+
     def __init__(self, total_epsilon=10.0):
         self.total_epsilon = total_epsilon
         self.spent_epsilon = 0.0
-    
+
     def spend(self, epsilon):
         if self.spent_epsilon + epsilon > self.total_epsilon:
             raise ValueError("Privacy budget exceeded!")
         self.spent_epsilon += epsilon
-    
+
     def remaining(self):
         return self.total_epsilon - self.spent_epsilon
+
 
 # Usage
 budget = PrivacyBudget(total_epsilon=5.0)

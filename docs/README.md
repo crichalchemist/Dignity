@@ -38,8 +38,7 @@ python -m train.cli --config config/train_risk.yaml --epochs 10
 from export.to_onnx import export_dignity_to_onnx
 
 export_dignity_to_onnx(
-    checkpoint_path="checkpoints/dignity_risk_best.pth",
-    output_path="dignity_risk.onnx"
+    checkpoint_path="checkpoints/dignity_risk_best.pth", output_path="dignity_risk.onnx"
 )
 ```
 

@@ -156,4 +156,3 @@ class CryptoSource:
             return (numeric_ts / 10**6).astype("int64")
         else:  # Already in milliseconds
             return numeric_ts.astype("int64")
-

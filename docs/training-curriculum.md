@@ -66,10 +66,10 @@ Phase 4: Regime & Context  → Phase 5: Production Fine-Tuning
 
 ```python
 phase_1_criteria = {
-    "monash_mase": 1.0,           # Mean Absolute Scaled Error < 1.0 (beats naive)
-    "m4_smape": 0.9,              # < 90% of naive baseline
+    "monash_mase": 1.0,  # Mean Absolute Scaled Error < 1.0 (beats naive)
+    "m4_smape": 0.9,  # < 90% of naive baseline
     "reconstruction_loss": 0.05,  # Masked reconstruction convergence
-    "transfer_score": 0.10,       # Zero-shot on held-out domains > 10% improvement
+    "transfer_score": 0.10,  # Zero-shot on held-out domains > 10% improvement
 }
 ```
 
@@ -159,12 +159,12 @@ Validation: NFP/FOMC event reactions captured
 
 ```python
 phase_2_criteria = {
-    "direction_accuracy_eurusd": 0.52,    # Statistically significant > 50%
-    "direction_accuracy_all": 0.51,        # All pairs average
-    "mape_1h": 0.002,                      # 0.2% MAPE on 1H forecast
-    "regime_f1": 0.60,                     # Regime classification F1
-    "cross_pair_correlation_r2": 0.50,    # Predict EUR/GBP from EUR/USD + GBP/USD
-    "session_classification_acc": 0.85,   # London/NY/Tokyo/Sydney
+    "direction_accuracy_eurusd": 0.52,  # Statistically significant > 50%
+    "direction_accuracy_all": 0.51,  # All pairs average
+    "mape_1h": 0.002,  # 0.2% MAPE on 1H forecast
+    "regime_f1": 0.60,  # Regime classification F1
+    "cross_pair_correlation_r2": 0.50,  # Predict EUR/GBP from EUR/USD + GBP/USD
+    "session_classification_acc": 0.85,  # London/NY/Tokyo/Sydney
 }
 ```
 
@@ -172,9 +172,9 @@ phase_2_criteria = {
 
 ```python
 advance_to_phase_3 = (
-    direction_accuracy_eurusd >= 0.52 and
-    regime_classification_f1 >= 0.60 and
-    no_catastrophic_forgetting_on_benchmarks
+    direction_accuracy_eurusd >= 0.52
+    and regime_classification_f1 >= 0.60
+    and no_catastrophic_forgetting_on_benchmarks
 )
 ```
 
@@ -251,11 +251,11 @@ Validation: VIX regime signal improves forex predictions
 
 ```python
 phase_3_criteria = {
-    "forex_retention": 0.95,              # < 5% performance drop vs Phase 2
-    "crypto_direction_accuracy": 0.51,    # Competitive with forex
-    "gold_usd_correlation_r2": 0.30,      # Capture inverse relationship
-    "risk_on_off_f1": 0.65,               # Regime classification
-    "vix_signal_improvement": 0.02,       # VIX improves forex by 2%
+    "forex_retention": 0.95,  # < 5% performance drop vs Phase 2
+    "crypto_direction_accuracy": 0.51,  # Competitive with forex
+    "gold_usd_correlation_r2": 0.30,  # Capture inverse relationship
+    "risk_on_off_f1": 0.65,  # Regime classification
+    "vix_signal_improvement": 0.02,  # VIX improves forex by 2%
 }
 ```
 
@@ -263,9 +263,9 @@ phase_3_criteria = {
 
 ```python
 advance_to_phase_4 = (
-    forex_performance_retained > 0.95 and
-    crypto_direction_accuracy > 0.51 and
-    cross_asset_correlation_r2 > 0.30
+    forex_performance_retained > 0.95
+    and crypto_direction_accuracy > 0.51
+    and cross_asset_correlation_r2 > 0.30
 )
 ```
 
@@ -346,11 +346,11 @@ Validation: Regime F1 > 0.7
 
 ```python
 phase_4_criteria = {
-    "regime_f1": 0.70,                    # 5-class regime classification
-    "long_context_utilization": 0.30,     # Attention entropy reduction
-    "macro_improvement_weekly": 0.03,     # 3% improvement with macro
-    "memory_efficiency": 0.80,            # < 80% target GPU VRAM
-    "crisis_detection_recall": 0.80,      # Catch 80% of crisis regimes
+    "regime_f1": 0.70,  # 5-class regime classification
+    "long_context_utilization": 0.30,  # Attention entropy reduction
+    "macro_improvement_weekly": 0.03,  # 3% improvement with macro
+    "memory_efficiency": 0.80,  # < 80% target GPU VRAM
+    "crisis_detection_recall": 0.80,  # Catch 80% of crisis regimes
 }
 ```
 
@@ -358,9 +358,9 @@ phase_4_criteria = {
 
 ```python
 advance_to_phase_5 = (
-    regime_f1 > 0.70 and
-    long_context_improves_weekly_forecast and
-    memory_usage < target_gpu_vram * 0.8
+    regime_f1 > 0.70
+    and long_context_improves_weekly_forecast
+    and memory_usage < target_gpu_vram * 0.8
 )
 ```
 
@@ -386,14 +386,16 @@ advance_to_phase_5 = (
 ```python
 def compute_reward(action, outcome, position):
     pnl_reward = outcome.pnl * 100  # Scale returns
-    
+
     # Risk penalties
-    drawdown_penalty = -abs(outcome.max_drawdown) * 50 if outcome.max_drawdown > 0.05 else 0
-    overtrading_penalty = -0.01 if action != 'hold' else 0  # Discourage churn
-    
+    drawdown_penalty = (
+        -abs(outcome.max_drawdown) * 50 if outcome.max_drawdown > 0.05 else 0
+    )
+    overtrading_penalty = -0.01 if action != "hold" else 0  # Discourage churn
+
     # Sharpe bonus
     sharpe_bonus = max(0, outcome.rolling_sharpe - 1.0) * 10
-    
+
     return pnl_reward + drawdown_penalty + overtrading_penalty + sharpe_bonus
 ```
 
@@ -401,12 +403,12 @@ def compute_reward(action, outcome, position):
 
 ```python
 phase_5_criteria = {
-    "paper_trading_sharpe": 1.0,          # 30-day rolling Sharpe > 1.0
-    "max_drawdown": 0.10,                 # < 10% max drawdown
-    "win_rate": 0.52,                     # Win rate > 52%
-    "profit_factor": 1.5,                 # Gross profit / gross loss > 1.5
-    "inference_latency_ms": 100,          # < 100ms for inference
-    "consistency": 0.80,                  # 80% of weeks profitable
+    "paper_trading_sharpe": 1.0,  # 30-day rolling Sharpe > 1.0
+    "max_drawdown": 0.10,  # < 10% max drawdown
+    "win_rate": 0.52,  # Win rate > 52%
+    "profit_factor": 1.5,  # Gross profit / gross loss > 1.5
+    "inference_latency_ms": 100,  # < 100ms for inference
+    "consistency": 0.80,  # 80% of weeks profitable
 }
 ```
 

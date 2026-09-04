@@ -65,11 +65,13 @@ def main():
 
     # Split train/val
     split_idx = int(len(X_train) * (1 - config.data.test_size))
-    X_val, y_val = X_train[split_idx:], (
-        y_train[split_idx:] if y_train is not None else None
+    X_val, y_val = (
+        X_train[split_idx:],
+        (y_train[split_idx:] if y_train is not None else None),
     )
-    X_train, y_train = X_train[:split_idx], (
-        y_train[:split_idx] if y_train is not None else None
+    X_train, y_train = (
+        X_train[:split_idx],
+        (y_train[:split_idx] if y_train is not None else None),
     )
 
     print(f"Train sequences: {len(X_train)}, Val sequences: {len(X_val)}")
@@ -117,9 +119,9 @@ def main():
     best_val_loss = float("inf")
 
     for epoch in range(1, config.train.epochs + 1):
-        print(f"\n{'='*60}")
+        print(f"\n{'=' * 60}")
         print(f"Epoch {epoch}/{config.train.epochs}")
-        print(f"{'='*60}")
+        print(f"{'=' * 60}")
 
         # Train
         train_metrics = train_epoch(

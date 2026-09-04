@@ -136,12 +136,14 @@ import pytest
 import numpy as np
 from dignity.core.signals import compute_entropy, compute_volatility
 
+
 def test_entropy_calculation():
     """Entropy should be 0 for uniform distribution"""
     values = np.ones(100)
     entropy = compute_entropy(values, window=10)
     assert len(entropy) == 100
     assert np.allclose(entropy[-10:], 0.0)
+
 
 def test_volatility_calculation():
     """Volatility should detect changes"""
@@ -163,51 +165,55 @@ Expected: `ModuleNotFoundError: No module named 'dignity.core.signals'`
 ```python
 # dignity/core/signals.py
 """Signal processing utilities for transaction sequences."""
+
 import numpy as np
 from scipy.stats import entropy as scipy_entropy
+
 
 def compute_entropy(values: np.ndarray, window: int = 10) -> np.ndarray:
     """
     Compute rolling Shannon entropy.
-    
+
     Args:
         values: Input signal
         window: Rolling window size
-        
+
     Returns:
         Entropy values (same length as input)
     """
     result = np.zeros(len(values))
     for i in range(len(values)):
         start = max(0, i - window + 1)
-        window_data = values[start:i+1]
-        
+        window_data = values[start : i + 1]
+
         # Bin data for probability distribution
         hist, _ = np.histogram(window_data, bins=10, density=True)
         hist = hist[hist > 0]  # Remove zero bins
-        
+
         result[i] = scipy_entropy(hist)
-    
+
     return result
+
 
 def compute_volatility(values: np.ndarray, window: int = 10) -> np.ndarray:
     """
     Compute rolling standard deviation (volatility).
-    
+
     Args:
         values: Input signal
         window: Rolling window size
-        
+
     Returns:
         Volatility values (same length as input)
     """
     result = np.zeros(len(values))
     for i in range(len(values)):
         start = max(0, i - window + 1)
-        window_data = values[start:i+1]
+        window_data = values[start : i + 1]
         result[i] = np.std(window_data)
-    
+
     return result
+
 
 def compute_returns(values: np.ndarray) -> np.ndarray:
     """Compute percentage returns."""
@@ -226,48 +232,51 @@ Expected: `2 passed`
 ```python
 # dignity/core/config.py
 """Configuration management."""
+
 import yaml
 from pathlib import Path
 from typing import Any
 
+
 def load_config(path: str) -> dict[str, Any]:
     """
     Load YAML configuration file.
-    
+
     Args:
         path: Path to config file
-        
+
     Returns:
         Configuration dictionary
     """
     config_path = Path(path)
     if not config_path.exists():
         raise FileNotFoundError(f"Config not found: {path}")
-    
+
     with open(config_path) as f:
         config = yaml.safe_load(f)
-    
+
     return config
+
 
 def merge_configs(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
     """
     Merge override config into base config.
-    
+
     Args:
         base: Base configuration
         override: Override values
-        
+
     Returns:
         Merged configuration
     """
     merged = base.copy()
-    
+
     for key, value in override.items():
         if key in merged and isinstance(merged[key], dict) and isinstance(value, dict):
             merged[key] = merge_configs(merged[key], value)
         else:
             merged[key] = value
-    
+
     return merged
 ```
 
@@ -276,31 +285,34 @@ def merge_configs(base: dict[str, Any], override: dict[str, Any]) -> dict[str, A
 ```python
 # dignity/core/privacy.py
 """Privacy-preserving utilities for transaction data."""
+
 import hashlib
 from typing import Union
+
 
 def hash_identifier(identifier: str, salt: str = "") -> str:
     """
     Hash sensitive identifiers (merchant IDs, user IDs).
-    
+
     Args:
         identifier: Raw identifier
         salt: Optional salt for hashing
-        
+
     Returns:
         Hex digest of hashed identifier
     """
-    data = f"{identifier}{salt}".encode('utf-8')
+    data = f"{identifier}{salt}".encode("utf-8")
     return hashlib.sha256(data).hexdigest()
+
 
 def anonymize_amount(amount: float, bucket_size: float = 10.0) -> float:
     """
     Bucket transaction amounts for privacy.
-    
+
     Args:
         amount: Original amount
         bucket_size: Size of buckets (e.g., $10)
-        
+
     Returns:
         Bucketed amount
     """
@@ -333,16 +345,17 @@ import pytest
 import torch
 from dignity.models.backbone.cnn1d import CNN1D
 
+
 def test_cnn1d_forward():
     """CNN1D should process sequential input"""
     batch_size, seq_len, input_size = 8, 100, 9
     hidden_size = 64
-    
+
     model = CNN1D(input_size, hidden_size, kernel_size=3)
     x = torch.randn(batch_size, seq_len, input_size)
-    
+
     out = model(x)
-    
+
     assert out.shape == (batch_size, seq_len, hidden_size)
 ```
 
@@ -358,46 +371,53 @@ Expected: `ModuleNotFoundError`
 ```python
 # dignity/models/backbone/cnn1d.py
 """1D Convolutional backbone for sequence processing."""
+
 import torch
 import torch.nn as nn
+
 
 class CNN1D(nn.Module):
     """
     1D CNN for extracting local patterns from sequences.
-    
+
     Args:
         input_size: Number of input features
         hidden_size: Number of output features
         kernel_size: Convolution kernel size
         n_layers: Number of conv layers
     """
-    
-    def __init__(self, input_size: int, hidden_size: int, 
-                 kernel_size: int = 3, n_layers: int = 2):
+
+    def __init__(
+        self, input_size: int, hidden_size: int, kernel_size: int = 3, n_layers: int = 2
+    ):
         super().__init__()
-        
+
         layers = []
         in_channels = input_size
-        
+
         for i in range(n_layers):
             out_channels = hidden_size if i == n_layers - 1 else hidden_size // 2
-            layers.extend([
-                nn.Conv1d(in_channels, out_channels, kernel_size, padding=kernel_size//2),
-                nn.ReLU(),
-                nn.BatchNorm1d(out_channels),
-                nn.Dropout(0.1)
-            ])
+            layers.extend(
+                [
+                    nn.Conv1d(
+                        in_channels, out_channels, kernel_size, padding=kernel_size // 2
+                    ),
+                    nn.ReLU(),
+                    nn.BatchNorm1d(out_channels),
+                    nn.Dropout(0.1),
+                ]
+            )
             in_channels = out_channels
-        
+
         self.conv = nn.Sequential(*layers)
-    
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
         Forward pass.
-        
+
         Args:
             x: [batch, seq_len, features]
-            
+
         Returns:
             [batch, seq_len, hidden_size]
         """
@@ -421,15 +441,16 @@ Expected: `1 passed`
 # Add to tests/test_model_backbone.py
 from dignity.models.backbone.lstm import StackedLSTM
 
+
 def test_stacked_lstm_forward():
     """StackedLSTM should process sequences"""
     batch_size, seq_len, hidden_size = 8, 100, 64
-    
+
     model = StackedLSTM(hidden_size, hidden_size, n_layers=2)
     x = torch.randn(batch_size, seq_len, hidden_size)
-    
+
     out, (h_n, c_n) = model(x)
-    
+
     assert out.shape == (batch_size, seq_len, hidden_size)
     assert h_n.shape == (2, batch_size, hidden_size)  # n_layers=2
 ```
@@ -439,45 +460,49 @@ def test_stacked_lstm_forward():
 ```python
 # dignity/models/backbone/lstm.py
 """LSTM backbone for temporal modeling."""
+
 import torch
 import torch.nn as nn
 from typing import Tuple
 
+
 class StackedLSTM(nn.Module):
     """
     Stacked LSTM for temporal sequence modeling.
-    
+
     Args:
         input_size: Input feature dimension
         hidden_size: Hidden state dimension
         n_layers: Number of LSTM layers
         dropout: Dropout probability (applied between layers)
     """
-    
-    def __init__(self, input_size: int, hidden_size: int, 
-                 n_layers: int = 2, dropout: float = 0.1):
+
+    def __init__(
+        self, input_size: int, hidden_size: int, n_layers: int = 2, dropout: float = 0.1
+    ):
         super().__init__()
-        
+
         self.hidden_size = hidden_size
         self.n_layers = n_layers
-        
+
         self.lstm = nn.LSTM(
-            input_size, 
+            input_size,
             hidden_size,
             n_layers,
             batch_first=True,
-            dropout=dropout if n_layers > 1 else 0
+            dropout=dropout if n_layers > 1 else 0,
         )
-    
-    def forward(self, x: torch.Tensor, 
-                hidden: Tuple[torch.Tensor, torch.Tensor] = None) -> Tuple[torch.Tensor, Tuple]:
+
+    def forward(
+        self, x: torch.Tensor, hidden: Tuple[torch.Tensor, torch.Tensor] = None
+    ) -> Tuple[torch.Tensor, Tuple]:
         """
         Forward pass.
-        
+
         Args:
             x: [batch, seq_len, features]
             hidden: Optional (h_0, c_0) hidden states
-            
+
         Returns:
             output: [batch, seq_len, hidden_size]
             (h_n, c_n): Final hidden states
@@ -499,15 +524,16 @@ Expected: `1 passed`
 # Add to tests/test_model_backbone.py
 from dignity.models.backbone.attention import AdditiveAttention
 
+
 def test_additive_attention():
     """Attention should compute context vector"""
     batch_size, seq_len, hidden_size = 8, 100, 64
-    
+
     model = AdditiveAttention(hidden_size)
     x = torch.randn(batch_size, seq_len, hidden_size)
-    
+
     context, weights = model(x)
-    
+
     assert context.shape == (batch_size, hidden_size)
     assert weights.shape == (batch_size, seq_len)
     assert torch.allclose(weights.sum(dim=1), torch.ones(batch_size))
@@ -518,33 +544,36 @@ def test_additive_attention():
 ```python
 # dignity/models/backbone/attention.py
 """Attention mechanism for sequence aggregation."""
+
 import torch
 import torch.nn as nn
 from typing import Tuple, Optional
 
+
 class AdditiveAttention(nn.Module):
     """
     Additive (Bahdanau) attention mechanism.
-    
+
     Args:
         hidden_size: Dimension of hidden states
     """
-    
+
     def __init__(self, hidden_size: int):
         super().__init__()
-        
+
         self.W = nn.Linear(hidden_size, hidden_size)
         self.v = nn.Linear(hidden_size, 1, bias=False)
-    
-    def forward(self, x: torch.Tensor, 
-                mask: Optional[torch.Tensor] = None) -> Tuple[torch.Tensor, torch.Tensor]:
+
+    def forward(
+        self, x: torch.Tensor, mask: Optional[torch.Tensor] = None
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         Compute attention over sequence.
-        
+
         Args:
             x: [batch, seq_len, hidden_size]
             mask: Optional [batch, seq_len] boolean mask (True = attend)
-            
+
         Returns:
             context: [batch, hidden_size] weighted sum
             weights: [batch, seq_len] attention weights
@@ -552,17 +581,17 @@ class AdditiveAttention(nn.Module):
         # Compute attention scores
         scores = self.v(torch.tanh(self.W(x)))  # [B, T, 1]
         scores = scores.squeeze(-1)  # [B, T]
-        
+
         # Apply mask if provided
         if mask is not None:
-            scores = scores.masked_fill(~mask, float('-inf'))
-        
+            scores = scores.masked_fill(~mask, float("-inf"))
+
         # Softmax to get weights
         weights = torch.softmax(scores, dim=1)  # [B, T]
-        
+
         # Compute context as weighted sum
         context = torch.bmm(weights.unsqueeze(1), x).squeeze(1)  # [B, H]
-        
+
         return context, weights
 ```
 
@@ -579,16 +608,17 @@ Expected: `1 passed`
 # Add to tests/test_model_backbone.py
 from dignity.models.backbone.hybrid import DignityBackbone
 
+
 def test_dignity_backbone_integration():
     """Full backbone should integrate CNN + LSTM + Attention"""
     batch_size, seq_len, input_size = 8, 100, 9
     hidden_size = 64
-    
+
     model = DignityBackbone(input_size, hidden_size, n_layers=2)
     x = torch.randn(batch_size, seq_len, input_size)
-    
+
     context, weights = model(x)
-    
+
     assert context.shape == (batch_size, hidden_size)
     assert weights.shape == (batch_size, seq_len)
 ```
@@ -598,6 +628,7 @@ def test_dignity_backbone_integration():
 ```python
 # dignity/models/backbone/hybrid.py
 """Hybrid CNN-LSTM-Attention backbone."""
+
 import torch
 import torch.nn as nn
 from typing import Tuple, Optional
@@ -606,51 +637,58 @@ from .cnn1d import CNN1D
 from .lstm import StackedLSTM
 from .attention import AdditiveAttention
 
+
 class DignityBackbone(nn.Module):
     """
     Dignity core backbone: CNN → LSTM → Attention.
-    
+
     Extracts temporal context from transaction sequences.
-    
+
     Args:
         input_size: Number of input features
         hidden_size: Hidden dimension
         n_layers: Number of LSTM layers
         dropout: Dropout probability
     """
-    
-    def __init__(self, input_size: int = 9, hidden_size: int = 256,
-                 n_layers: int = 2, dropout: float = 0.1):
+
+    def __init__(
+        self,
+        input_size: int = 9,
+        hidden_size: int = 256,
+        n_layers: int = 2,
+        dropout: float = 0.1,
+    ):
         super().__init__()
-        
+
         self.cnn = CNN1D(input_size, hidden_size, kernel_size=3)
         self.lstm = StackedLSTM(hidden_size, hidden_size, n_layers, dropout)
         self.attn = AdditiveAttention(hidden_size)
         self.dropout = nn.Dropout(dropout)
-    
-    def forward(self, x: torch.Tensor, 
-                mask: Optional[torch.Tensor] = None) -> Tuple[torch.Tensor, torch.Tensor]:
+
+    def forward(
+        self, x: torch.Tensor, mask: Optional[torch.Tensor] = None
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         Forward pass.
-        
+
         Args:
             x: [batch, seq_len, features] input sequences
             mask: Optional [batch, seq_len] attention mask
-            
+
         Returns:
             context: [batch, hidden_size] context vector
             weights: [batch, seq_len] attention weights
         """
         # Extract local patterns
         x = self.cnn(x)  # [B, T, H]
-        
+
         # Model temporal dependencies
         x, _ = self.lstm(x)  # [B, T, H]
         x = self.dropout(x)
-        
+
         # Aggregate with attention
         context, weights = self.attn(x, mask)  # [B, H], [B, T]
-        
+
         return context, weights
 ```
 
@@ -685,15 +723,16 @@ import pytest
 import torch
 from dignity.models.head.risk import RiskHead
 
+
 def test_risk_head():
     """RiskHead should output risk score [0, 1]"""
     batch_size, hidden_size = 8, 64
-    
+
     model = RiskHead(hidden_size)
     context = torch.randn(batch_size, hidden_size)
-    
+
     risk_score = model(context)
-    
+
     assert risk_score.shape == (batch_size, 1)
     assert (risk_score >= 0).all() and (risk_score <= 1).all()
 ```
@@ -703,37 +742,39 @@ def test_risk_head():
 ```python
 # dignity/models/head/risk.py
 """Risk scoring head."""
+
 import torch
 import torch.nn as nn
+
 
 class RiskHead(nn.Module):
     """
     Risk score prediction head.
-    
+
     Outputs a single risk score in [0, 1].
-    
+
     Args:
         hidden_size: Input context dimension
     """
-    
+
     def __init__(self, hidden_size: int):
         super().__init__()
-        
+
         self.fc = nn.Sequential(
             nn.Linear(hidden_size, hidden_size // 2),
             nn.ReLU(),
             nn.Dropout(0.2),
             nn.Linear(hidden_size // 2, 1),
-            nn.Sigmoid()  # Output in [0, 1]
+            nn.Sigmoid(),  # Output in [0, 1]
         )
-    
+
     def forward(self, context: torch.Tensor) -> torch.Tensor:
         """
         Predict risk score.
-        
+
         Args:
             context: [batch, hidden_size]
-            
+
         Returns:
             [batch, 1] risk scores
         """
@@ -753,15 +794,16 @@ Expected: `1 passed`
 # Add to tests/test_model_heads.py
 from dignity.models.head.forecast import ForecastHead
 
+
 def test_forecast_head():
     """ForecastHead should predict future values"""
     batch_size, hidden_size, pred_len = 8, 64, 5
-    
+
     model = ForecastHead(hidden_size, pred_len)
     context = torch.randn(batch_size, hidden_size)
-    
+
     predictions = model(context)
-    
+
     assert predictions.shape == (batch_size, pred_len)
 ```
 
@@ -770,37 +812,39 @@ def test_forecast_head():
 ```python
 # dignity/models/head/forecast.py
 """Forecasting head for future value prediction."""
+
 import torch
 import torch.nn as nn
+
 
 class ForecastHead(nn.Module):
     """
     Multi-step forecasting head.
-    
+
     Predicts future values (e.g., volume, transaction count).
-    
+
     Args:
         hidden_size: Input context dimension
         pred_len: Number of future steps to predict
     """
-    
+
     def __init__(self, hidden_size: int, pred_len: int = 5):
         super().__init__()
-        
+
         self.fc = nn.Sequential(
             nn.Linear(hidden_size, hidden_size),
             nn.ReLU(),
             nn.Dropout(0.2),
-            nn.Linear(hidden_size, pred_len)
+            nn.Linear(hidden_size, pred_len),
         )
-    
+
     def forward(self, context: torch.Tensor) -> torch.Tensor:
         """
         Predict future values.
-        
+
         Args:
             context: [batch, hidden_size]
-            
+
         Returns:
             [batch, pred_len] predictions
         """
@@ -837,28 +881,30 @@ import pytest
 import torch
 from dignity.models.dignity import Dignity
 
+
 def test_dignity_risk_model():
     """Dignity risk model should integrate backbone + risk head"""
     batch_size, seq_len, input_size = 8, 100, 9
-    
-    model = Dignity(task='risk', input_size=input_size)
+
+    model = Dignity(task="risk", input_size=input_size)
     x = torch.randn(batch_size, seq_len, input_size)
-    
+
     risk_score, attention = model(x)
-    
+
     assert risk_score.shape == (batch_size, 1)
     assert attention.shape == (batch_size, seq_len)
+
 
 def test_dignity_forecast_model():
     """Dignity forecast model should predict future values"""
     batch_size, seq_len, input_size = 8, 100, 9
     pred_len = 10
-    
-    model = Dignity(task='forecast', input_size=input_size, pred_len=pred_len)
+
+    model = Dignity(task="forecast", input_size=input_size, pred_len=pred_len)
     x = torch.randn(batch_size, seq_len, input_size)
-    
+
     predictions, attention = model(x)
-    
+
     assert predictions.shape == (batch_size, pred_len)
     assert attention.shape == (batch_size, seq_len)
 ```
@@ -875,6 +921,7 @@ Expected: `ModuleNotFoundError`
 ```python
 # dignity/models/dignity.py
 """Main Dignity model: task-agnostic backbone + task-specific head."""
+
 import torch
 import torch.nn as nn
 from typing import Tuple, Optional
@@ -883,12 +930,13 @@ from .backbone.hybrid import DignityBackbone
 from .head.risk import RiskHead
 from .head.forecast import ForecastHead
 
+
 class Dignity(nn.Module):
     """
     Dignity: Modular sequence model for transaction behavior.
-    
+
     Combines shared backbone with task-specific heads.
-    
+
     Args:
         task: Task type ('risk', 'forecast')
         input_size: Number of input features
@@ -897,42 +945,49 @@ class Dignity(nn.Module):
         dropout: Dropout probability
         pred_len: Prediction horizon (for forecast task)
     """
-    
-    VALID_TASKS = {'risk', 'forecast'}
-    
-    def __init__(self, task: str = 'risk', input_size: int = 9,
-                 hidden_size: int = 256, n_layers: int = 2,
-                 dropout: float = 0.1, pred_len: int = 5):
+
+    VALID_TASKS = {"risk", "forecast"}
+
+    def __init__(
+        self,
+        task: str = "risk",
+        input_size: int = 9,
+        hidden_size: int = 256,
+        n_layers: int = 2,
+        dropout: float = 0.1,
+        pred_len: int = 5,
+    ):
         super().__init__()
-        
+
         if task not in self.VALID_TASKS:
             raise ValueError(f"task must be one of {self.VALID_TASKS}, got {task}")
-        
+
         self.task = task
         self.backbone = DignityBackbone(input_size, hidden_size, n_layers, dropout)
-        
+
         # Task-specific head
-        if task == 'risk':
+        if task == "risk":
             self.head = RiskHead(hidden_size)
-        elif task == 'forecast':
+        elif task == "forecast":
             self.head = ForecastHead(hidden_size, pred_len)
-    
-    def forward(self, x: torch.Tensor, 
-                mask: Optional[torch.Tensor] = None) -> Tuple[torch.Tensor, torch.Tensor]:
+
+    def forward(
+        self, x: torch.Tensor, mask: Optional[torch.Tensor] = None
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         Forward pass.
-        
+
         Args:
             x: [batch, seq_len, features] input sequences
             mask: Optional [batch, seq_len] attention mask
-            
+
         Returns:
             output: Task-specific predictions
             attention: [batch, seq_len] attention weights
         """
         context, attention = self.backbone(x, mask)
         output = self.head(context)
-        
+
         return output, attention
 ```
 
@@ -1067,41 +1122,46 @@ import numpy as np
 import pandas as pd
 from dignity.data.pipeline import TransactionPipeline
 
+
 @pytest.fixture
 def sample_dataframe():
     """Create sample transaction data"""
     np.random.seed(42)
     n_samples = 1000
-    
-    return pd.DataFrame({
-        'timestamp': pd.date_range('2024-01-01', periods=n_samples, freq='1h'),
-        'volume': np.random.lognormal(5, 2, n_samples),
-        'fee_rate': np.random.uniform(0.001, 0.01, n_samples),
-        'tx_count': np.random.poisson(10, n_samples),
-        'risk_label': np.random.binomial(1, 0.1, n_samples)
-    })
+
+    return pd.DataFrame(
+        {
+            "timestamp": pd.date_range("2024-01-01", periods=n_samples, freq="1h"),
+            "volume": np.random.lognormal(5, 2, n_samples),
+            "fee_rate": np.random.uniform(0.001, 0.01, n_samples),
+            "tx_count": np.random.poisson(10, n_samples),
+            "risk_label": np.random.binomial(1, 0.1, n_samples),
+        }
+    )
+
 
 def test_pipeline_fit_transform(sample_dataframe):
     """Pipeline should scale features correctly"""
     pipeline = TransactionPipeline(seq_len=50)
-    
+
     X_scaled = pipeline.fit_transform(sample_dataframe)
-    
+
     assert X_scaled.shape[0] == len(sample_dataframe)
     assert X_scaled.shape[1] == 3  # volume, fee_rate, tx_count
-    
+
     # Scaled data should have reasonable range
     assert X_scaled.mean() < 1.0
     assert X_scaled.std() < 5.0
+
 
 def test_pipeline_to_sequence(sample_dataframe):
     """Pipeline should create sliding windows"""
     pipeline = TransactionPipeline(seq_len=50)
     X_scaled = pipeline.fit_transform(sample_dataframe)
-    y = sample_dataframe['risk_label'].values
-    
+    y = sample_dataframe["risk_label"].values
+
     X_seq, y_seq = pipeline.to_sequence(X_scaled, y)
-    
+
     # Check shapes
     n_windows = len(sample_dataframe) - 50
     assert X_seq.shape == (n_windows, 50, 3)
@@ -1120,39 +1180,40 @@ Expected: `ModuleNotFoundError`
 ```python
 # dignity/data/pipeline.py
 """Data preprocessing pipeline for transaction sequences."""
+
 import numpy as np
 import pandas as pd
 from sklearn.preprocessing import RobustScaler
 from typing import Tuple, Optional, List
 
+
 class TransactionPipeline:
     """
     Preprocessing pipeline for transaction data.
-    
+
     Handles:
     - Feature scaling
     - Sequence window generation
     - Train/test splitting
-    
+
     Args:
         seq_len: Length of input sequences
         feature_cols: Column names to use as features
     """
-    
-    def __init__(self, seq_len: int = 100, 
-                 feature_cols: Optional[List[str]] = None):
+
+    def __init__(self, seq_len: int = 100, feature_cols: Optional[List[str]] = None):
         self.seq_len = seq_len
-        self.feature_cols = feature_cols or ['volume', 'fee_rate', 'tx_count']
+        self.feature_cols = feature_cols or ["volume", "fee_rate", "tx_count"]
         self.scaler = RobustScaler()
         self._fitted = False
-    
+
     def fit_transform(self, df: pd.DataFrame) -> np.ndarray:
         """
         Fit scaler and transform features.
-        
+
         Args:
             df: DataFrame with transaction data
-            
+
         Returns:
             Scaled feature array [n_samples, n_features]
         """
@@ -1160,54 +1221,54 @@ class TransactionPipeline:
         X_scaled = self.scaler.fit_transform(X)
         self._fitted = True
         return X_scaled
-    
+
     def transform(self, df: pd.DataFrame) -> np.ndarray:
         """
         Transform features using fitted scaler.
-        
+
         Args:
             df: DataFrame with transaction data
-            
+
         Returns:
             Scaled feature array
         """
         if not self._fitted:
             raise RuntimeError("Pipeline must be fitted before transform")
-        
+
         X = df[self.feature_cols].values
         return self.scaler.transform(X)
-    
-    def to_sequence(self, X: np.ndarray, 
-                    y: Optional[np.ndarray] = None,
-                    stride: int = 1) -> Tuple[np.ndarray, Optional[np.ndarray]]:
+
+    def to_sequence(
+        self, X: np.ndarray, y: Optional[np.ndarray] = None, stride: int = 1
+    ) -> Tuple[np.ndarray, Optional[np.ndarray]]:
         """
         Generate sliding window sequences.
-        
+
         Args:
             X: Feature array [n_samples, n_features]
             y: Optional target array [n_samples]
             stride: Step size for sliding window
-            
+
         Returns:
             X_seq: [n_windows, seq_len, n_features]
             y_seq: [n_windows] (if y provided)
         """
         n_samples = len(X)
         n_windows = (n_samples - self.seq_len) // stride
-        
+
         X_seq = []
         y_seq = [] if y is not None else None
-        
+
         for i in range(0, n_samples - self.seq_len, stride):
-            X_seq.append(X[i:i + self.seq_len])
-            
+            X_seq.append(X[i : i + self.seq_len])
+
             if y is not None:
                 # Use label at end of sequence
                 y_seq.append(y[i + self.seq_len - 1])
-        
+
         X_seq = np.array(X_seq)
         y_seq = np.array(y_seq) if y is not None else None
-        
+
         return X_seq, y_seq
 ```
 
@@ -1225,31 +1286,33 @@ Expected: `2 passed`
 from dignity.data.loader import DignityDataset
 from torch.utils.data import DataLoader
 
+
 def test_dignity_dataset(sample_dataframe):
     """DignityDataset should provide PyTorch tensors"""
     pipeline = TransactionPipeline(seq_len=50)
     X_scaled = pipeline.fit_transform(sample_dataframe)
-    y = sample_dataframe['risk_label'].values
+    y = sample_dataframe["risk_label"].values
     X_seq, y_seq = pipeline.to_sequence(X_scaled, y)
-    
+
     dataset = DignityDataset(X_seq, y_seq)
-    
+
     assert len(dataset) == len(X_seq)
-    
+
     x_sample, y_sample = dataset[0]
     assert x_sample.shape == (50, 3)
     assert y_sample.shape == ()
+
 
 def test_dignity_dataloader(sample_dataframe):
     """DataLoader should batch data correctly"""
     pipeline = TransactionPipeline(seq_len=50)
     X_scaled = pipeline.fit_transform(sample_dataframe)
-    y = sample_dataframe['risk_label'].values
+    y = sample_dataframe["risk_label"].values
     X_seq, y_seq = pipeline.to_sequence(X_scaled, y)
-    
+
     dataset = DignityDataset(X_seq, y_seq)
     loader = DataLoader(dataset, batch_size=16, shuffle=True)
-    
+
     x_batch, y_batch = next(iter(loader))
     assert x_batch.shape == (16, 50, 3)
     assert y_batch.shape == (16,)
@@ -1260,27 +1323,29 @@ def test_dignity_dataloader(sample_dataframe):
 ```python
 # dignity/data/loader.py
 """PyTorch Dataset and DataLoader utilities."""
+
 import torch
 from torch.utils.data import Dataset
 import numpy as np
 from typing import Tuple
 
+
 class DignityDataset(Dataset):
     """
     PyTorch Dataset for transaction sequences.
-    
+
     Args:
         X: Sequence array [n_samples, seq_len, n_features]
         y: Target array [n_samples]
     """
-    
+
     def __init__(self, X: np.ndarray, y: np.ndarray = None):
         self.X = torch.FloatTensor(X)
         self.y = torch.FloatTensor(y) if y is not None else None
-    
+
     def __len__(self) -> int:
         return len(self.X)
-    
+
     def __getitem__(self, idx: int) -> Tuple[torch.Tensor, torch.Tensor]:
         x = self.X[idx]
         y = self.y[idx] if self.y is not None else torch.tensor(0.0)
@@ -1319,15 +1384,12 @@ import torch.nn as nn
 from torch.utils.data import DataLoader, TensorDataset
 from dignity.train.engine import train_epoch, validate_epoch
 
+
 @pytest.fixture
 def dummy_model():
     """Simple model for testing"""
-    return nn.Sequential(
-        nn.Linear(10, 32),
-        nn.ReLU(),
-        nn.Linear(32, 1),
-        nn.Sigmoid()
-    )
+    return nn.Sequential(nn.Linear(10, 32), nn.ReLU(), nn.Linear(32, 1), nn.Sigmoid())
+
 
 @pytest.fixture
 def dummy_dataloader():
@@ -1337,28 +1399,26 @@ def dummy_dataloader():
     dataset = TensorDataset(X, y)
     return DataLoader(dataset, batch_size=16)
 
+
 def test_train_epoch(dummy_model, dummy_dataloader):
     """train_epoch should update model and return loss"""
     optimizer = torch.optim.Adam(dummy_model.parameters())
     criterion = nn.BCELoss()
-    
+
     loss = train_epoch(
-        dummy_model, dummy_dataloader, optimizer, criterion,
-        device='cpu', use_amp=False
+        dummy_model, dummy_dataloader, optimizer, criterion, device="cpu", use_amp=False
     )
-    
+
     assert isinstance(loss, float)
     assert loss > 0
+
 
 def test_validate_epoch(dummy_model, dummy_dataloader):
     """validate_epoch should compute validation loss"""
     criterion = nn.BCELoss()
-    
-    loss = validate_epoch(
-        dummy_model, dummy_dataloader, criterion,
-        device='cpu'
-    )
-    
+
+    loss = validate_epoch(dummy_model, dummy_dataloader, criterion, device="cpu")
+
     assert isinstance(loss, float)
     assert loss > 0
 ```
@@ -1368,18 +1428,25 @@ def test_validate_epoch(dummy_model, dummy_dataloader):
 ```python
 # dignity/train/engine.py
 """Training and validation loops."""
+
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
-def train_epoch(model: nn.Module, dataloader: DataLoader,
-                optimizer: torch.optim.Optimizer, criterion: nn.Module,
-                device: str = 'cuda', use_amp: bool = True,
-                grad_clip: float = 1.0) -> float:
+
+def train_epoch(
+    model: nn.Module,
+    dataloader: DataLoader,
+    optimizer: torch.optim.Optimizer,
+    criterion: nn.Module,
+    device: str = "cuda",
+    use_amp: bool = True,
+    grad_clip: float = 1.0,
+) -> float:
     """
     Train for one epoch.
-    
+
     Args:
         model: Model to train
         dataloader: Training data
@@ -1388,7 +1455,7 @@ def train_epoch(model: nn.Module, dataloader: DataLoader,
         device: Device to use
         use_amp: Use automatic mixed precision
         grad_clip: Gradient clipping threshold
-        
+
     Returns:
         Average loss for epoch
     """
@@ -1396,73 +1463,75 @@ def train_epoch(model: nn.Module, dataloader: DataLoader,
     scaler = torch.cuda.amp.GradScaler(enabled=use_amp)
     total_loss = 0
     n_batches = 0
-    
-    pbar = tqdm(dataloader, desc='Training')
+
+    pbar = tqdm(dataloader, desc="Training")
     for x, y in pbar:
         x, y = x.to(device), y.to(device)
-        
+
         optimizer.zero_grad()
-        
+
         with torch.cuda.amp.autocast(enabled=use_amp):
             # Handle models that return (output, attention)
             out = model(x)
             if isinstance(out, tuple):
                 out = out[0]
-            
+
             loss = criterion(out.squeeze(), y)
-        
+
         scaler.scale(loss).backward()
-        
+
         # Gradient clipping
         if grad_clip > 0:
             scaler.unscale_(optimizer)
             torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
-        
+
         scaler.step(optimizer)
         scaler.update()
-        
+
         total_loss += loss.item()
         n_batches += 1
-        
-        pbar.set_postfix({'loss': f'{loss.item():.4f}'})
-    
+
+        pbar.set_postfix({"loss": f"{loss.item():.4f}"})
+
     return total_loss / n_batches
 
-def validate_epoch(model: nn.Module, dataloader: DataLoader,
-                   criterion: nn.Module, device: str = 'cuda') -> float:
+
+def validate_epoch(
+    model: nn.Module, dataloader: DataLoader, criterion: nn.Module, device: str = "cuda"
+) -> float:
     """
     Validate for one epoch.
-    
+
     Args:
         model: Model to validate
         dataloader: Validation data
         criterion: Loss function
         device: Device to use
-        
+
     Returns:
         Average validation loss
     """
     model.eval()
     total_loss = 0
     n_batches = 0
-    
+
     with torch.no_grad():
-        pbar = tqdm(dataloader, desc='Validation')
+        pbar = tqdm(dataloader, desc="Validation")
         for x, y in pbar:
             x, y = x.to(device), y.to(device)
-            
+
             # Handle models that return (output, attention)
             out = model(x)
             if isinstance(out, tuple):
                 out = out[0]
-            
+
             loss = criterion(out.squeeze(), y)
-            
+
             total_loss += loss.item()
             n_batches += 1
-            
-            pbar.set_postfix({'val_loss': f'{loss.item():.4f}'})
-    
+
+            pbar.set_postfix({"val_loss": f"{loss.item():.4f}"})
+
     return total_loss / n_batches
 ```
 
@@ -1500,49 +1569,43 @@ from pathlib import Path
 from dignity.models.dignity import Dignity
 from dignity.export.to_onnx import export_to_onnx
 
+
 def test_onnx_export(tmp_path):
     """Should export model to ONNX format"""
-    model = Dignity(task='risk', input_size=9, hidden_size=64, n_layers=1)
+    model = Dignity(task="risk", input_size=9, hidden_size=64, n_layers=1)
     model.eval()
-    
+
     output_path = tmp_path / "test_model.onnx"
-    
-    export_to_onnx(
-        model, 
-        output_path=str(output_path),
-        seq_len=100,
-        input_size=9
-    )
-    
+
+    export_to_onnx(model, output_path=str(output_path), seq_len=100, input_size=9)
+
     # Verify file exists
     assert output_path.exists()
-    
+
     # Verify ONNX model is valid
     onnx_model = onnx.load(str(output_path))
     onnx.checker.check_model(onnx_model)
 
+
 def test_onnx_inference(tmp_path):
     """ONNX model should produce same output as PyTorch"""
-    model = Dignity(task='risk', input_size=9, hidden_size=64, n_layers=1)
+    model = Dignity(task="risk", input_size=9, hidden_size=64, n_layers=1)
     model.eval()
-    
+
     output_path = tmp_path / "test_model.onnx"
     export_to_onnx(model, str(output_path), seq_len=100, input_size=9)
-    
+
     # Create test input
     x = torch.randn(1, 100, 9)
-    
+
     # PyTorch inference
     with torch.no_grad():
         torch_out, _ = model(x)
-    
+
     # ONNX inference
     ort_session = ort.InferenceSession(str(output_path))
-    onnx_out = ort_session.run(
-        None,
-        {'input': x.numpy()}
-    )[0]
-    
+    onnx_out = ort_session.run(None, {"input": x.numpy()})[0]
+
     # Compare outputs (allow small numerical difference)
     assert torch.allclose(torch_out, torch.tensor(onnx_out), atol=1e-5)
 ```
@@ -1552,16 +1615,22 @@ def test_onnx_inference(tmp_path):
 ```python
 # dignity/export/to_onnx.py
 """ONNX export utilities."""
+
 import torch
 import torch.nn as nn
 from pathlib import Path
 
-def export_to_onnx(model: nn.Module, output_path: str,
-                   seq_len: int = 100, input_size: int = 9,
-                   opset_version: int = 13) -> None:
+
+def export_to_onnx(
+    model: nn.Module,
+    output_path: str,
+    seq_len: int = 100,
+    input_size: int = 9,
+    opset_version: int = 13,
+) -> None:
     """
     Export Dignity model to ONNX format.
-    
+
     Args:
         model: Trained Dignity model
         output_path: Path to save ONNX model
@@ -1570,30 +1639,31 @@ def export_to_onnx(model: nn.Module, output_path: str,
         opset_version: ONNX opset version
     """
     model.eval()
-    
+
     # Create dummy input
     dummy_input = torch.randn(1, seq_len, input_size)
-    
+
     # Export
     torch.onnx.export(
         model,
         dummy_input,
         output_path,
-        input_names=['input'],
-        output_names=['output', 'attention'],
+        input_names=["input"],
+        output_names=["output", "attention"],
         dynamic_axes={
-            'input': {0: 'batch'},
-            'output': {0: 'batch'},
-            'attention': {0: 'batch'}
+            "input": {0: "batch"},
+            "output": {0: "batch"},
+            "attention": {0: "batch"},
         },
         opset_version=opset_version,
-        do_constant_folding=True
+        do_constant_folding=True,
     )
-    
+
     print(f"Model exported to {output_path}")
-    
+
     # Verify
     import onnx
+
     onnx_model = onnx.load(output_path)
     onnx.checker.check_model(onnx_model)
     print("ONNX model verified successfully")
@@ -1826,7 +1896,7 @@ import numpy as np
 session = ort.InferenceSession("dignity_risk.onnx")
 x = np.random.randn(1, 100, 9).astype(np.float32)
 
-risk_score, attention = session.run(None, {'input': x})
+risk_score, attention = session.run(None, {"input": x})
 print(f"Risk: {risk_score[0][0]:.3f}")
 ```
 
