@@ -1,8 +1,57 @@
-"""Privacy-preserving utilities for transaction data."""
+"""Privacy-preserving utilities for transaction data.
+
+Two families of primitives, each backed by a test in tests/test_privacy.py:
+
+- Keyed pseudonymization (HMAC-SHA256): same key -> linkable, different key ->
+  unlinkable.
+- Input-level differential privacy: bounded Laplace noise spent against an
+  epsilon ledger, and k-anonymous generalization by quantile binning.
+
+Nothing here claims more than its test proves. docs/PRIVACY.md and
+docs/THREAT-MODEL.md carry the exact wording of each guarantee.
+"""
 
 import hashlib
 
 import numpy as np
+
+_MIN_KEY_BYTES = 16
+
+
+class BudgetExhausted(ValueError):  # noqa: N818
+    """Raised when a spend would exceed the configured epsilon total."""
+
+
+class PrivacyBudget:
+    """Sequential-composition ledger for epsilon-differential privacy.
+
+    Epsilons add across releases. A spend that would push the total past
+    ``epsilon_total`` raises instead of degrading the guarantee silently.
+    """
+
+    def __init__(self, epsilon_total: float):
+        if epsilon_total <= 0:
+            raise ValueError("epsilon_total must be positive")
+        self.epsilon_total = float(epsilon_total)
+        self._spent = 0.0
+
+    @property
+    def spent(self) -> float:
+        return self._spent
+
+    @property
+    def remaining(self) -> float:
+        return self.epsilon_total - self._spent
+
+    def spend(self, epsilon: float) -> None:
+        if epsilon <= 0:
+            raise ValueError("epsilon must be positive")
+        if self._spent + epsilon > self.epsilon_total + 1e-12:
+            raise BudgetExhausted(
+                f"spending {epsilon} would exceed budget: "
+                f"{self._spent:.6f} spent of {self.epsilon_total:.6f}"
+            )
+        self._spent += epsilon
 
 
 class PrivacyManager:
