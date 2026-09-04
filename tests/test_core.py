@@ -5,7 +5,6 @@ import pandas as pd
 import pytest
 
 from core.config import DignityConfig
-from core.privacy import PrivacyManager
 from core.signals import SignalProcessor
 
 
@@ -68,56 +67,6 @@ class TestSignalProcessor:
         assert len(regimes) == len(vol)
         assert np.any(regimes == 0)  # Low vol regime
         assert np.any(regimes == 2)  # High vol regime
-
-
-class TestPrivacyManager:
-    """Test privacy-preserving operations."""
-
-    def test_hash_identifier(self):
-        """Test identifier hashing."""
-        addr1 = "0x1234567890abcdef"
-        addr2 = "0x1234567890abcdef"
-        addr3 = "0xfedcba0987654321"
-
-        hash1 = PrivacyManager.hash_identifier(addr1)
-        hash2 = PrivacyManager.hash_identifier(addr2)
-        hash3 = PrivacyManager.hash_identifier(addr3)
-
-        # Same input = same hash
-        assert hash1 == hash2
-        # Different input = different hash
-        assert hash1 != hash3
-        # Hash is hex string
-        assert len(hash1) == 64
-
-    def test_anonymize_addresses(self):
-        """Test batch address anonymization."""
-        addresses = ["addr1", "addr2", "addr3"]
-        hashed = PrivacyManager.anonymize_addresses(addresses)
-
-        assert len(hashed) == len(addresses)
-        assert all(len(h) == 64 for h in hashed)
-        assert len(set(hashed)) == len(addresses)  # All unique
-
-    def test_quantize_amounts(self):
-        """Test amount quantization."""
-        amounts = np.random.uniform(10, 100, 1000)
-        quantized = PrivacyManager.quantize_amounts(amounts, bins=10)
-
-        # Should have fewer unique values
-        assert len(np.unique(quantized)) <= 10
-        # Values should be within original range
-        assert np.min(quantized) >= np.min(amounts)
-        assert np.max(quantized) <= np.max(amounts)
-
-    def test_add_noise(self):
-        """Test differential privacy noise."""
-        values = np.array([100.0, 200.0, 300.0])
-        noisy = PrivacyManager.add_noise(values, epsilon=1.0)
-
-        # Should be different but similar
-        assert not np.array_equal(values, noisy)
-        assert np.allclose(values, noisy, atol=50)  # Reasonable noise
 
 
 class TestDignityConfig:

@@ -12,6 +12,8 @@ docs/THREAT-MODEL.md carry the exact wording of each guarantee.
 """
 
 import hashlib
+import hmac
+import secrets
 
 import numpy as np
 
@@ -55,29 +57,43 @@ class PrivacyBudget:
 
 
 class PrivacyManager:
-    """Manage privacy-preserving operations on transaction data."""
+    """Privacy primitives bound to one budget, one optional key, and one RNG.
 
-    @staticmethod
-    def hash_identifier(identifier: str, salt: str | None = None) -> str:
+    ``rng`` is any object exposing ``random() -> float`` in [0, 1). Production
+    uses ``secrets.SystemRandom``; tests inject ``random.Random(seed)`` or a
+    constant for determinism without weakening the default.
+    """
+
+    def __init__(
+        self,
+        budget: PrivacyBudget,
+        key: bytes | str | None = None,
+        rng=None,
+    ):
+        if isinstance(key, str):
+            key = key.encode("utf-8")
+        if key is not None and len(key) < _MIN_KEY_BYTES:
+            raise ValueError(f"key must be at least {_MIN_KEY_BYTES} bytes")
+        self.budget = budget
+        self._key = key
+        self._rng = rng if rng is not None else secrets.SystemRandom()
+
+    # -- keyed pseudonymization ---------------------------------------------
+
+    def pseudonymize(self, identifier: str) -> str:
+        """HMAC-SHA256 of ``identifier`` under the manager's key, as hex.
+
+        Same key -> same pseudonym (linkable). Different key -> unrelated
+        pseudonym (unlinkable). Requires a key; never falls back to unkeyed.
         """
-        Hash an identifier (address, user ID) using SHA-256.
+        if self._key is None:
+            raise ValueError("pseudonymize requires a key")
+        return hmac.new(
+            self._key, identifier.encode("utf-8"), hashlib.sha256
+        ).hexdigest()
 
-        Args:
-            identifier: The identifier to hash
-            salt: Optional salt for additional security
-
-        Returns:
-            Hexadecimal hash string
-        """
-        if salt:
-            identifier = f"{salt}{identifier}"
-
-        return hashlib.sha256(identifier.encode()).hexdigest()
-
-    @staticmethod
-    def anonymize_addresses(addresses: list[str], salt: str | None = None) -> list[str]:
-        """Anonymize a list of addresses."""
-        return [PrivacyManager.hash_identifier(addr, salt) for addr in addresses]
+    def pseudonymize_many(self, identifiers: list[str]) -> list[str]:
+        return [self.pseudonymize(i) for i in identifiers]
 
     @staticmethod
     def quantize_amounts(
