@@ -187,9 +187,13 @@ class TestGeneralizeAmounts:
 
     def test_holds_under_heavy_ties(self):
         # 95% of records share one value, like a fee_rate column with rare spikes.
+        # 250 quantile bins over the 50 spread values yields ~4-record bins, below
+        # k=5, so the k-property can only hold if those bins merged.
         values = np.concatenate([np.full(950, 0.001), np.linspace(0.002, 0.005, 50)])
-        out = PrivacyManager.generalize_amounts(values, bins=10, k=5)
+        out = PrivacyManager.generalize_amounts(values, bins=250, k=5)
         assert (_class_sizes(out) >= 5).all()
+        # the tie block stays its own class; the spread was not swallowed into it
+        assert np.unique(out).size >= 2
 
     def test_all_identical_values_form_one_class(self):
         out = PrivacyManager.generalize_amounts(np.full(20, 42.0), bins=10, k=5)
@@ -218,13 +222,20 @@ class TestGeneralizeAmounts:
             )
 
     def test_small_bins_merge_rather_than_drop_records(self):
-        # 3 outliers can't form their own class at k=5; they must join a neighbour.
-        values = np.concatenate([np.linspace(0, 10, 97), [1000.0, 1001.0, 1002.0]])
-        out = PrivacyManager.generalize_amounts(values, bins=10, k=5)
-        assert out.size == 100
+        # 25 bins over 50 records gives ~2 per bin, all below k=5. The 3 outliers
+        # cannot form their own class; they must be merged into a neighbour.
+        values = np.concatenate([np.linspace(0, 10, 47), [1000.0, 1001.0, 1002.0]])
+        out = PrivacyManager.generalize_amounts(values, bins=25, k=5)
+        assert out.size == 50
         assert (_class_sizes(out) >= 5).all()
+        outlier_class = np.unique(out[values >= 1000.0])
+        assert outlier_class.size == 1, "outliers must land in one class"
+        members = out == outlier_class[0]
+        assert (members & (values < 1000.0)).any(), (
+            "outlier class must include non-outliers"
+        )
 
-    def test_merge_loop_executes(self):
+    def test_many_small_bins_merge_until_every_class_has_k(self):
         # Force merging: k > n/bins creates small bins after initial binning.
         values = np.arange(50.0)  # 50 values
         out = PrivacyManager.generalize_amounts(values, bins=20, k=4)
