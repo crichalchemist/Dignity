@@ -118,9 +118,12 @@ class TransactionPipeline:
         if self.privacy_manager is None:
             return df
         result = df.copy()
+        missing = [n for n in self.privacy.features if n not in result.columns]
+        if missing:
+            raise ValueError(
+                f"privacy configured for column {missing[0]!r}, not in data"
+            )
         for name, feat in self.privacy.features.items():
-            if name not in result.columns:
-                raise ValueError(f"privacy configured for column {name!r}, not in data")
             col = result[name].to_numpy(dtype=float)
             if feat.mechanism == "laplace":
                 result[name] = self.privacy_manager.add_laplace_noise(

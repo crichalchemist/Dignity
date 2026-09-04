@@ -214,6 +214,25 @@ class TestPrivacyStage:
         with pytest.raises(ValueError, match="'nope'"):
             priv.process(_frame())
 
+    def test_missing_column_spends_no_budget(self):
+        cfg = PrivacyConfig(
+            epsilon_total=1.0,
+            features={
+                "price": {
+                    "mechanism": "laplace",
+                    "epsilon": 0.5,
+                    "bounds": [50.0, 150.0],
+                },
+                "nope": {"mechanism": "laplace", "epsilon": 0.5, "bounds": [0.0, 1.0]},
+            },
+        )
+        priv = TransactionPipeline(
+            seq_len=10, features=["price"], privacy=cfg, privacy_rng=_ZeroNoise()
+        )
+        with pytest.raises(ValueError, match="'nope'"):
+            priv.process(_frame())
+        assert priv.privacy_manager.budget.spent == 0.0
+
     def test_missing_key_env_var_fails_at_construction(self, monkeypatch):
         monkeypatch.delenv("DIGNITY_TEST_KEY_UNSET", raising=False)
         cfg = PrivacyConfig(epsilon_total=1.0, key_env="DIGNITY_TEST_KEY_UNSET")
