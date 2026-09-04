@@ -34,7 +34,7 @@ Verify before claiming any test/train result actually ran.
 ## Commands
 
 ```bash
-# Tests (89 collected: test_core 21, test_data 18, test_models 11, test_privacy 34,
+# Tests (94 collected: test_core 21, test_data 23, test_models 11, test_privacy 34,
 # test_operator 4, test_docs 1)
 pytest tests/ -v
 pytest tests/test_models.py -v                       # one file
@@ -70,6 +70,7 @@ One data path, one backbone, three interchangeable heads. The pieces only make s
 data/source/{synthetic,crypto}.py   →  raw DataFrame (volume, price, fee_rate, tx_count[, label])
 core/privacy.py                     →  privacy stage: runs once per fit/transform, BEFORE signals
 data/pipeline.py TransactionPipeline→  compute_signals → RobustScaler → sliding windows
+                                       (process_blocks: per-sequence split for synthetic)
 data/loader.py                      →  TransactionDataset / create_dataloader
 models/dignity.py Dignity           →  DignityBackbone + one head
 train/engine.py                     →  train_epoch / validate_epoch / save_checkpoint
@@ -101,6 +102,12 @@ a mechanism, it needs a test in `tests/test_privacy.py` or CI's 100% gate on tha
   (`price_change` and `regime` are never produced), and `train/cli.py` builds the model with
   `input_size=len(pipeline.available_features)` — **`model.input_size` in YAML is ignored**.
   If a model's input width is unexpected, check `available_features` first.
+- **Synthetic data is 1000 independent sequences glued end to end**, all normal blocks
+  first, then all anomalous. `train/cli.py` therefore uses `TransactionPipeline.process_blocks`
+  (block = `seq_len + 20` rows): shuffle and split at the block level, fit the scaler on train
+  blocks only, and compute signals and windows inside each block. Do not go back to
+  `process()` + a positional slice — that trained on 100% normal and validated on 100%
+  anomalous rows (val loss ≈ 42 in the January checkpoints).
 - **Timestamps are milliseconds everywhere.** `CryptoSource._normalize_timestamp` auto-detects
   seconds (`< 2e10`), ms (`2e10–3e13`), ns (`> 3e13`), and datetime strings, normalizing all to ms
   to match CCXT's native format. Any new data source must emit ms or a join against crypto data

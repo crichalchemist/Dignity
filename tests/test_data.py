@@ -246,6 +246,98 @@ class TestPrivacyStage:
         assert len(priv.privacy_manager.pseudonymize("x")) == 64
 
 
+def _blocks_frame(n_normal: int, n_anomalous: int, block_len: int):
+    """Synthetic dataset as (raw frame, per-row labels); one block per sequence."""
+    gen = SyntheticGenerator(seed=0)
+    df = gen.generate_dataset(
+        num_normal=n_normal, num_anomalous=n_anomalous, seq_len=block_len
+    )
+    return df.drop(columns="label"), df["label"].to_numpy()
+
+
+class _ReversedOrder:
+    """Stand-in rng: the highest-numbered blocks come first, so they land in val."""
+
+    def permutation(self, n: int) -> np.ndarray:
+        return np.arange(n)[::-1]
+
+
+class TestSequenceAwareSplit:
+    """process_blocks treats each generated sequence as an indivisible unit."""
+
+    def test_each_split_sees_both_classes(self):
+        # generate_dataset emits every normal block, then every anomalous block.
+        # A positional split produced an all-normal train set and an all-anomalous
+        # val set, so the risk head learned "always 0" and validation was meaningless.
+        df, labels = _blocks_frame(80, 20, block_len=60)
+        pipeline = TransactionPipeline(
+            seq_len=50, features=["volume", "price", "fee_rate"]
+        )
+        (X_tr, y_tr), (X_va, y_va) = pipeline.process_blocks(
+            df, labels, block_len=60, test_size=0.2, rng=np.random.default_rng(0)
+        )
+        assert set(np.unique(y_tr)) == {0, 1}
+        assert set(np.unique(y_va)) == {0, 1}
+        assert len(X_tr) == len(y_tr)
+        assert len(X_va) == len(y_va)
+
+    def test_windows_never_span_two_sequences(self):
+        # With the window as long as the block, each block yields exactly one
+        # window; a window crossing a joint would show up as an extra sequence.
+        df, labels = _blocks_frame(8, 2, block_len=50)
+        pipeline = TransactionPipeline(seq_len=50, features=["volume", "price"])
+        (X_tr, _), (X_va, _) = pipeline.process_blocks(
+            df, labels, block_len=50, test_size=0.2, rng=np.random.default_rng(1)
+        )
+        assert len(X_tr) + len(X_va) == 10
+        assert len(X_va) == 2
+        assert X_tr.shape[1:] == (50, 2)
+
+    def test_validation_outliers_are_not_absorbed_by_the_scaler(self):
+        # Five constant blocks; the two that land in val are six orders of magnitude
+        # larger. If the scaler had seen them, its IQR would swallow the gap and the
+        # val rows would scale to about 1. Fit on train only, they stay enormous.
+        block_len = 4
+        volume = np.concatenate(
+            [np.full(block_len, v) for v in (1.0, 2.0, 3.0, 1e6, 1e6)]
+        )
+        df = pd.DataFrame({"volume": volume + np.arange(len(volume)) * 0.01})
+        labels = np.zeros(len(df), dtype=int)
+        pipeline = TransactionPipeline(seq_len=block_len, features=["volume"])
+        (X_tr, _), (X_va, _) = pipeline.process_blocks(
+            df, labels, block_len=block_len, test_size=0.4, rng=_ReversedOrder()
+        )
+        assert np.abs(X_tr).max() < 10
+        assert np.abs(X_va).min() > 100
+
+    def test_single_privacy_release_covers_both_splits(self):
+        # The budget equals the per-column epsilon, so a second release for the
+        # val half would raise BudgetExhausted. Both halves come from one draw.
+        df, labels = _blocks_frame(8, 2, block_len=60)
+        pipeline = TransactionPipeline(
+            seq_len=50,
+            features=["volume", "price"],
+            privacy=_laplace_price(eps_total=1.0, eps=1.0),
+            privacy_rng=_ZeroNoise(),
+        )
+        pipeline.process_blocks(
+            df, labels, block_len=60, test_size=0.2, rng=np.random.default_rng(0)
+        )
+        assert pipeline.privacy_manager.budget.spent == pytest.approx(1.0)
+
+    def test_frame_not_divisible_into_blocks_is_rejected(self):
+        df, labels = _blocks_frame(3, 0, block_len=20)
+        pipeline = TransactionPipeline(seq_len=10, features=["volume"])
+        with pytest.raises(ValueError, match="block_len"):
+            pipeline.process_blocks(
+                df.iloc[:-1],
+                labels[:-1],
+                block_len=20,
+                test_size=0.2,
+                rng=np.random.default_rng(0),
+            )
+
+
 class TestDataLoader:
     """Test PyTorch data loading."""
 
