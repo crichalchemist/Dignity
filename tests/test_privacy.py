@@ -169,3 +169,66 @@ class TestAddLaplaceNoise:
         pm = _manager(rng=_ZeroThenHalf())
         out = pm.add_laplace_noise(np.zeros(1), epsilon=1.0, bounds=(0.0, 1.0))
         assert np.isfinite(out).all()
+
+
+def _class_sizes(out: np.ndarray) -> np.ndarray:
+    _, counts = np.unique(out, return_counts=True)
+    return counts
+
+
+class TestGeneralizeAmounts:
+    """k-anonymity for the generalized column: every output value is shared by >= k records."""
+
+    def test_every_equivalence_class_has_at_least_k(self):
+        rng = np.random.default_rng(0)
+        values = rng.lognormal(3.0, 1.0, size=500)  # skewed, like transaction volumes
+        out = PrivacyManager.generalize_amounts(values, bins=10, k=7)
+        assert (_class_sizes(out) >= 7).all()
+
+    def test_holds_under_heavy_ties(self):
+        # 95% of records share one value, like a fee_rate column with rare spikes.
+        values = np.concatenate([np.full(950, 0.001), np.linspace(0.002, 0.005, 50)])
+        out = PrivacyManager.generalize_amounts(values, bins=10, k=5)
+        assert (_class_sizes(out) >= 5).all()
+
+    def test_all_identical_values_form_one_class(self):
+        out = PrivacyManager.generalize_amounts(np.full(20, 42.0), bins=10, k=5)
+        assert np.unique(out).size == 1
+        assert out[0] == 42.0
+
+    def test_preserves_record_count_and_shape(self):
+        values = np.arange(100, dtype=float).reshape(10, 10)
+        out = PrivacyManager.generalize_amounts(values, bins=5, k=5)
+        assert out.shape == (10, 10)
+
+    def test_output_values_lie_within_input_range(self):
+        values = np.random.default_rng(1).uniform(10, 100, 300)
+        out = PrivacyManager.generalize_amounts(values, bins=10, k=5)
+        assert out.min() >= values.min() and out.max() <= values.max()
+
+    def test_rejects_n_below_k(self):
+        with pytest.raises(ValueError, match="k=5"):
+            PrivacyManager.generalize_amounts(np.arange(4.0), bins=2, k=5)
+
+    @pytest.mark.parametrize("kwargs", [{"k": 1}, {"bins": 1}])
+    def test_rejects_degenerate_parameters(self, kwargs):
+        with pytest.raises(ValueError):
+            PrivacyManager.generalize_amounts(
+                np.arange(50.0), **{"bins": 5, "k": 5, **kwargs}
+            )
+
+    def test_small_bins_merge_rather_than_drop_records(self):
+        # 3 outliers can't form their own class at k=5; they must join a neighbour.
+        values = np.concatenate([np.linspace(0, 10, 97), [1000.0, 1001.0, 1002.0]])
+        out = PrivacyManager.generalize_amounts(values, bins=10, k=5)
+        assert out.size == 100
+        assert (_class_sizes(out) >= 5).all()
+
+    def test_merge_loop_executes(self):
+        # Force merging: k > n/bins creates small bins after initial binning.
+        values = np.arange(50.0)  # 50 values
+        out = PrivacyManager.generalize_amounts(values, bins=20, k=4)
+        assert (_class_sizes(out) >= 4).all()
+        # With 50 values and 20 bins, each bin gets ~2.5 values on average.
+        # With k=4, bins with 1-3 values must merge.
+        assert out.size == 50

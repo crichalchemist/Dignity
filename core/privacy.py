@@ -137,44 +137,60 @@ class PrivacyManager:
                 break
         return -scale * math.copysign(1.0, u) * math.log(1.0 - 2.0 * abs(u))
 
+    # -- k-anonymity ----------------------------------------------------------
+
     @staticmethod
-    def quantize_amounts(
-        amounts: np.ndarray,
+    def generalize_amounts(
+        values: np.ndarray,
+        *,
         bins: int = 10,
-        min_val: float | None = None,
-        max_val: float | None = None,
+        k: int = 5,
     ) -> np.ndarray:
+        """Generalize ``values`` so every output value is shared by >= ``k`` records.
+
+        Quantile (equal-frequency) edges give balanced bins; any bin with fewer
+        than ``k`` members is merged into its smaller neighbour until none
+        remain. Each record is replaced by the midpoint of its class's min and
+        max, a function of the class alone. This is k-anonymity for this column
+        as released; features derived from it downstream carry no k claim.
         """
-        Quantize transaction amounts to reduce granularity.
+        if k < 2:
+            raise ValueError("k must be at least 2")
+        if bins < 2:
+            raise ValueError("bins must be at least 2")
+        x = np.asarray(values, dtype=float).ravel()
+        n = x.size
+        if n < k:
+            raise ValueError(f"need at least k={k} records, got {n}")
 
-        This provides k-anonymity by grouping similar amounts.
+        edges = np.unique(np.quantile(x, np.linspace(0.0, 1.0, bins + 1)))
+        if edges.size < 2:
+            # every value identical: one class of size n >= k
+            return np.full(np.shape(values), x[0])
 
-        Args:
-            amounts: Array of transaction amounts
-            bins: Number of quantization bins
-            min_val: Minimum value for binning (default: array min)
-            max_val: Maximum value for binning (default: array max)
+        # bin i covers [edges[i], edges[i+1]); the last bin is closed on the right
+        idx = np.searchsorted(edges, x, side="right") - 1
+        idx = np.clip(idx, 0, edges.size - 2)
 
-        Returns:
-            Quantized amounts (bin centers)
-        """
-        if len(amounts) == 0:
-            return amounts
+        while True:
+            counts = np.bincount(idx, minlength=edges.size - 1)
+            small = np.flatnonzero((counts > 0) & (counts < k))
+            if small.size == 0:
+                break
+            i = small[0]
+            nonempty = np.flatnonzero(counts > 0)
+            lower = nonempty[nonempty < i]
+            upper = nonempty[nonempty > i]
+            candidates = []
+            if lower.size:
+                candidates.append(lower[-1])
+            if upper.size:
+                candidates.append(upper[0])
+            target = min(candidates, key=lambda b: (counts[b], b))
+            idx[idx == i] = target
 
-        if min_val is None:
-            min_val = np.min(amounts)
-        if max_val is None:
-            max_val = np.max(amounts)
-
-        # Create bin edges
-        bin_edges = np.linspace(min_val, max_val, bins + 1)
-
-        # Digitize into bins
-        bin_indices = np.digitize(amounts, bin_edges) - 1
-        bin_indices = np.clip(bin_indices, 0, bins - 1)
-
-        # Map to bin centers
-        bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2
-        quantized = bin_centers[bin_indices]
-
-        return quantized
+        out = np.empty(n)
+        for b in np.unique(idx):
+            members = idx == b
+            out[members] = (x[members].min() + x[members].max()) / 2.0
+        return out.reshape(np.shape(values))
