@@ -3,8 +3,9 @@
 import numpy as np
 import pandas as pd
 import pytest
+import yaml
 
-from core.config import DignityConfig
+from core.config import DignityConfig, PrivacyConfig
 from core.signals import SignalProcessor
 
 
@@ -93,3 +94,63 @@ class TestDignityConfig:
 
         assert config2.model.hidden_size == 512
         assert config2.data.seq_len == config1.data.seq_len
+
+
+def _valid_privacy_block():
+    return {
+        "epsilon_total": 1.0,
+        "k": 5,
+        "key_env": None,
+        "features": {
+            "volume": {"mechanism": "laplace", "epsilon": 0.5, "bounds": [0, 1000]},
+            "price": {"mechanism": "laplace", "epsilon": 0.5, "bounds": [0, 500]},
+            "fee_rate": {"mechanism": "generalize", "bins": 10},
+        },
+    }
+
+
+class TestPrivacyConfig:
+    """Misconfiguration fails at load time, and absence means no privacy stage."""
+
+    def test_absent_block_yields_none(self, tmp_path):
+        path = tmp_path / "c.yaml"
+        path.write_text(yaml.dump({"model": {"task": "risk"}}))
+        assert DignityConfig.from_yaml(str(path)).privacy is None
+
+    def test_valid_block_round_trips_through_yaml(self, tmp_path):
+        path = tmp_path / "c.yaml"
+        path.write_text(yaml.dump({"privacy": _valid_privacy_block()}))
+        cfg = DignityConfig.from_yaml(str(path))
+        assert cfg.privacy is not None
+        assert cfg.privacy.features["volume"].bounds == (0.0, 1000.0)
+
+        out = tmp_path / "out.yaml"
+        cfg.to_yaml(str(out))
+        again = DignityConfig.from_yaml(str(out))
+        assert again.privacy.to_dict() == cfg.privacy.to_dict()
+
+    @pytest.mark.parametrize(
+        "mutate,match",
+        [
+            (
+                lambda b: b["features"]["volume"].update(mechanism="gaussian"),
+                "unknown mechanism",
+            ),
+            (lambda b: b["features"]["volume"].update(epsilon=0.0), "epsilon > 0"),
+            (lambda b: b["features"]["volume"].pop("bounds"), "requires bounds"),
+            (lambda b: b["features"]["volume"].update(bounds=[10, 10]), "lo < hi"),
+            (lambda b: b["features"]["fee_rate"].update(epsilon=0.1), "bins only"),
+            (lambda b: b["features"]["fee_rate"].update(bounds=[0, 1]), "bins only"),
+            (lambda b: b.update(k=1), "k must be"),
+            (lambda b: b["features"]["fee_rate"].update(bins=1), "bins must be"),
+            (
+                lambda b: b["features"]["volume"].update(epsilon=0.9),
+                "exceeds epsilon_total",
+            ),
+        ],
+    )
+    def test_rejects_bad_privacy_block(self, mutate, match):
+        block = _valid_privacy_block()
+        mutate(block)
+        with pytest.raises(ValueError, match=match):
+            PrivacyConfig(**block)
