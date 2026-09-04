@@ -140,12 +140,15 @@ def validate_epoch(
         targets_cat = torch.cat(all_targets)
 
         # Add task-specific metrics
-        if predictions_cat.size(-1) == 1:  # Binary classification or regression
-            # For risk scoring (binary)
-            if targets_cat.max() <= 1 and targets_cat.min() >= 0:
-                preds_binary = (predictions_cat > 0.5).float()
-                accuracy = (preds_binary == targets_cat).float().mean().item()
-                metrics["accuracy"] = accuracy
+        # For risk scoring (binary)
+        if (
+            predictions_cat.size(-1) == 1  # Binary classification or regression
+            and targets_cat.max() <= 1
+            and targets_cat.min() >= 0
+        ):
+            preds_binary = (predictions_cat > 0.5).float()
+            accuracy = (preds_binary == targets_cat).float().mean().item()
+            metrics["accuracy"] = accuracy
 
     return metrics
 
