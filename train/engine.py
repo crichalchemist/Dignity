@@ -58,6 +58,13 @@ def train_epoch(
             # Squeeze predictions if they have an extra dimension
             if predictions.dim() > y.dim():
                 predictions = predictions.squeeze(-1)
+
+        # The loss runs outside autocast in float32: RiskHead emits sigmoid
+        # probabilities scored with BCELoss, which autocast refuses ("unsafe to
+        # autocast"). Casting the half-precision predictions up is the
+        # documented pattern for losses that must stay in float32.
+        with autocast("cuda", enabled=False):
+            predictions = predictions.float()
             loss = criterion(predictions, y) if y is not None else predictions.mean()
 
         # Backward pass

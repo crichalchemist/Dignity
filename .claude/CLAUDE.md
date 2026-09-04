@@ -34,8 +34,8 @@ Verify before claiming any test/train result actually ran.
 ## Commands
 
 ```bash
-# Tests (95 collected: test_core 21, test_data 23, test_models 11, test_privacy 34,
-# test_operator 4, test_docs 1, test_train 1)
+# Tests (96 collected: test_core 21, test_data 23, test_models 11, test_privacy 34,
+# test_operator 4, test_docs 1, test_train 2 — one skips without CUDA)
 pytest tests/ -v
 pytest tests/test_models.py -v                       # one file
 pytest tests/test_models.py::TestDignityModel::test_risk_model -v   # one test
@@ -110,6 +110,12 @@ a mechanism, it needs a test in `tests/test_privacy.py` or CI's 100% gate on tha
   blocks only, and compute signals and windows inside each block. Do not go back to
   `process()` + a positional slice — that trained on 100% normal and validated on 100%
   anomalous rows (val loss ≈ 42 in the January checkpoints).
+- **AMP and the risk loss.** `RiskHead` ends in a sigmoid and the risk criterion is `BCELoss`,
+  which PyTorch refuses inside an autocast region. `train_epoch` therefore computes the loss
+  outside autocast in float32. This only bites on CUDA (CPU autocast is a no-op here), so a CPU
+  run proves nothing about it; `tests/test_train.py` has a GPU-only test. If you ever switch the
+  head to logits, switch the loss to `BCEWithLogitsLoss` in the same change and re-check ONNX
+  consumers that expect probabilities.
 - **Timestamps are milliseconds everywhere.** `CryptoSource._normalize_timestamp` auto-detects
   seconds (`< 2e10`), ms (`2e10–3e13`), ns (`> 3e13`), and datetime strings, normalizing all to ms
   to match CCXT's native format. Any new data source must emit ms or a join against crypto data
