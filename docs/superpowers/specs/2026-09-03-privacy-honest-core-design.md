@@ -317,12 +317,12 @@ jobs:
         with: { python-version: "${{ matrix.python-version }}", cache: pip }
       - run: pip install torch --index-url https://download.pytorch.org/whl/cpu
       - run: pip install -r requirements.txt && pip install -e . --no-deps
-      - run: pytest tests/ --cov=core.privacy --cov-fail-under=100
+      - run: pytest tests/ --cov --cov-fail-under=100
 ```
 
 ### Gates and why
 
-- **`--cov=core.privacy --cov-fail-under=100`** — the honest-core principle as a build
+- **`--cov --cov-fail-under=100`** (coverage `include = ["core/privacy.py"]` in pyproject) — the honest-core principle as a build
   failure. Not repo-wide; the one module whose every line is a claim.
 - **Torch from the CPU index first** — default Linux wheel pulls CUDA (2GB+). CPU wheel is
   ~200MB. `-e . --no-deps` so `setup.py` doesn't re-resolve torch.
@@ -373,7 +373,7 @@ code. Without it CI reports; with it CI enforces.
 All verifiable by command; none by assertion.
 
 - [ ] `pytest tests/ -v` green, 84 collected, on Python 3.10 and 3.12.
-- [ ] `pytest tests/ --cov=core.privacy --cov-fail-under=100` passes.
+- [ ] `pytest tests/ --cov --cov-fail-under=100` passes (only `core/privacy.py` is measured).
 - [ ] `ruff check .` and `ruff format --check .` clean at width 88.
 - [ ] CI workflow green on both matrix legs on the PR.
 - [ ] `grep -rn "suppress_rare_events\|sanitize_dataset\|Secure Aggregation\|hash_identifiers(" README.md docs/` returns nothing.

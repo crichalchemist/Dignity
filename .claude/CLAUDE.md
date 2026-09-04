@@ -34,7 +34,8 @@ Verify before claiming any test/train result actually ran.
 ## Commands
 
 ```bash
-# Tests (84 collected: test_core 19, test_data 18, test_models 11, test_privacy 32, test_operator 3, test_docs 1)
+# Tests (84 collected: test_core 19, test_data 18, test_models 11, test_privacy 32,
+# test_operator 3, test_docs 1)
 pytest tests/ -v
 pytest tests/test_models.py -v                       # one file
 pytest tests/test_models.py::TestDignityModel::test_risk_model -v   # one test
@@ -46,8 +47,8 @@ ruff check .
 ruff format .
 pre-commit run --all-files
 
-# The CI coverage gate (core/privacy.py must be 100%)
-pytest tests/ --cov=core.privacy --cov-fail-under=100
+# The CI coverage gate — measures only core/privacy.py (pyproject [tool.coverage.run] include)
+pytest tests/ --cov --cov-fail-under=100
 
 # Train
 dignity-train --config config/train_risk.yaml        # or: python -m train.cli --config ...
@@ -117,15 +118,14 @@ a mechanism, it needs a test in `tests/test_privacy.py` or CI's 100% gate on tha
 - `pytest.ini` documents that markers (`fast`, `timeout_300`) map to timeouts "via conftest.py
   pytest-timeout hook". **No such hook exists** in `tests/conftest.py` and `pytest-timeout` is not
   in `requirements.txt`. The markers are declared but inert.
-- **`docs/` and `README.md` contain API examples that do not match the code.** Trust the source.
-  Verified drift: `docs/ARCHITECTURE.md` shows `from core.signals import compute_volatility` and
-  `from core.privacy import hash_identifiers` (neither exists — use `SignalProcessor.volatility`,
-  `PrivacyManager.hash_identifier`); `docs/README.md` shows `export_dignity_to_onnx` (actual:
-  `export_to_onnx`) and `python -m train.cli --config ... --epochs 10` (`--epochs` is not a CLI
-  flag; epochs come from YAML); `README.md` shows `PrivacyManager(hash_salt=...)` (no `__init__`),
-  `quantize_amounts(..., precision=2)` (actual kwarg is `bins`), and
-  `generate_dataset(seq_length=...)` (actual kwarg is `seq_len`).
-  When you touch a documented symbol, fix the doc in the same change.
+- **`docs/` and `README.md` still contain API examples that do not match the code.** Trust the
+  source. Verified drift: `docs/ARCHITECTURE.md` shows `from core.signals import
+  compute_volatility` (does not exist — use `SignalProcessor.volatility`); `docs/README.md` shows
+  `export_dignity_to_onnx` (actual: `export_to_onnx`) and `python -m train.cli --config ...
+  --epochs 10` (`--epochs` is not a CLI flag; epochs come from YAML); `README.md` shows
+  `generate_dataset(seq_length=...)` (actual kwarg is `seq_len`). Privacy examples were rewritten
+  on this branch and are covered by `tests/test_docs.py`. When you touch a documented symbol, fix
+  the doc in the same change.
 
 ## Conventions
 
@@ -139,7 +139,8 @@ a mechanism, it needs a test in `tests/test_privacy.py` or CI's 100% gate on tha
 - A `privacy:` block in YAML is optional and validated at load (`PrivacyConfig`). No block =
   no privacy stage. `bounds` are public parameters chosen a priori — never derive them from data.
 - Tests are organized as classes (`TestSignalProcessor`, `TestDignityModel`, …); node ids are
-  `file::Class::test_name`. They use root-level fixtures in `tests/conftest.py` (`device`, `sample_sequence` `[4,100,9]`,
-  `sample_labels`) and an autouse seed reset. Reuse them rather than re-seeding locally.
+  `file::Class::test_name`. They use root-level fixtures in `tests/conftest.py` (`device`,
+  `sample_sequence` `[4,100,9]`, `sample_labels`) and an autouse seed reset. Reuse them rather
+  than re-seeding locally.
 - `.env` holds API keys (COGNEE, FRED, TWELVEDATA) and is gitignored. `.internal/` is gitignored
   local design notes — read it for background, never cite it as public documentation.
