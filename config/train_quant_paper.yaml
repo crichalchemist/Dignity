@@ -1,0 +1,82 @@
+# Quant cascade training — paper trading (safe default)
+# Set execution.metaapi_token and execution.account_id via env vars
+# before switching paper_trading to false.
+
+model:
+  task: cascade
+  input_size: 32
+  hidden_size: 256
+  n_layers: 2
+  dropout: 0.1
+  cnn_kernel_size: 3
+  task_weights:
+    regime: 0.2
+    risk: 0.3
+    alpha: 0.3
+    policy: 0.2
+
+data:
+  source: metaapi
+  seq_len: 100
+  batch_size: 32
+  test_size: 0.15
+  num_workers: 4
+  start_date: "2016-01-01"
+  features:
+    - volume
+    - volume_volatility
+    - volume_entropy
+    - fee_rate
+    - price
+    - price_change
+    - momentum_10
+    - momentum_20
+    - directional_change
+    - tx_count
+    - volatility_5
+    - volatility_20
+    - vol_ratio
+    - rsi
+    - macd_line
+    - macd_signal
+    - macd_hist
+    - roc_5
+    - roc_20
+    - bollinger_pct_b
+    - bollinger_width
+    - atr
+    - stoch_k
+    - stoch_d
+    - adx
+    - obv
+    - vwap
+    - order_flow_imbalance
+    - dc_direction
+    - dc_overshoot
+    - bars_since_event
+    - dc_bars_since_event
+
+train:
+  epochs: 100
+  lr: 0.0003
+  weight_decay: 0.00001
+  use_amp: true
+  gradient_clip: 1.0
+  checkpoint_dir: ./checkpoints/quant
+  log_interval: 10
+  save_interval: 5
+  risk_gate_training: true
+
+execution:
+  metaapi_token: ""        # override via METAAPI_TOKEN env var
+  account_id: ""           # override via METAAPI_ACCOUNT_ID env var
+  symbols:
+    - EURUSD
+  asset_class: forex
+  max_drawdown: 0.05
+  max_position_size: 0.1
+  risk_sdk_enabled: false
+  paper_trading: true
+
+device: cuda
+seed: 42
