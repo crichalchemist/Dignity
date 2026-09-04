@@ -150,10 +150,63 @@ class TransactionPipeline:
         self._fit_on(prepared)
         return self._transform_on(prepared)
 
+    def process_blocks(
+        self,
+        df: pd.DataFrame,
+        labels: np.ndarray,
+        block_len: int,
+        test_size: float,
+        rng,
+    ) -> tuple[tuple[np.ndarray, np.ndarray], tuple[np.ndarray, np.ndarray]]:
+        """Fit, scale and window a frame made of independent equal-length blocks.
+
+        ``df`` holds ``n_blocks * block_len`` rows of concatenated sequences, the
+        layout ``SyntheticGenerator.generate_dataset`` produces. Blocks are
+        shuffled with ``rng`` and split at the block level, the scaler is fit on
+        the training blocks only, and signals and windows are computed inside
+        each block so nothing crosses a joint. The privacy stage runs once on the
+        whole frame before the split, as a single release.
+
+        Returns ``((X_train, y_train), (X_val, y_val))``.
+        """
+        n_blocks, remainder = divmod(len(df), block_len)
+        if remainder or n_blocks < 2:
+            raise ValueError(
+                f"{len(df)} rows do not form at least two blocks of "
+                f"block_len={block_len}"
+            )
+
+        prepared = self._apply_privacy(df)
+        bounds = [(i * block_len, (i + 1) * block_len) for i in range(n_blocks)]
+        blocks = [prepared.iloc[lo:hi] for lo, hi in bounds]
+        block_labels = [labels[lo:hi] for lo, hi in bounds]
+
+        order = np.asarray(rng.permutation(n_blocks))
+        n_val = min(max(round(n_blocks * test_size), 1), n_blocks - 1)
+        val_ids, train_ids = order[:n_val], order[n_val:]
+
+        self._fit_scaler(
+            pd.concat([self.compute_signals(blocks[i]) for i in train_ids])
+        )
+
+        def windows(ids: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+            xs, ys = [], []
+            for i in ids:
+                x_seq, y_seq = self.create_sequences(
+                    self._transform_on(blocks[i]), block_labels[i]
+                )
+                xs.append(x_seq)
+                ys.append(y_seq)
+            return np.concatenate(xs), np.concatenate(ys)
+
+        return windows(train_ids), windows(val_ids)
+
     def _fit_on(self, df: pd.DataFrame) -> None:
         """Fit the scaler. ``df`` must already have had privacy applied."""
-        df = self.compute_signals(df)
+        self._fit_scaler(self.compute_signals(df))
 
+    def _fit_scaler(self, df: pd.DataFrame) -> None:
+        """Fit the scaler on a frame that already carries its signal columns."""
         available_features = [f for f in self.features if f in df.columns]
         if not available_features:
             raise ValueError(

@@ -4,6 +4,7 @@ import argparse
 import sys
 from pathlib import Path
 
+import numpy as np
 import torch
 import torch.nn as nn
 
@@ -50,10 +51,9 @@ def main():
     # Generate/load data
     print("\nGenerating synthetic data...")
     generator = SyntheticGenerator(seed=config.seed)
+    block_len = config.data.seq_len + 20  # each block yields 21 windows
     df_train = generator.generate_dataset(
-        num_normal=800,
-        num_anomalous=200,
-        seq_len=config.data.seq_len + 20,  # Extra for validation
+        num_normal=800, num_anomalous=200, seq_len=block_len
     )
 
     # Prepare data pipeline
@@ -64,26 +64,21 @@ def main():
         privacy=config.privacy,
     )
 
-    # Process training data
-    labels = df_train["label"].values if "label" in df_train.columns else None
-    X_train, y_train = pipeline.process(
-        df_train.drop("label", axis=1, errors="ignore"), labels=labels, fit=True
+    # Split at the sequence level: every generated block is one independent
+    # sequence, so the split, the scaler fit, signals and windows all stay
+    # inside blocks. A positional split over the concatenated frame put every
+    # normal block in train and every anomalous block in val.
+    (X_train, y_train), (X_val, y_val) = pipeline.process_blocks(
+        df_train.drop(columns="label"),
+        df_train["label"].to_numpy(),
+        block_len=block_len,
+        test_size=config.data.test_size,
+        rng=np.random.default_rng(config.seed),
     )
 
     if pipeline.privacy_manager is not None:
         budget = pipeline.privacy_manager.budget
         print(f"Privacy: ε spent {budget.spent:.3f} of {budget.epsilon_total:.3f}")
-
-    # Split train/val
-    split_idx = int(len(X_train) * (1 - config.data.test_size))
-    X_val, y_val = (
-        X_train[split_idx:],
-        (y_train[split_idx:] if y_train is not None else None),
-    )
-    X_train, y_train = (
-        X_train[:split_idx],
-        (y_train[:split_idx] if y_train is not None else None),
-    )
 
     print(f"Train sequences: {len(X_train)}, Val sequences: {len(X_val)}")
 
