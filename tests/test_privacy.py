@@ -1,5 +1,9 @@
 """Subject-layer privacy primitives. Every test here backs one sentence in docs/PRIVACY.md."""
 
+import random
+import secrets
+
+import numpy as np
 import pytest
 
 from core.privacy import BudgetExhausted, PrivacyBudget, PrivacyManager
@@ -81,3 +85,77 @@ class TestPseudonymize:
         assert _manager(key="0123456789abcdef").pseudonymize("q") == _manager(
             key=b"0123456789abcdef"
         ).pseudonymize("q")
+
+
+class _ZeroNoise:
+    """rng whose uniform is always 0.5 -> Laplace inverse CDF at u=0 -> exactly 0 noise."""
+
+    def random(self) -> float:
+        return 0.5
+
+
+class TestAddLaplaceNoise:
+    """Input-level epsilon-DP: bounded, ledgered, non-recoverable noise."""
+
+    def test_clips_to_bounds_before_noising(self):
+        pm = _manager(rng=_ZeroNoise())
+        values = np.array([-50.0, 0.0, 500.0, 1500.0])
+        out = pm.add_laplace_noise(values, epsilon=1.0, bounds=(0.0, 1000.0))
+        np.testing.assert_array_equal(out, [0.0, 0.0, 500.0, 1000.0])
+        # input untouched
+        np.testing.assert_array_equal(values, [-50.0, 0.0, 500.0, 1500.0])
+
+    def test_noise_scale_is_sensitivity_over_epsilon(self):
+        # Laplace(0, b) has mean |x| = b. With bounds width 100 and eps 0.5, b = 200.
+        pm = _manager(total=10.0, rng=random.Random(42))
+        out = pm.add_laplace_noise(np.zeros(20_000), epsilon=0.5, bounds=(0.0, 100.0))
+        assert np.mean(np.abs(out)) == pytest.approx(200.0, rel=0.05)
+        # symmetric around zero
+        assert np.mean(out) == pytest.approx(0.0, abs=10.0)
+
+    def test_spends_budget(self):
+        pm = _manager(total=1.0, rng=_ZeroNoise())
+        pm.add_laplace_noise(np.ones(3), epsilon=0.4, bounds=(0.0, 1.0))
+        assert pm.budget.spent == pytest.approx(0.4)
+        pm.add_laplace_noise(np.ones(3), epsilon=0.6, bounds=(0.0, 1.0))
+        with pytest.raises(BudgetExhausted):
+            pm.add_laplace_noise(np.ones(3), epsilon=0.1, bounds=(0.0, 1.0))
+
+    def test_budget_is_spent_before_any_release(self):
+        # If the spend fails, nothing should have been sampled or returned.
+        pm = _manager(total=0.5, rng=_ZeroNoise())
+        with pytest.raises(BudgetExhausted):
+            pm.add_laplace_noise(np.ones(3), epsilon=1.0, bounds=(0.0, 1.0))
+        assert pm.budget.spent == 0.0
+
+    @pytest.mark.parametrize("eps", [0.0, -0.1])
+    def test_rejects_nonpositive_epsilon(self, eps):
+        with pytest.raises(ValueError):
+            _manager().add_laplace_noise(np.ones(2), epsilon=eps, bounds=(0.0, 1.0))
+
+    def test_rejects_inverted_bounds(self):
+        with pytest.raises(ValueError, match="lo < hi"):
+            _manager().add_laplace_noise(np.ones(2), epsilon=1.0, bounds=(1.0, 1.0))
+
+    def test_default_rng_is_system_random(self):
+        pm = PrivacyManager(PrivacyBudget(1.0))
+        assert isinstance(pm._rng, secrets.SystemRandom)
+
+    def test_preserves_shape(self):
+        pm = _manager(rng=_ZeroNoise())
+        out = pm.add_laplace_noise(np.zeros((3, 4)), epsilon=1.0, bounds=(0.0, 1.0))
+        assert out.shape == (3, 4)
+
+    def test_uniform_at_exactly_zero_is_resampled(self):
+        # rng.random() == 0.0 maps to u = -0.5 -> log(0). Must resample, not return -inf.
+        class _ZeroThenHalf:
+            def __init__(self):
+                self.calls = 0
+
+            def random(self):
+                self.calls += 1
+                return 0.0 if self.calls == 1 else 0.5
+
+        pm = _manager(rng=_ZeroThenHalf())
+        out = pm.add_laplace_noise(np.zeros(1), epsilon=1.0, bounds=(0.0, 1.0))
+        assert np.isfinite(out).all()

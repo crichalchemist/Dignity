@@ -13,6 +13,7 @@ docs/THREAT-MODEL.md carry the exact wording of each guarantee.
 
 import hashlib
 import hmac
+import math
 import secrets
 
 import numpy as np
@@ -95,6 +96,47 @@ class PrivacyManager:
     def pseudonymize_many(self, identifiers: list[str]) -> list[str]:
         return [self.pseudonymize(i) for i in identifiers]
 
+    # -- differential privacy -------------------------------------------------
+
+    def add_laplace_noise(
+        self,
+        values: np.ndarray,
+        *,
+        epsilon: float,
+        bounds: tuple[float, float],
+    ) -> np.ndarray:
+        """Clip ``values`` to ``bounds`` and add Laplace noise for epsilon-DP.
+
+        Sensitivity is the width of ``bounds``; the caller cannot understate it
+        by omission. ``epsilon`` is spent from the budget before any sampling,
+        so a refused spend releases nothing. Floating-point implementation:
+        see docs/THREAT-MODEL.md for the Mironov (2012) caveat.
+
+        Returns a new array; ``values`` is not modified.
+        """
+        if epsilon <= 0:
+            raise ValueError("epsilon must be positive")
+        lo, hi = bounds
+        if lo >= hi:
+            raise ValueError("bounds must satisfy lo < hi")
+        self.budget.spend(epsilon)
+        scale = (hi - lo) / epsilon
+        clipped = np.clip(np.asarray(values, dtype=float), lo, hi)
+        noise = np.fromiter(
+            (self._laplace(scale) for _ in range(clipped.size)),
+            dtype=float,
+            count=clipped.size,
+        ).reshape(clipped.shape)
+        return clipped + noise
+
+    def _laplace(self, scale: float) -> float:
+        """One Laplace(0, scale) draw by inverse CDF from a uniform in [0, 1)."""
+        while True:
+            u = self._rng.random() - 0.5
+            if abs(u) < 0.5:
+                break
+        return -scale * math.copysign(1.0, u) * math.log(1.0 - 2.0 * abs(u))
+
     @staticmethod
     def quantize_amounts(
         amounts: np.ndarray,
@@ -136,29 +178,3 @@ class PrivacyManager:
         quantized = bin_centers[bin_indices]
 
         return quantized
-
-    @staticmethod
-    def add_noise(
-        values: np.ndarray, epsilon: float = 0.1, sensitivity: float = 1.0
-    ) -> np.ndarray:
-        """
-        Add Laplace noise for differential privacy.
-
-        Args:
-            values: Array to add noise to
-            epsilon: Privacy parameter (smaller = more privacy)
-            sensitivity: Sensitivity of the function
-
-        Returns:
-            Values with added noise
-        """
-        if epsilon <= 0:
-            raise ValueError("Epsilon must be positive")
-
-        # Laplace noise scale
-        scale = sensitivity / epsilon
-
-        # Generate Laplace noise
-        noise = np.random.laplace(0, scale, size=values.shape)
-
-        return values + noise
