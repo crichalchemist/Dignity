@@ -50,6 +50,7 @@ dummy-variable-rgx = "^(_+|(_+[a-zA-Z0-9_]*[a-zA-Z0-9]+?))$"
 "rl/**/*.py" = ["E402"]
 "run/**/*.py" = ["E402"]
 "notebooks/**/*.py" = ["E402"]
+"notebooks/**/*.ipynb" = ["E402"]
 
 # N812: Allow PyTorch convention (torch.nn.functional as F)
 "models/**/*.py" = ["N812"]
