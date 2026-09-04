@@ -49,6 +49,7 @@ class TestOperatorLayer:
     def test_inference_path_imports_no_network_modules(self):
         offenders = []
         for pkg in INFERENCE_PATH:
+            assert (ROOT / pkg).is_dir(), pkg
             for py in (ROOT / pkg).rglob("*.py"):
                 for root in _imported_roots(py):
                     if root in NETWORK_MODULES:
@@ -86,3 +87,12 @@ class TestOperatorLayer:
         monkeypatch.setattr(socket, "socket", refuse)
         out = _tiny_model().predict(torch.randn(2, 20, 4))
         assert out.shape[0] == 2
+
+    def test_export_succeeds_with_sockets_disabled(self, monkeypatch, tmp_path):
+        def refuse(*args, **kwargs):
+            raise AssertionError("export attempted to open a socket")
+
+        monkeypatch.setattr(socket, "socket", refuse)
+        out = tmp_path / "tiny.onnx"
+        export_to_onnx(_tiny_model(), str(out), input_shape=(1, 20, 4), verify=False)
+        assert out.stat().st_size > 0

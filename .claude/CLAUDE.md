@@ -34,13 +34,12 @@ Verify before claiming any test/train result actually ran.
 ## Commands
 
 ```bash
-# Tests (84 collected: test_core 19, test_data 18, test_models 11, test_privacy 32,
-# test_operator 3, test_docs 1)
+# Tests (89 collected: test_core 21, test_data 18, test_models 11, test_privacy 34,
+# test_operator 4, test_docs 1)
 pytest tests/ -v
 pytest tests/test_models.py -v                       # one file
 pytest tests/test_models.py::TestDignityModel::test_risk_model -v   # one test
 pytest tests/ -m "not slow" -v                       # marker filter
-pytest tests/ --cov=. --cov-report=html
 
 # Lint / format — ruff only, line length 88, enforced by CI and pre-commit
 ruff check .

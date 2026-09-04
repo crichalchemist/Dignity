@@ -15,7 +15,7 @@ Dignity Core uses a modular architecture with composable backbones and task-spec
 
 Data Flow:
 1. Load transaction data (CSV, database, synthetic)
-2. Apply privacy operations (hashing, anonymization, DP noise)
+2. Apply the privacy stage (Laplace noise, k-anonymous generalization)
 3. Compute signals (volatility, entropy, momentum, regime)
 4. Create sequences with sliding windows
 5. Feed to neural network model

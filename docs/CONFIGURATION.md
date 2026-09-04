@@ -35,12 +35,14 @@ model:
     hidden_dim: 64             # Head-specific hidden dimension
     num_classes: 3             # For classification tasks
     
-privacy:
-  hash_ids: true               # Hash entity identifiers
-  quantize_amounts: true       # Quantize transaction amounts
-  num_bins: 20                 # Quantization bins
-  add_noise: false             # Differential privacy noise
-  epsilon: 1.0                 # Privacy budget (if noise enabled)
+privacy:                       # optional; no block = no privacy stage
+  epsilon_total: 1.0           # ε ledger for the whole pipeline instance
+  k: 5                         # minimum equivalence-class size for generalize
+  features:
+    volume:   {mechanism: laplace, epsilon: 0.5, bounds: [0, 1000]}
+    price:    {mechanism: laplace, epsilon: 0.5, bounds: [0, 500]}
+    fee_rate: {mechanism: generalize, bins: 10}
+    tx_count: {mechanism: generalize, bins: 10}
   
 training:
   batch_size: 32               # Training batch size
@@ -87,11 +89,13 @@ signals:
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `hash_ids` | bool | true | Hash entity identifiers |
-| `quantize_amounts` | bool | true | Quantize amounts |
-| `num_bins` | int | 20 | Quantization bins |
-| `add_noise` | bool | false | Add DP noise |
-| `epsilon` | float | 1.0 | Privacy budget |
+| `epsilon_total` | float | — | total ε; feature epsilons must not exceed it |
+| `k` | int | 5 | minimum class size for generalize (≥ 2) |
+| `key_env` | str | none | env var NAME of the HMAC key for pseudonymize() |
+| `features.<col>.mechanism` | str | — | laplace or generalize |
+| `features.<col>.epsilon` | float | — | laplace only, > 0 |
+| `features.<col>.bounds` | [lo, hi] | — | laplace only, public, lo < hi |
+| `features.<col>.bins` | int | 10 | generalize only, ≥ 2 |
 
 ### Training Parameters
 

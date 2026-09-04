@@ -39,7 +39,8 @@ train:
 # Privacy stage — commented out by default. No block => no privacy stage runs.
 # See docs/PRIVACY.md for what each mechanism guarantees.
 # privacy:
-#   key_env: DIGNITY_PRIVACY_KEY     # env var NAME holding the HMAC key; never the key itself
+#   key_env: DIGNITY_PRIVACY_KEY     # env var NAME of the HMAC key; only used by
+#                                     # pseudonymize(), no column mechanism reads it
 #   epsilon_total: 1.0
 #   k: 5
 #   features:

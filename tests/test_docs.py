@@ -4,8 +4,9 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 
-# Removed claims and removed API names. Historical records under docs/plans/ and
-# docs/superpowers/ are allowed to mention them; public docs are not.
+# Removed claims and removed API names. Matching is case-insensitive. Historical
+# records under docs/plans/ and docs/superpowers/ are allowed to mention them;
+# public docs are not.
 REMOVED = (
     "Secure Aggregation",
     "hash_identifiers(",
@@ -18,6 +19,11 @@ REMOVED = (
     ".quantize_amounts(",
     "anonymize_amounts(",
     "add_differential_privacy_noise(",
+    "anonymization",
+    "hash_ids",
+    "quantize_amounts",
+    "add_noise",
+    "gaussian mechanism",
 )
 EXCLUDED_PREFIXES = ("docs/plans/", "docs/superpowers/")
 
@@ -36,6 +42,6 @@ class TestDocs:
         for path in _public_docs():
             for lineno, line in enumerate(path.read_text().splitlines(), start=1):
                 for term in REMOVED:
-                    if term in line:
+                    if term.lower() in line.lower():
                         hits.append(f"{path.relative_to(ROOT)}:{lineno}: {term!r}")
         assert hits == []

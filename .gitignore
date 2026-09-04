@@ -75,3 +75,10 @@ Sequence/
 # Agent tooling
 .remember/
 .serena/
+
+# Local agent tooling (the tracked agent guidance is .claude/CLAUDE.md)
+.claude/settings.json
+.claude/settings.local.json
+.agents/
+.gemini/
+/CLAUDE.md

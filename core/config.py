@@ -155,8 +155,8 @@ class DignityConfig:
             data=DataConfig(**config_dict.get("data", {})),
             train=TrainConfig(**config_dict.get("train", {})),
             privacy=(
-                PrivacyConfig(**config_dict["privacy"])
-                if config_dict.get("privacy")
+                PrivacyConfig(**(config_dict["privacy"] or {}))
+                if "privacy" in config_dict
                 else None
             ),
             device=config_dict.get("device", "cuda"),

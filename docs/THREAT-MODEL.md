@@ -11,7 +11,7 @@ Anyone with the trained weights, the ONNX export, or the preprocessed feature
 arrays. This is the **subject layer**: it protects individuals whose transactions
 appear in the training data.
 
-**Defended.** Every raw value released into training passes through one of:
+**Defended.** Every raw column listed under `privacy.features` passes through one of:
 
 - *Bounded Laplace noise* — ε-differential privacy at the level of each released
   value. Values are clipped to public `bounds`, sensitivity is the width of those
@@ -27,6 +27,11 @@ before signal computation. Test: `TestPrivacyStage::test_privacy_stage_runs_befo
 
 **Not defended.**
 
+- Raw model inputs that are not listed under `privacy.features`, and labels. The
+  stage covers only what the config names; `train/cli.py` releases labels as-is.
+  The shipped `config/train_risk.yaml` lists every raw source column its model
+  consumes (`volume`, `price`, `fee_rate`, `tx_count`). Test:
+  `TestPrivacyConfig::test_shipped_risk_config_covers_every_raw_model_input`.
 - An adversary who already holds the raw source data. No input mechanism helps
   once the input is theirs.
 - Memorization inside the trained weights beyond what input noise suppresses.
@@ -61,6 +66,10 @@ Someone watching the person who runs the model. This is the **operator layer**.
   snapping mechanism that fixes this is not implemented.
 - **`bounds` are public.** Choosing them from the data would leak its extremes,
   so they must be set a priori in config. They are visible to any adversary.
+- **The unit of privacy is one released value** (one row of one column). A subject
+  who contributes m rows is protected at m·ε by group privacy, not ε. In the
+  shipped synthetic path every subject contributes `seq_len + 20` rows. User-level
+  accounting is not implemented; the CLI's "ε spent" line is the per-value ledger.
 - **Pseudonymization is a primitive, not a pipeline stage.** No current data
   source carries identifier columns, so `PrivacyManager.pseudonymize` is exposed
   and tested but not wired into `TransactionPipeline`.

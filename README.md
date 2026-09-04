@@ -1,6 +1,6 @@
 # Dignity Core – Privacy-Preserving Sequence Modeling for Transactional Behavior
 
-[![PyTorch](https://img.shields.io/badge/PyTorch-2.2+-ee4c2c.svg)](https://pytorch.org/)
+[![PyTorch](https://img.shields.io/badge/PyTorch-2.5+-ee4c2c.svg)](https://pytorch.org/)
 [![Python](https://img.shields.io/badge/Python-3.10+-blue.svg)](https://python.org/)
 [![CI](https://github.com/crichalchemist/Dignity/actions/workflows/ci.yml/badge.svg)](https://github.com/crichalchemist/Dignity/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
@@ -213,7 +213,7 @@ Dignity/
 ├── core/                     # Core utilities (3 modules)
 │   ├── config.py            # YAML-based configuration (DignityConfig)
 │   ├── signals.py           # Signal processing (volatility, entropy, momentum, regime)
-│   └── privacy.py           # Privacy operations (hashing, anonymization, noise)
+│   └── privacy.py           # Privacy primitives (pseudonymization, Laplace, k-anonymity)
 │
 ├── data/                     # Data pipeline (4 modules)
 │   ├── pipeline.py          # Preprocessing pipeline (signals, scaling, windowing)
@@ -261,7 +261,7 @@ Dignity/
 
 **Package Stats:**
 - 28 Python modules (~2,800 lines of code)
-- 31 passing tests (100% coverage on critical paths)
+- 89 tests collected; 100% line coverage enforced on core/privacy.py in CI
 - 4 YAML configs for different tasks
 - ~350K parameters (default model)
 

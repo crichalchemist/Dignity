@@ -9,6 +9,7 @@ import yaml
 
 from core.config import DignityConfig, PrivacyConfig
 from core.signals import SignalProcessor
+from data.source.synthetic import SyntheticGenerator
 
 
 class TestSignalProcessor:
@@ -119,6 +120,12 @@ class TestPrivacyConfig:
         path.write_text(yaml.dump({"model": {"task": "risk"}}))
         assert DignityConfig.from_yaml(str(path)).privacy is None
 
+    def test_present_but_empty_block_is_rejected(self, tmp_path):
+        path = tmp_path / "cfg.yaml"
+        path.write_text(yaml.safe_dump({"privacy": {}}))
+        with pytest.raises(TypeError):
+            DignityConfig.from_yaml(str(path))
+
     def test_valid_block_round_trips_through_yaml(self, tmp_path):
         path = tmp_path / "c.yaml"
         path.write_text(yaml.dump({"privacy": _valid_privacy_block()}))
@@ -137,6 +144,16 @@ class TestPrivacyConfig:
             DignityConfig.from_yaml(str(root / "train_risk.yaml")).privacy is not None
         )
         assert DignityConfig.from_yaml(str(root / "base.yaml")).privacy is None
+
+    def test_shipped_risk_config_covers_every_raw_model_input(self):
+        root = Path(__file__).resolve().parents[1] / "config"
+        cfg = DignityConfig.from_yaml(str(root / "train_risk.yaml"))
+        raw_columns = set(SyntheticGenerator(seed=0).generate_normal_sequence(length=8))
+        raw_inputs = (raw_columns - {"label"}) & set(cfg.data.features)
+        assert raw_inputs, (
+            "shipped features must include at least one raw source column"
+        )
+        assert raw_inputs <= set(cfg.privacy.features)
 
     @pytest.mark.parametrize(
         "mutate,match",

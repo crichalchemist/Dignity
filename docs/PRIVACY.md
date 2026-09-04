@@ -8,7 +8,7 @@ For who these protect and from whom, read [THREAT-MODEL.md](THREAT-MODEL.md).
 
 | Guarantee | Mechanism | Wording we use | Wording we do not use |
 |---|---|---|---|
-| Identifier protection | HMAC-SHA256 with a required key | *keyed pseudonymization* | anonymization |
+| Identifier protection | HMAC-SHA256 with a required key | *keyed pseudonymization* | "anonymized" |
 | Value protection | Clipped Laplace noise, ε ledgered | *input-level ε-differential privacy* | any DP claim about the trained model |
 | Value protection | Quantile bins merged to ≥ k | *k-anonymity for the column as released* | k claims about derived features |
 
@@ -37,9 +37,9 @@ pseudonym = pm.pseudonymize("0x1234abcd5678ef90")  # 64 hex chars
 many = pm.pseudonymize_many(["addr_a", "addr_b", "addr_a"])  # many[0] == many[2]
 ```
 
-This is pseudonymization, not anonymization: anyone holding the key can link
-records. That is the intended property — it lets you join across your own
-datasets while making the pseudonyms useless to anyone without the key.
+This is reversible pseudonymization, not identity removal: anyone holding the
+key can link records. That is the intended property — it lets you join across
+your own datasets while making the pseudonyms useless to anyone without the key.
 
 ## Bounded Laplace noise (input-level ε-DP)
 
@@ -60,6 +60,9 @@ pm.add_laplace_noise(
 Each released value is ε-differentially private for that feature (local DP).
 Spending ε₁ on one column and ε₂ on another composes to ε₁ + ε₂; the ledger
 enforces that the sum never exceeds `epsilon_total`.
+
+The unit is one value in one row. A subject contributing m rows is protected at
+m·ε (group privacy); see `docs/THREAT-MODEL.md`, Known limitations.
 
 `bounds` are **public parameters**. Do not derive them from the data — that leaks
 the extremes. Choose them from domain knowledge before you look.
@@ -88,18 +91,31 @@ post-processing. The stage runs exactly once per `fit`, `transform`, or
 
 ```yaml
 privacy:
-  key_env: DIGNITY_PRIVACY_KEY       # env var NAME; never the key itself
+  key_env: DIGNITY_PRIVACY_KEY       # env var NAME; only used if you call pseudonymize() yourself
   epsilon_total: 1.0
   k: 5
   features:
     volume:   {mechanism: laplace, epsilon: 0.5, bounds: [0, 1000]}
     price:    {mechanism: laplace, epsilon: 0.5, bounds: [0, 500]}
     fee_rate: {mechanism: generalize, bins: 10}
+    tx_count: {mechanism: generalize, bins: 10}
 ```
 
 **No `privacy:` block means no privacy stage runs.** Misconfiguration — an unknown
 mechanism, ε ≤ 0, missing or inverted bounds, k < 2, or feature epsilons summing
 past `epsilon_total` — fails at config load, not mid-training.
+
+### What the shipped config does
+
+`config/train_risk.yaml` is written to exercise the stage, not to train a useful
+model. With `epsilon_total: 1.0` split 0.5/0.5, the Laplace scale is
+width/ε = 2000 for `volume` and 1000 for `price` — far above the synthetic
+signal, so released values carry little information about the source. Because
+the feature epsilons sum to `epsilon_total`, a pipeline instance can release
+**once**: `process(fit=True)` spends the whole budget and any later `transform`
+raises `BudgetExhausted` (`train/cli.py` slices train/val after the single
+release). `generalize` needs at least `k` rows per release, so a fitted pipeline
+cannot score batches smaller than `k` with the stage on.
 
 `dignity-train` prints `Privacy: ε spent X of Y` after preprocessing so the
 ledger is visible, not theoretical.
@@ -108,7 +124,8 @@ ledger is visible, not theoretical.
 
 - No differential privacy on the trained weights (no DP-SGD). The model itself
   carries no DP guarantee.
-- No secure aggregation, no federated learning.
+- No protocol for combining values across participants without revealing them
+  individually, no federated learning.
 - No snapping mechanism; see THREAT-MODEL.md on floating-point Laplace.
 
 ## Reference

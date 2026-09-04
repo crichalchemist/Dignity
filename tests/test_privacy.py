@@ -40,6 +40,12 @@ class TestPrivacyBudget:
         with pytest.raises(ValueError):
             PrivacyBudget(epsilon_total=1.0).spend(bad)
 
+    def test_tolerance_does_not_admit_a_real_overspend(self):
+        budget = PrivacyBudget(1.0)
+        budget.spend(1.0)
+        with pytest.raises(BudgetExhausted):
+            budget.spend(1e-9)
+
 
 def _manager(key=b"0123456789abcdef", total=1.0, rng=None):
     return PrivacyManager(PrivacyBudget(epsilon_total=total), key=key, rng=rng)
@@ -243,3 +249,11 @@ class TestGeneralizeAmounts:
         # With 50 values and 20 bins, each bin gets ~2.5 values on average.
         # With k=4, bins with 1-3 values must merge.
         assert out.size == 50
+
+    def test_representative_is_the_midpoint_of_its_class(self):
+        values = np.array([1.0, 2.0, 3.0, 4.0, 5.0, 10.0, 11.0, 12.0, 13.0, 14.0])
+        out = PrivacyManager.generalize_amounts(values, bins=2, k=5)
+        for rep in np.unique(out):
+            members = values[out == rep]
+            assert rep == pytest.approx((members.min() + members.max()) / 2.0)
+        assert len(np.unique(out)) == 2
