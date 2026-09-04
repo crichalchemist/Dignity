@@ -71,3 +71,9 @@ indent-style = "space"
 skip-magic-trailing-comma = false
 # Auto-detect line ending
 line-ending = "auto"
+
+[tool.coverage.run]
+# Measure only the privacy module, by path. `--cov=core.privacy` (dotted module) makes
+# coverage import `core` before pytest does and corrupts numpy's _NoValue sentinel under
+# coverage 7.16 / pytest-cov 7.1 (13 spurious "_NoValueType" failures). Path include avoids it.
+include = ["core/privacy.py"]

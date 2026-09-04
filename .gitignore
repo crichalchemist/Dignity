@@ -39,6 +39,8 @@ env/
 # Pytest
 .pytest_cache/
 .cache/
+.coverage
+htmlcov/
 
 # Data & Models
 *.csv
