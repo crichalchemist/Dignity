@@ -1,5 +1,6 @@
 # Core ML Framework
-torch>=2.2.0
+# dynamo= kwarg on torch.onnx.export (export/to_onnx.py)
+torch>=2.5.0
 
 # Data Science
 pandas>=2.0.0
