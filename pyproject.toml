@@ -1,7 +1,6 @@
 [tool.ruff]
 # Exclude external/vendored code
-# docs/superpowers and docs/plans are design records whose code fences are fragments
-extend-exclude = ["models/timesFM", ".venvx", "build", "dist", "docs/superpowers", "docs/plans"]
+extend-exclude = ["models/timesFM", ".venvx", "build", "dist"]
 
 # Python version target
 target-version = "py310"

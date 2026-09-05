@@ -4,9 +4,9 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 
-# Removed claims and removed API names. Matching is case-insensitive. Historical
-# records under docs/plans/ and docs/superpowers/ are allowed to mention them;
-# public docs are not.
+# Removed claims and removed API names. Matching is case-insensitive. The design
+# records that legitimately name the removed API live in the gitignored .internal/,
+# so everything under docs/ is public and in scope.
 REMOVED = (
     "Secure Aggregation",
     "hash_identifiers(",
@@ -25,15 +25,11 @@ REMOVED = (
     "add_noise",
     "gaussian mechanism",
 )
-EXCLUDED_PREFIXES = ("docs/plans/", "docs/superpowers/")
 
 
 def _public_docs():
     yield ROOT / "README.md"
-    for path in sorted((ROOT / "docs").rglob("*.md")):
-        rel = path.relative_to(ROOT).as_posix()
-        if not rel.startswith(EXCLUDED_PREFIXES):
-            yield path
+    yield from sorted((ROOT / "docs").rglob("*.md"))
 
 
 class TestDocs:
