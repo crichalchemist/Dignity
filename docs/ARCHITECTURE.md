@@ -36,10 +36,12 @@ config = DignityConfig.from_yaml("config/base.yaml")
 
 **signals.py** - Signal processing
 ```python
-from core.signals import compute_volatility, compute_entropy
+from core.signals import SignalProcessor
 
-df = compute_volatility(df, window=20)
-df = compute_entropy(df, window=50, bins=10)
+# All static: they take arrays, not frames. TransactionPipeline.compute_signals
+# applies them column by column.
+volatility = SignalProcessor.volatility(df["price"].to_numpy(), window=20)
+entropy = SignalProcessor.entropy(df["volume"].to_numpy(), bins=10)
 ```
 
 **privacy.py** - Privacy primitives
@@ -303,35 +305,41 @@ for epoch in range(config.training.epochs):
 ## Data Flow Example
 
 ```python
-# 1. Raw transaction data
-raw_data = {
-    "user_id": ["alice", "bob", "charlie"],
-    "merchant_id": ["shop_1", "shop_2", "shop_1"],
-    "amount": [100.50, 250.75, 75.25],
-    "timestamp": ["2024-01-01 10:00", "2024-01-01 10:30", "2024-01-01 11:00"],
-}
+import torch
 
-# 2. Apply privacy (see docs/PRIVACY.md) — normally done by TransactionPipeline's
-#    privacy stage from the `privacy:` config block, before signals are computed
-pm = PrivacyManager(PrivacyBudget(epsilon_total=1.0))
-amounts = pm.add_laplace_noise(
-    np.array(raw_data["amount"]), epsilon=1.0, bounds=(0.0, 500.0)
+from core.privacy import PrivacyBudget, PrivacyManager
+from data.pipeline import TransactionPipeline
+from data.source.synthetic import SyntheticGenerator
+from models.dignity import Dignity
+
+# 1. Raw transaction frame: volume, price, fee_rate, tx_count per step, plus a label
+df = SyntheticGenerator(seed=42).generate_dataset(
+    num_normal=800, num_anomalous=200, seq_len=120
 )
 
-# 3. Compute signals
-data = compute_volatility(data, window=20)
-data = compute_entropy(data, window=50, bins=10)
-data = detect_regime(data, method="volatility")
+# 2. Privacy (see docs/PRIVACY.md). In training this is TransactionPipeline's
+#    privacy stage, driven by the `privacy:` config block and run once before
+#    signals. Standalone, the same primitive looks like this:
+pm = PrivacyManager(PrivacyBudget(epsilon_total=1.0))
+noisy_volume = pm.add_laplace_noise(
+    df["volume"].to_numpy(), epsilon=1.0, bounds=(0.0, 1000.0)
+)
 
-# 4. Create sequences
-# Shape: (num_sequences, window_size, num_features)
-sequences = create_sequences(data, window_size=20, stride=1)
+# 3. Signals, scaling and sliding windows
+#    Shape: (num_windows, seq_len, num_features)
+pipeline = TransactionPipeline(
+    seq_len=100, features=["volume", "fee_rate", "tx_count", "volatility", "momentum"]
+)
+sequences, targets = pipeline.process(df.drop(columns="label"), df["label"].to_numpy())
 
-# 5. Feed to model
-model_output = model(sequences)
+# 4. Feed to model: Dignity.forward returns (predictions, attention_weights)
+model = Dignity(task="risk", input_size=len(pipeline.available_features))
+x = torch.as_tensor(sequences[:64], dtype=torch.float32)
+y = torch.as_tensor(targets[:64], dtype=torch.float32)
+predictions, attention = model(x)
 
-# 6. Compute loss and update
-loss = criterion(model_output, targets)
+# 5. Compute loss and update
+loss = criterion(predictions.squeeze(-1), y)
 loss.backward()
 optimizer.step()
 ```

@@ -30,16 +30,12 @@ pip install -r requirements.txt
 
 **Train a Model:**
 ```bash
-python -m train.cli --config config/train_risk.yaml --epochs 10
+python -m train.cli --config config/train_risk.yaml  # epochs, lr, ... come from the YAML
 ```
 
 **Export to ONNX:**
-```python
-from export.to_onnx import export_dignity_to_onnx
-
-export_dignity_to_onnx(
-    checkpoint_path="checkpoints/dignity_risk_best.pth", output_path="dignity_risk.onnx"
-)
+```bash
+python -m export.to_onnx --checkpoint checkpoints/risk/dignity_risk_best.pt --output dignity_risk.onnx
 ```
 
 ## Project Structure

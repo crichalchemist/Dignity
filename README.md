@@ -60,10 +60,10 @@ from data.source.synthetic import SyntheticGenerator
 
 # Generate synthetic transaction sequences
 gen = SyntheticGenerator(seed=42)
-dataset = gen.generate_dataset(num_normal=800, num_anomalous=200, seq_length=1000)
+df = gen.generate_dataset(num_normal=800, num_anomalous=200, seq_len=120)
 
-print(f"Generated {len(dataset)} sequences")
-# Output: Generated 1000 sequences
+print(df.shape)
+# Output: (120000, 5) — 1000 sequences of 120 rows glued end to end, plus a label column
 ```
 
 #### Privacy Operations
