@@ -129,14 +129,11 @@ a mechanism, it needs a test in `tests/test_privacy.py` or CI's 100% gate on tha
 - `pytest.ini` documents that markers (`fast`, `timeout_300`) map to timeouts "via conftest.py
   pytest-timeout hook". **No such hook exists** in `tests/conftest.py` and `pytest-timeout` is not
   in `requirements.txt`. The markers are declared but inert.
-- **`docs/` and `README.md` still contain API examples that do not match the code.** Trust the
-  source. Verified drift: `docs/ARCHITECTURE.md` shows `from core.signals import
-  compute_volatility` (does not exist — use `SignalProcessor.volatility`); `docs/README.md` shows
-  `export_dignity_to_onnx` (actual: `export_to_onnx`) and `python -m train.cli --config ...
-  --epochs 10` (`--epochs` is not a CLI flag; epochs come from YAML); `README.md` shows
-  `generate_dataset(seq_length=...)` (actual kwarg is `seq_len`). Privacy examples were rewritten
-  on this branch and are covered by `tests/test_docs.py`. When you touch a documented symbol, fix
-  the doc in the same change.
+- **`docs/` and `README.md` drift from the code easily.** The known drift (free-function
+  signal helpers, `export_dignity_to_onnx`, a `--epochs` flag, `generate_dataset(seq_length=)`)
+  was fixed on 2026-09-04, but `tests/test_docs.py` only guards against removed privacy claims,
+  not against stale examples. Trust the source, and when you touch a documented symbol, fix the
+  doc in the same change.
 
 ## Conventions
 
@@ -153,5 +150,8 @@ a mechanism, it needs a test in `tests/test_privacy.py` or CI's 100% gate on tha
   `file::Class::test_name`. They use root-level fixtures in `tests/conftest.py` (`device`,
   `sample_sequence` `[4,100,9]`, `sample_labels`) and an autouse seed reset. Reuse them rather
   than re-seeding locally.
+- Branches: `main` is the public, protected branch (CI `lint` and `test` checks required);
+  `dev` is the integration branch. Branch feature work from `dev` and open PRs against `dev`;
+  `dev` → `main` is the release step. CI runs on pushes to both and on every PR.
 - `.env` holds API keys (COGNEE, FRED, TWELVEDATA) and is gitignored. `.internal/` is gitignored
   local design notes — read it for background, never cite it as public documentation.
