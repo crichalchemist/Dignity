@@ -157,6 +157,6 @@ docs/
 
 ## References
 
-- Original refactor plan: [docs/plans/2026-01-22-dignity-core-refactor.md](plans/2026-01-22-dignity-core-refactor.md)
-- Refactor summary: [docs/plans/DIGNITY_REFACTOR_SUMMARY.md](plans/DIGNITY_REFACTOR_SUMMARY.md)
+- Design records (refactor plans, specs) are kept out of the repository under a
+  local `.internal/` directory; they are not part of the published documentation.
 - Legacy documentation: [docs/archive/sequence_legacy/](archive/sequence_legacy/)
