@@ -29,6 +29,10 @@ pip install -r requirements.txt && pip install -e . --no-deps
 `torch>=2.5` is required (`torch.onnx.export(..., dynamo=False)` in `export/to_onnx.py`);
 conda-forge's current pytorch (2.6) also satisfies it if you prefer a conda env.
 
+**On the macOS boot** the Linux `.venv/` is unusable. Use the existing conda env instead,
+prefixing every command with `conda run -n dignity-model` (torch 2.10, Python 3.11). Verified
+2026-11-08: 95 passed, 1 skipped (CUDA), and `pre-commit run --all-files` is clean.
+
 Verify before claiming any test/train result actually ran.
 
 ## Commands
@@ -129,6 +133,22 @@ a mechanism, it needs a test in `tests/test_privacy.py` or CI's 100% gate on tha
 - `pytest.ini` documents that markers (`fast`, `timeout_300`) map to timeouts "via conftest.py
   pytest-timeout hook". **No such hook exists** in `tests/conftest.py` and `pytest-timeout` is not
   in `requirements.txt`. The markers are declared but inert.
+- **Only `task: risk` trains end to end.** This contradicts "Adding a task ... Nothing else
+  changes" above. The engine also needs work:
+  - `forecast` fails in `train_epoch` on a shape mismatch, because the 1-D binary synthetic
+    labels meet a `[B, pred_len, num_features]` output.
+  - `policy` fails because `PolicyHead` returns a tuple and the engine calls `.dim()` on it.
+  - `train/cli.py` never passes head kwargs (`pred_len`, `n_actions`) from config.
+- **A CLI-trained checkpoint does not load in `export/to_onnx.py`.**
+  - Training sizes the model with `len(pipeline.available_features)` (7 for base/train_risk on
+    synthetic data).
+  - Export rebuilds it with `config.model.input_size` (9) and the input shape with
+    `len(config.data.features)`, so `load_state_dict` raises a size mismatch.
+- `train_epoch` evaluates `y.dim()` before handling `y is None`, so label-free batches crash
+  in training. `validate_epoch` guards it correctly.
+- **Machine-local hazard:** on the macOS checkout, `checkpoints/risk/` holds untracked April
+  checkpoints named `dignity_risk_{best,epochN}.pt`. `config/train_risk.yaml` writes those
+  exact filenames, so running it overwrites them. Point `checkpoint_dir` elsewhere first.
 - **`docs/` and `README.md` drift from the code easily.** The known drift (free-function
   signal helpers, `export_dignity_to_onnx`, a `--epochs` flag, `generate_dataset(seq_length=)`)
   was fixed on 2026-09-04, but `tests/test_docs.py` only guards against removed privacy claims,
