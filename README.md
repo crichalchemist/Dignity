@@ -115,7 +115,7 @@ loss curves, validation scores, attention plots and ONNX export shown step by st
 ```bash
 # Export trained model to ONNX
 python -m export.to_onnx \
-    --checkpoint checkpoints/dignity_risk_best.pt \
+    --checkpoint runs/risk/dignity_risk_best.pt \
     --output dignity_risk.onnx \
     --benchmark
 ```

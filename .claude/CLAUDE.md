@@ -35,6 +35,11 @@ prefixing every command with `conda run -n dignity-model` (torch 2.10, Python 3.
 
 Verify before claiming any test/train result actually ran.
 
+On the macOS checkout, `checkpoints/risk/` holds untracked **January** checkpoints
+`dignity_risk_{best,epochN}.pt` that cannot be regenerated; they use the old checkpoint
+format that export no longer supports (DGNTY-3, DGNTY-35). No shipped config writes there,
+`tests/test_core.py` enforces it, and anything you train goes to `runs/`.
+
 ## Commands
 
 ```bash
@@ -54,13 +59,14 @@ pre-commit run --all-files
 pytest tests/ --cov --cov-fail-under=100
 
 # Train
+# checkpoints land in ./runs/<task>/ (gitignored); never in checkpoints/
 dignity-train --config config/train_risk.yaml        # or: python -m train.cli --config ...
 python -m train.cli --config config/colab.yaml
 # notebooks/train_risk.ipynb is the same run as a notebook (Colab badge inside). ruff lints
 # and formats .ipynb files too, so it must stay `ruff check`/`ruff format` clean.
 
 # ONNX export (run the module directly; see "Known breakage" below)
-python -m export.to_onnx --checkpoint checkpoints/dignity_risk_best.pt --output dignity_risk.onnx --benchmark
+python -m export.to_onnx --checkpoint runs/risk/dignity_risk_best.pt --output dignity_risk.onnx --benchmark
 ```
 
 `pytest.ini` sets `pythonpath = . run`. Imports across the package are **absolute from the repo
@@ -146,9 +152,6 @@ a mechanism, it needs a test in `tests/test_privacy.py` or CI's 100% gate on tha
     `len(config.data.features)`, so `load_state_dict` raises a size mismatch.
 - `train_epoch` evaluates `y.dim()` before handling `y is None`, so label-free batches crash
   in training. `validate_epoch` guards it correctly.
-- **Machine-local hazard:** on the macOS checkout, `checkpoints/risk/` holds untracked April
-  checkpoints named `dignity_risk_{best,epochN}.pt`. `config/train_risk.yaml` writes those
-  exact filenames, so running it overwrites them. Point `checkpoint_dir` elsewhere first.
 - **`docs/` and `README.md` drift from the code easily.** The known drift (free-function
   signal helpers, `export_dignity_to_onnx`, a `--epochs` flag, `generate_dataset(seq_length=)`)
   was fixed on 2026-09-04, but `tests/test_docs.py` only guards against removed privacy claims,

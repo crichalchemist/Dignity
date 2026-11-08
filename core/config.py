@@ -51,7 +51,7 @@ class TrainConfig:
     weight_decay: float = 1e-5
     use_amp: bool = True
     gradient_clip: float = 1.0
-    checkpoint_dir: str = "./checkpoints"
+    checkpoint_dir: str = "./runs"
     log_interval: int = 10
     save_interval: int = 5
 

@@ -98,6 +98,27 @@ class TestDignityConfig:
         assert config2.model.hidden_size == 512
         assert config2.data.seq_len == config1.data.seq_len
 
+    def test_no_shipped_config_can_overwrite_the_january_checkpoints(self):
+        # checkpoints/risk/ holds untracked, irreplaceable checkpoints named exactly
+        # like what train_risk.yaml writes. Training must never resolve into it.
+        root = Path(__file__).resolve().parents[1]
+        guarded = (root / "checkpoints").resolve()
+        dirs = {"<dataclass default>": DignityConfig().train.checkpoint_dir}
+        for path in sorted((root / "config").glob("*.yaml")):
+            dirs[path.name] = DignityConfig.from_yaml(str(path)).train.checkpoint_dir
+        # Not an exact count: M2-M4 add presets; every *.yaml is scanned whatever it is.
+        assert {"base.yaml", "colab.yaml", "train_risk.yaml"} <= set(dirs)
+        for name, directory in dirs.items():
+            resolved = (root / directory).resolve()  # absolute paths ignore root
+            assert not resolved.is_relative_to(guarded), name
+            if not Path(directory).is_absolute():
+                assert resolved.is_relative_to((root / "runs").resolve()), name
+
+    def test_runs_dir_is_gitignored(self):
+        root = Path(__file__).resolve().parents[1]
+        lines = (root / ".gitignore").read_text().splitlines()
+        assert "runs/" in lines and "checkpoints/" in lines
+
 
 def _valid_privacy_block():
     return {
