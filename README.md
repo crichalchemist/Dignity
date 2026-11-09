@@ -100,7 +100,7 @@ stage.** See `config/train_risk.yaml` and [docs/PRIVACY.md](docs/PRIVACY.md).
 # Train risk model with default config
 dignity-train --config config/train_risk.yaml
 
-# Train forecasting model
+# Train the early-warning (forecast) model
 dignity-train --config config/train_forecast.yaml
 
 # Train on Colab with optimized settings
@@ -180,7 +180,7 @@ The core model implements a modular hybrid architecture:
 
 **Task Heads** (`models/head/`):
 - **RiskHead**: Binary risk scoring (0-1 probability)
-- **ForecastHead**: Multi-step time series forecasting
+- **ForecastHead**: early warning, P(new anomaly within h rows) for h = 1…H
 - **PolicyHead**: RL policy outputs (actions + value estimate)
 
 **Main Model** (`models/dignity.py`):
@@ -239,7 +239,7 @@ Dignity/
 │   │   └── hybrid.py       # DignityBackbone (CNN+LSTM+Attention, ~90 lines)
 │   └── head/
 │       ├── risk.py         # Binary risk scoring head
-│       ├── forecast.py     # Multi-step forecasting head
+│       ├── forecast.py     # Early-warning head
 │       └── policy.py       # RL policy head (A3C/PPO)
 │
 ├── train/                    # Training infrastructure (2 modules)
@@ -252,7 +252,7 @@ Dignity/
 ├── config/                   # YAML configurations (4 files)
 │   ├── base.yaml            # Default configuration template
 │   ├── train_risk.yaml      # Risk scoring optimized
-│   ├── train_forecast.yaml  # Forecasting optimized
+│   ├── train_forecast.yaml  # Early warning (forecast task)
 │   └── colab.yaml           # Google Colab optimized
 │
 ├── tests/                    # Test suite (31 tests)

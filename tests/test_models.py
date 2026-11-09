@@ -74,14 +74,14 @@ class TestTaskHeads:
         assert risk.shape == (4, 1)
         assert torch.all(risk >= 0) and torch.all(risk <= 1)  # Sigmoid output
 
-    def test_forecast_head(self):
-        """Test forecasting head."""
-        head = ForecastHead(input_size=256, pred_len=5, num_features=3)
-        context = torch.randn(4, 256)
-
-        predictions = head(context)
-
-        assert predictions.shape == (4, 5, 3)  # [B, pred_len, features]
+    def test_forecast_probabilities_never_decrease_with_horizon(self):
+        # y_h = 1 if an onset lies in (t, t+h]; that event only grows with h,
+        # so a coherent early-warning score must too.
+        head = ForecastHead(input_size=256, horizon=7)
+        p = head(torch.randn(4, 256))
+        assert p.shape == (4, 7)
+        assert torch.all((p >= 0) & (p <= 1))
+        assert torch.all(p[:, 1:] >= p[:, :-1])
 
     def test_policy_head(self):
         """Test policy head."""
@@ -112,21 +112,18 @@ class TestDignityModel:
         assert predictions.shape == (4, 1)
         assert attn.shape == (4, 100)
 
-    def test_forecast_model(self):
-        """Test forecasting model."""
+    def test_forecast_model_takes_horizon_not_volume_price_shape(self):
         model = Dignity(
             task="forecast",
             input_size=9,
             hidden_size=128,
             n_layers=2,
-            pred_len=5,
-            num_features=3,
+            horizon=7,
         )
-        x = torch.randn(4, 100, 9)
-
-        predictions, attn = model(x)
-
-        assert predictions.shape == (4, 5, 3)
+        predictions, attn = model(torch.randn(4, 100, 9))
+        assert predictions.shape == (4, 7) and attn.shape == (4, 100)
+        with pytest.raises(TypeError):
+            Dignity(task="forecast", input_size=9, pred_len=5, num_features=3)
 
     def test_model_summary(self):
         """Test model summary."""
@@ -164,5 +161,5 @@ class TestDignityModel:
             Dignity(task="risk", input_size=9, bogus_kwarg=1)
 
     def test_head_kwarg_for_another_task_is_rejected(self):
-        with pytest.raises(TypeError, match="pred_len"):
-            Dignity(task="risk", input_size=9, pred_len=5)
+        with pytest.raises(TypeError, match="horizon"):
+            Dignity(task="risk", input_size=9, horizon=5)

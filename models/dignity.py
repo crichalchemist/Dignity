@@ -10,7 +10,7 @@ from .head.risk import RiskHead
 
 _HEAD_KWARGS = {
     "risk": {"head_hidden"},
-    "forecast": {"pred_len", "num_features", "head_hidden"},
+    "forecast": {"horizon", "head_hidden"},
     "policy": {"n_actions", "head_hidden"},
 }
 
@@ -78,8 +78,7 @@ class Dignity(nn.Module):
         elif task == "forecast":
             self.head = ForecastHead(
                 input_size=hidden_size,
-                pred_len=task_kwargs.get("pred_len", 5),
-                num_features=task_kwargs.get("num_features", 3),
+                horizon=task_kwargs.get("horizon", 10),
                 hidden_size=task_kwargs.get("head_hidden", 128),
                 dropout=dropout,
             )
