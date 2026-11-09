@@ -40,3 +40,19 @@ jobs:
       - run: pip install -r requirements.txt -r requirements-dev.txt
       - run: pip install -e . --no-deps
       - run: pytest tests/ --cov --cov-fail-under=100
+
+  smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install torch --index-url https://download.pytorch.org/whl/cpu
+      - run: pip install -r requirements.txt -r requirements-dev.txt
+      - run: pip install -e . --no-deps
+      - run: dignity-train --config config/smoke.yaml
+      - run: dignity-export --checkpoint runs/smoke/train/best.pt --output "$RUNNER_TEMP/dignity_risk.onnx"
+      - run: python -m eval.run --smoke --seed tuning --tasks risk,forecast,policy
+      - run: test -z "$(git status --porcelain)"

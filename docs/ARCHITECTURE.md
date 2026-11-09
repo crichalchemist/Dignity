@@ -172,7 +172,7 @@ head = ForecastHead(input_size=256, horizon=10)  # P(onset within h rows), h = 1
 ```python
 from models.head.policy import PolicyHead
 
-head = PolicyHead(input_dim=128, hidden_dim=64, num_actions=4)
+head = PolicyHead(input_size=256, n_actions=3)
 ```
 
 #### Complete Model
@@ -266,15 +266,13 @@ Output: (batch, horizon) probabilities
 ```
 Input: (batch, hidden_dim)
     ↓
-Dense layer 1 (hidden_dim → hidden_dim // 2)
+Dense layer 1 (hidden_dim → 128)
     ↓
-Tanh + Dropout
+ReLU + Dropout
     ↓
-Dense layer 2 (hidden_dim // 2 → num_actions)
+Linear(hidden → 3)
     ↓
-Softmax
-    ↓
-Output: (batch, num_actions)
+Output: (batch, 3) logits
 ```
 
 ## Training Pipeline

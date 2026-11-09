@@ -45,9 +45,9 @@ format that export no longer supports (DGNTY-3, DGNTY-35). No shipped config wri
 ## Commands
 
 ```bash
-# Tests (294 collected: test_core 42, test_data 69, test_models 14, test_privacy 34,
-# test_operator 4, test_docs 4, test_train 43, test_checkpoint 3, test_export 7,
-# test_calibration 3, test_labels 7, test_gates 11, test_ci 3, test_eval 40,
+# Tests (359 collected: test_core 51, test_data 69, test_models 23, test_privacy 34,
+# test_operator 4, test_docs 4, test_train 71, test_checkpoint 3, test_export 9,
+# test_calibration 3, test_labels 7, test_gates 11, test_ci 4, test_eval 56,
 # test_colab_eval 10 — one skips without CUDA)
 # every test is limited to 300 s (pytest.ini; pytest-timeout)
 pytest tests/ -v
@@ -64,8 +64,8 @@ pre-commit run --all-files
 pytest tests/ --cov --cov-fail-under=100
 
 python -m eval.gates --seed 1000   # data gate; tuning seed only, refuses 2026
-python -m eval.run --smoke --seed tuning  # CI-sized end-to-end evaluation; outputs under runs/smoke/
-python -m eval.run --smoke --seed tuning --tasks risk,forecast  # --tasks forecast also fits risk (baseline) but writes only forecast.json
+python -m eval.run --smoke --seed tuning  # CI-sized, all three tasks (--tasks defaults to risk,forecast,policy); outputs under runs/smoke/
+python -m eval.run --smoke --seed tuning --tasks risk,forecast  # --tasks forecast also fits risk (baseline) but writes only forecast.json; unknown names exit 2
 python -m eval.run --config config/synthetic_hard.yaml --seed tuning  # full run on a Colab GPU; see docs/RESULTS.md
 
 # Train
@@ -99,10 +99,11 @@ data/labels.py                      →  risk/forecast labels from the event rec
 data/loader.py                      →  TransactionDataset (dict batches) / create_dataloader
 models/dignity.py Dignity           →  DignityBackbone + one head
 train/engine.py                     →  train_epoch / predict
-train/loop.py fit                  →  shared loop (cli, notebook, eval.run); best.pt on val PR-AUC
+train/loop.py fit                  →  shared loop (cli, notebook, eval.run); best.pt on val PR-AUC (policy: val neg_cost under the review cap)
 train/checkpoint.py                 →  self-describing checkpoints (FORMAT_VERSION 2) / build_model_from_meta
-train/losses.py                     →  risk_loss, forecast_loss (masked per-horizon BCE)
-eval/{metrics,baselines,plots,run}.py → risk.json, forecast.json + charts; CIs bootstrap blocks, not windows
+train/losses.py                     →  risk_loss, forecast_loss (masked per-horizon BCE),
+                                       expected_cost_loss (policy: softmax-weighted cost table)
+eval/{metrics,baselines,plots,run}.py → risk.json, forecast.json, policy.json + charts; CIs bootstrap blocks, not windows
 export/to_onnx.py                   →  export + verify + benchmark
 ```
 
@@ -113,8 +114,9 @@ export/to_onnx.py                   →  export + verify + benchmark
 this is the single most common source of shape bugs, and `train/losses.py::risk_loss` reshapes predictions
 and labels to `[B]`; `forecast_loss` keeps `[B, H]` and masks windows with an active anomaly.
 
-Adding a task = new head module in `models/head/` + a branch in `Dignity.__init__` + a loss in
-`train/losses.py` and its branch in `train/loop.py::fit`. Nothing else changes.
+Adding a task = a head in `models/head/`, a branch in `Dignity.__init__`, a loss in
+`train/losses.py`, target/selection/head_kwargs branches in `train/loop.fit`, metrics in
+`eval/metrics.py`, a baseline in `eval/baselines.py`, and a branch in `eval/run.py`.
 
 `core/signals.SignalProcessor` is an **all-static utility class**. `core/privacy.PrivacyManager`
 is **instance-based**: it is bound to a `PrivacyBudget` (ε ledger), an optional HMAC key, and
@@ -149,10 +151,19 @@ a mechanism, it needs a test in `tests/test_privacy.py` or CI's 100% gate on tha
   run proves nothing about it; `tests/test_train.py` has a GPU-only test. If you ever switch the
   head to logits, switch the loss to `BCEWithLogitsLoss` in the same change and re-check ONNX
   consumers that expect probabilities.
+  `PolicyHead` returns logits; `expected_cost_loss` takes the softmax in float32 outside autocast.
+- **The policy warm-starts from a risk checkpoint.** Trained cold, the spec expected-cost loss
+  stalls at "review everything". `config/train_policy.yaml` sets `train.init_backbone_from:
+  ./runs/risk/best.pt`, so train risk first; `train/loop.load_backbone` copies only the
+  `backbone.*` tensors (feature names, scaler center/scale, privacy block and shapes must match, else `ValueError` (under privacy the scaler tolerates 25% of scale: its noise is unseeded); the checkpoint must also share the run's `data:` block (same split); the two shipped configs share one `privacy:` block, keep them equal) and `fit` reads
+  the key only for `task: policy`. Policy selects `best.pt` on val `neg_cost` under the review
+  cap and ignores `select_metric`, `pos_weight` and the chance guard; resuming across metrics
+  raises `ValueError`.
 - **Forecast is early warning, and `eval.run` fits risk for it.** Forecast windows with an
   anomaly active at their last row are masked out of the loss, the metrics and lead time
-  (`forecast_mask`). `--tasks forecast` (and later `policy`) also fits risk once per training
-  seed, because their baseline is today's risk score, but writes `risk.json` only when `risk`
+  (`forecast_mask`). `--tasks forecast` and `--tasks policy` also fit risk once per training
+  seed (their baseline is today's risk score, and each policy seed warm-starts its backbone
+  from the same seed's risk `best.pt`), but write `risk.json` only when `risk`
   is in `--tasks`. Each task trains under its own `eval_<seed>/<task>/train_seed_<s>/` directory.
 - **Timestamps are milliseconds everywhere.** `CryptoSource._normalize_timestamp` auto-detects
   seconds (`< 2e10`), ms (`2e10–3e13`), ns (`> 3e13`), and datetime strings, normalizing all to ms
@@ -161,10 +172,6 @@ a mechanism, it needs a test in `tests/test_privacy.py` or CI's 100% gate on tha
 
 ## Known breakage (do not "discover" these again — fix or leave, but don't be confused)
 
-- **Only `task: risk` trains end to end.** This contradicts "Adding a task ... Nothing else
-  changes" above. The engine also needs work:
-  - `train/cli.py` raises `NotImplementedError` for `policy` until M4.
-  - `policy` head kwargs (`n_actions`) arrive in PR 2; `forecast` passes `horizon`.
 - **`docs/` and `README.md` drift from the code easily.** `tests/test_docs.py` guards removed
   claims and links to missing files, not stale examples. Trust the source, and when you touch a
   documented symbol, fix the doc in the same change.
@@ -187,7 +194,8 @@ a mechanism, it needs a test in `tests/test_privacy.py` or CI's 100% gate on tha
 - Branches: both `main` and `dev` are protected (required checks `lint`, `test (3.10)`,
   `test (3.12)`; no deletion, no force-push); `dev` is the integration branch. Branch feature
   work from `dev` and open PRs against `dev`; `dev` → `main` is the release step. CI runs on
-  pushes to both and on every PR. PR titles carry `DGNTY-n`; merged branches are deleted
+  pushes to both and on every PR; the `smoke` job (installed console scripts, all three tasks)
+  also runs but is not yet a required check. PR titles carry `DGNTY-n`; merged branches are deleted
   automatically.
 - `.env` holds API keys (COGNEE, FRED, TWELVEDATA) and is gitignored. `.internal/` is gitignored
   local design notes — read it for background, never cite it as public documentation.

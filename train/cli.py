@@ -8,7 +8,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from core.config import DignityConfig
-from train.loop import fit, prepare_data
+from train.loop import _selection_metric, fit, prepare_data
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -27,12 +27,6 @@ def main(argv: list[str] | None = None) -> int:
     print(f"Loading config from {args.config}")
     config = DignityConfig.from_yaml(args.config)
     print(config)
-
-    task = config.model.task
-    if task == "policy":
-        raise NotImplementedError(
-            f"task={task!r} does not train end to end until M4 (DGNTY-2)"
-        )
 
     print("\nGenerating synthetic data...")
     df, data = prepare_data(config)
@@ -56,7 +50,7 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     print(
-        f"best {config.train.select_metric} {result.best_metric:.4f} "
+        f"best {_selection_metric(config)} {result.best_metric:.4f} "
         f"-> {result.best_path}"
     )
     return 0

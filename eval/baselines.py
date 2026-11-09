@@ -9,6 +9,7 @@ from sklearn.tree import DecisionTreeClassifier
 
 from data.pipeline import WindowSet
 from data.source.synthetic import RAW_COLUMNS
+from models.head.policy import review_capacity
 
 
 def majority(y_train: np.ndarray, n_test: int) -> np.ndarray:
@@ -19,6 +20,51 @@ def majority(y_train: np.ndarray, n_test: int) -> np.ndarray:
 def risk_score_forecast(risk_score: np.ndarray, horizon: int) -> np.ndarray:
     """Early-warning baseline: today's risk score is the score at every horizon."""
     return np.repeat(risk_score[:, None], horizon, axis=1).astype(np.float32)
+
+
+def threshold_policy(
+    val_scores: np.ndarray,
+    val_y: np.ndarray,
+    test_scores: np.ndarray,
+    costs: np.ndarray,
+    budget: float,
+) -> np.ndarray:
+    """Two thresholds on the risk score, tuned on val under the review budget.
+
+    A score >= t_block is blocked (block never counts toward the budget), a
+    score in [t_review, t_block) is reviewed, anything else is allowed. The pair
+    with the lowest val mean cost whose val review rate fits the budget wins
+    (first on ties). On test, reviews beyond review_capacity keep only the
+    highest scores; the rest go to allow. Returns int64 [N].
+    """
+    costs = costs.astype(np.float64)  # float64: ties must not depend on NEP 50
+    val_scores = np.asarray(val_scores, dtype=np.float64)
+    val_y = np.asarray(val_y).astype(np.int64)
+    grid = np.unique(np.append(np.quantile(val_scores, np.linspace(0, 1, 101)), np.inf))
+
+    best_cost, best = np.inf, (np.inf, np.inf)
+    for t_review in grid:
+        for t_block in grid[grid >= t_review]:
+            blocked = val_scores >= t_block
+            reviewed = (val_scores >= t_review) & ~blocked
+            if reviewed.mean() > budget + 1e-12:
+                continue
+            actions = np.where(blocked, 2, np.where(reviewed, 1, 0))
+            cost = costs[actions, val_y].mean()
+            if cost < best_cost:
+                best_cost, best = cost, (t_review, t_block)
+
+    t_review, t_block = best
+    test_scores = np.asarray(test_scores, dtype=np.float64)
+    actions = np.where(
+        test_scores >= t_block, 2, np.where(test_scores >= t_review, 1, 0)
+    ).astype(np.int64)
+    review = np.flatnonzero(actions == 1)
+    k = review_capacity(len(test_scores), budget)
+    if len(review) > k:
+        order = review[np.argsort(-test_scores[review], kind="stable")]
+        actions[order[k:]] = 0
+    return actions
 
 
 def _window_features(X: np.ndarray) -> np.ndarray:

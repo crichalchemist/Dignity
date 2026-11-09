@@ -17,6 +17,7 @@ class ModelConfig:
     dropout: float = 0.1
     cnn_kernel_size: int = 3
     horizon: int = 10  # forecast H; also reserved at the end of every block
+    n_actions: int = 3  # policy; must equal len(ACTIONS)
 
 
 _SOURCES = ("synthetic",)
@@ -121,6 +122,7 @@ class TrainConfig:
     chance_guard_auroc: float | None = 0.55  # warn below this at guard_epochs
     guard_epochs: int = 5
     patience: int | None = 10  # early stopping; None disables
+    init_backbone_from: str | None = None  # policy only: risk checkpoint to warm-start
 
     def __post_init__(self):
         if self.select_metric not in _SELECT_METRICS:
@@ -220,6 +222,49 @@ class PrivacyConfig:
         }
 
 
+# core/ must not import models/, so the action names are repeated here; a test
+# pins them to models.head.policy.ACTIONS.
+_ACTION_NAMES = {"allow", "review", "block"}
+_STATE_NAMES = {"anomaly", "normal"}
+
+
+def _default_costs() -> dict:
+    return {
+        "allow": {"anomaly": 10.0, "normal": 0.0},
+        "review": {"anomaly": 1.0, "normal": 1.0},
+        "block": {"anomaly": 0.5, "normal": 3.0},
+    }
+
+
+@dataclass
+class PolicyConfig:
+    """The `policy:` block: triage costs C[action][true state] and review cap."""
+
+    costs: dict = field(default_factory=_default_costs)
+    review_budget: float = 0.05  # share of windows sent to analysts (blocks excluded)
+
+    def __post_init__(self):
+        if set(self.costs) != _ACTION_NAMES:
+            raise ValueError(
+                f"costs must price exactly the actions {sorted(_ACTION_NAMES)}, "
+                f"got {sorted(self.costs)}"
+            )
+        for action, row in self.costs.items():
+            if set(row) != _STATE_NAMES:
+                raise ValueError(
+                    f"costs[{action!r}] must price both 'anomaly' and 'normal', "
+                    f"got {sorted(row)}"
+                )
+        self.costs = {
+            a: {s: float(c) for s, c in row.items()} for a, row in self.costs.items()
+        }
+        if not 0 < self.review_budget < 1:
+            raise ValueError(
+                f"review_budget must satisfy 0 < review_budget < 1, "
+                f"got {self.review_budget}"
+            )
+
+
 def _yaml_safe(obj) -> dict:
     """asdict with tuples turned into lists, so safe_load can read the dump."""
 
@@ -241,6 +286,7 @@ class DignityConfig:
     data: DataConfig = field(default_factory=DataConfig)
     train: TrainConfig = field(default_factory=TrainConfig)
     eval: EvalConfig = field(default_factory=EvalConfig)
+    policy: PolicyConfig = field(default_factory=PolicyConfig)
     privacy: PrivacyConfig | None = None
     device: str = "cuda"
     seed: int = 42
@@ -268,6 +314,7 @@ class DignityConfig:
             data=DataConfig(**config_dict.get("data", {})),
             train=TrainConfig(**config_dict.get("train", {})),
             eval=EvalConfig(**config_dict.get("eval", {})),
+            policy=PolicyConfig(**config_dict.get("policy", {})),
             privacy=(
                 PrivacyConfig(**(config_dict["privacy"] or {}))
                 if "privacy" in config_dict
@@ -284,6 +331,7 @@ class DignityConfig:
             "data": _yaml_safe(self.data),
             "train": _yaml_safe(self.train),
             "eval": _yaml_safe(self.eval),
+            "policy": _yaml_safe(self.policy),
             "device": self.device,
             "seed": self.seed,
         }

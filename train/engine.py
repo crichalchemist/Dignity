@@ -87,12 +87,11 @@ def predict(
     Score every window in ``loader``, in loader order.
 
     Returns ``{"score": float32 [N]}`` for the risk task and
-    ``{"score": float32 [N, H]}`` (one onset probability per horizon) for forecast.
+    ``{"score": float32 [N, H]}`` (one onset probability per horizon) for forecast,
+    and ``{"probs": float32 [N, 3]}`` (softmax over allow/review/block) for policy.
     """
-    if model.task not in ("risk", "forecast"):
-        raise NotImplementedError(
-            f"predict for task={model.task!r} arrives with its head in M4"
-        )
+    if model.task not in ("risk", "forecast", "policy"):
+        raise NotImplementedError(f"predict does not support task={model.task!r}")
 
     model.eval()
     scores = []
@@ -101,6 +100,9 @@ def predict(
             outputs, _ = model(batch["x"].to(device))
             if model.task == "risk":
                 outputs = outputs.reshape(-1)
+            elif model.task == "policy":
+                outputs = torch.softmax(outputs.float(), dim=-1)
             scores.append(outputs.float().cpu())
 
-    return {"score": torch.cat(scores).numpy().astype(np.float32)}
+    key = "probs" if model.task == "policy" else "score"
+    return {key: torch.cat(scores).numpy().astype(np.float32)}

@@ -8,13 +8,14 @@ import pandas as pd
 import pytest
 
 import eval.metrics as metrics_module
-from core.config import DignityConfig
-from eval.baselines import block_tree, risk_score_forecast
+from core.config import DignityConfig, PolicyConfig
+from eval.baselines import block_tree, risk_score_forecast, threshold_policy
 from eval.metrics import (
     bootstrap_ci,
     forecast_metrics,
     lead_times,
     model_gate,
+    policy_metrics,
     risk_metrics,
     threshold_at_fpr,
 )
@@ -22,10 +23,20 @@ from eval.plots import (
     plot_forecast_pr_auc,
     plot_lead_times,
     plot_per_type_recall,
+    plot_policy_cost,
     plot_pr_curves,
 )
-from eval.run import _early_warning, _spread, config_hash, main
+from eval.run import (
+    _early_warning,
+    _fit_risk,
+    _spread,
+    config_hash,
+    main,
+    run_policy,
+)
+from models.head.policy import cost_matrix
 from train.checkpoint import load_checkpoint
+from train.loop import prepare_data
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -156,6 +167,55 @@ class TestBaselines:
         assert out.shape == (3, 4) and (out == s[:, None]).all()
         assert out.dtype == np.float32
 
+    def test_blocks_do_not_count_toward_the_review_budget(self):
+        C = cost_matrix(PolicyConfig().costs)
+        val_s = np.r_[np.full(100, 0.1), np.full(100, 0.9)]
+        val_y = np.r_[np.zeros(100, int), np.ones(100, int)]
+        a = threshold_policy(val_s, val_y, np.array([0.1, 0.9]), C, budget=0.05)
+        assert a.tolist() == [0, 2]  # 50% blocked is allowed
+        assert a.dtype == np.int64
+
+    def test_baseline_never_sends_more_than_capacity_to_review_on_test(self):
+        C = cost_matrix(PolicyConfig().costs)
+        # val: 1900 normals at 0.0, 100 mixed (50/50) at 0.5 -> reviewing 0.5 is optimal
+        val_s = np.r_[np.zeros(1900), np.full(100, 0.5)]
+        val_y = np.r_[np.zeros(1900, int), np.tile([0, 1], 50)]
+        test_s = np.r_[np.full(100, 0.5), np.zeros(100)]  # 50% in the review band
+        a = threshold_policy(val_s, val_y, test_s, C, budget=0.05)
+        assert (a == 1).sum() == 10 and (a == 2).sum() == 0
+
+    def test_baseline_keeps_the_highest_scored_reviews_under_the_cap(self):
+        C = cost_matrix(PolicyConfig().costs)
+        val_s = np.r_[np.zeros(1900), np.full(100, 0.5)]
+        val_y = np.r_[np.zeros(1900, int), np.tile([0, 1], 50)]
+        # 100 distinct review-band scores; index order is ascending, so keeping
+        # the first-k or the lowest-k would pick the wrong rows
+        test_s = np.r_[np.linspace(0.41, 0.49, 100), np.zeros(100)]
+        a = threshold_policy(val_s, val_y, test_s, C, budget=0.05)
+        assert (a == 1).sum() == 10
+        assert np.flatnonzero(a == 1).tolist() == list(range(90, 100))
+
+    def test_baseline_thresholds_come_from_val_scores_never_test_scores(self):
+        C = cost_matrix(PolicyConfig().costs)
+        val_s = np.r_[np.zeros(1900), np.full(100, 0.5)]
+        val_y = np.r_[np.zeros(1900, int), np.tile([0, 1], 50)]
+        # the val grid's lowest reviewing threshold is 0.025 (a val quantile), so
+        # 0.01 stays allowed; a grid that included test scores would review it
+        test_s = np.r_[np.full(5, 0.01), np.zeros(95)]
+        a = threshold_policy(val_s, val_y, test_s, C, budget=0.05)
+        assert (a == 0).all()
+
+    def test_baseline_thresholds_do_not_depend_on_score_precision(self):
+        C = cost_matrix(PolicyConfig().costs)
+        val_s = np.r_[np.zeros(1900), np.full(100, 0.1)]
+        val_y = np.r_[np.zeros(1900, int), np.tile([0, 1], 50)]
+        test_s = np.array([0.0, 0.1, 0.1], np.float64)
+        a64 = threshold_policy(val_s, val_y, test_s, C, budget=0.05)
+        a32 = threshold_policy(
+            val_s.astype(np.float32), val_y, test_s.astype(np.float32), C, 0.05
+        )
+        assert a32.tolist() == a64.tolist()
+
 
 PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
 
@@ -205,7 +265,7 @@ class TestEvalRunSmoke:
     ):
         monkeypatch.chdir(tmp_path)  # all smoke outputs land in tmp_path
         t0 = time.perf_counter()
-        assert main(["--smoke", "--seed", "tuning"]) == 0
+        assert main(["--smoke", "--seed", "tuning", "--tasks", "risk"]) == 0
         assert time.perf_counter() - t0 < 60
         printed = capsys.readouterr().out
         assert "majority" in printed and "window_logistic" in printed  # spec 5.3
@@ -227,21 +287,6 @@ class TestEvalRunSmoke:
         assert isinstance(out["metrics"]["model_gate"]["passed"], bool)
         for png in ("risk_pr_curve.png", "risk_per_type_recall.png"):
             assert (tmp_path / "runs/smoke/img" / png).stat().st_size > 0
-
-    def test_unbuilt_tasks_are_refused_not_silently_skipped(
-        self, capsys, monkeypatch, tmp_path
-    ):
-        monkeypatch.chdir(tmp_path)
-
-        def boom(*args, **kwargs):
-            raise AssertionError("must not run")
-
-        # prepare_data is the first data-touching call of every task path
-        monkeypatch.setattr("eval.run.prepare_data", boom)
-        with pytest.raises(SystemExit) as exc:
-            main(["--smoke", "--seed", "tuning", "--tasks", "policy"])
-        assert exc.value.code == 2
-        assert "not implemented until M4" in capsys.readouterr().err
 
     def test_smoke_preset_cannot_be_combined_with_the_evaluation_seed(
         self, monkeypatch
@@ -529,3 +574,152 @@ class TestEvalRunForecast:
                 "meta"
             ].task
         assert tasks == {"risk": "risk", "forecast": "forecast"}
+
+
+class TestPolicyMetrics:
+    def _metrics(self, n_boot=50):
+        # one review and three blocks, so swapping the two action indices changes
+        # the cost, review rate, block rate and false-block rate (not the recall:
+        # review and block both catch an anomaly)
+        a = np.array([0, 1, 2, 2, 2, 0])
+        y = np.array([1, 0, 1, 0, 0, 1])
+        return policy_metrics(
+            a,
+            y,
+            cost_matrix(PolicyConfig().costs),
+            np.array([0, 0, 1, 1, 2, 2]),
+            n_boot=n_boot,
+            seed=0,
+        )
+
+    def test_policy_is_scored_on_cost_capacity_catches_and_false_blocks(self):
+        m = self._metrics()
+        assert m["expected_cost"]["value"] == pytest.approx(27.5 / 6)
+        assert m["review_rate"]["value"] == pytest.approx(1 / 6)
+        assert m["block_rate"]["value"] == pytest.approx(3 / 6)
+        assert m["anomaly_recall"]["value"] == pytest.approx(1 / 3)
+        assert m["false_block_rate"]["value"] == pytest.approx(2 / 3)
+        # guard (J30): weak by design, a percentile CI need not bracket the value
+        for v in m.values():
+            assert v["ci_low"] <= v["ci_high"]
+
+    def test_every_value_is_a_plain_number_or_null_for_strict_json(self):
+        for n_boot in (50, 0):
+            m = self._metrics(n_boot)
+            for v in m.values():
+                assert type(v["value"]) is float
+                assert all(type(v[k]) in (float, type(None)) for k in v)
+            json.dumps(m, allow_nan=False)
+
+    def test_a_split_without_anomalies_has_null_recall_not_nan(self):
+        m = policy_metrics(
+            np.array([0, 2, 1, 0]),
+            np.zeros(4, int),
+            cost_matrix(PolicyConfig().costs),
+            np.array([0, 0, 1, 1]),
+            n_boot=20,
+            seed=0,
+        )
+        assert m["anomaly_recall"] == {"value": None, "ci_low": None, "ci_high": None}
+        json.dumps(m, allow_nan=False)
+
+
+class TestPolicyPlots:
+    def test_policy_cost_chart_is_written_as_png(self, tmp_path):
+        side = {
+            "expected_cost": {"value": 0.8, "ci_low": 0.6, "ci_high": 1.0},
+            "review_rate": {"value": 0.05, "ci_low": 0.04, "ci_high": 0.06},
+            "block_rate": {"value": 0.2, "ci_low": None, "ci_high": None},
+        }
+        result = {"metrics": side, "baselines": {"threshold_policy": side}}
+        plot_policy_cost(result, str(tmp_path / "cost.png"))
+        assert (tmp_path / "cost.png").read_bytes()[:8] == PNG_MAGIC
+
+
+class TestEvalRunPolicy:
+    def test_policy_and_baseline_both_stay_within_analyst_capacity(
+        self, monkeypatch, tmp_path
+    ):
+        monkeypatch.chdir(tmp_path)
+        assert main(["--smoke", "--seed", "tuning", "--tasks", "policy"]) == 0
+        r = json.loads((tmp_path / "runs/smoke/results/policy.json").read_text())
+        five = {
+            "expected_cost",
+            "review_rate",
+            "block_rate",
+            "anomaly_recall",
+            "false_block_rate",
+        }
+        assert five <= set(r["metrics"])
+        assert set(r["baselines"]) == {"threshold_policy"}
+        assert set(r["baselines"]["threshold_policy"]) == five
+        for side in (r["metrics"], r["baselines"]["threshold_policy"]):
+            assert side["review_rate"]["value"] <= 0.05 + 1e-9
+        assert (tmp_path / "runs/smoke/img/policy_cost.png").exists()
+
+    def test_policy_results_carry_the_training_seed_spread(self, monkeypatch, tmp_path):
+        # spec 8a (J9): CI over blocks AND spread across training seeds
+        monkeypatch.chdir(tmp_path)
+        assert main(["--smoke", "--seed", "tuning", "--tasks", "policy"]) == 0
+        r = json.loads((tmp_path / "runs/smoke/results/policy.json").read_text())
+        spread = r["metrics"]["seed_spread"]
+        assert spread["train_seeds"] == [42]
+        assert len(spread["expected_cost"]["values"]) == 1
+
+    @pytest.mark.parametrize("tasks", ["risks", "risk,forcast", "", "policy,"])
+    def test_unknown_task_names_are_refused_before_anything_runs(
+        self, tasks, monkeypatch, tmp_path
+    ):
+        # a typo must not exit 0 with a missing results file
+        monkeypatch.chdir(tmp_path)
+
+        def boom(*args, **kwargs):
+            raise AssertionError("must not run")
+
+        # prepare_data is the first data-touching call of every task path
+        monkeypatch.setattr("eval.run.prepare_data", boom)
+        with pytest.raises(SystemExit) as exc:
+            main(["--smoke", "--seed", "tuning", "--tasks", tasks])
+        assert exc.value.code == 2
+        assert not (tmp_path / "runs").exists()
+
+    def test_one_run_writes_one_config_hash_and_one_sha(self, monkeypatch, tmp_path):
+        # M7's TestFinalResults checks this after a GPU run; catch a per-task hash here
+        monkeypatch.chdir(tmp_path)
+        assert (
+            main(["--smoke", "--seed", "tuning", "--tasks", "risk,forecast,policy"])
+            == 0
+        )
+        docs = [
+            json.loads((tmp_path / f"runs/smoke/results/{n}.json").read_text())
+            for n in ("risk", "forecast", "policy")
+        ]
+        assert len({d["config_hash"] for d in docs}) == 1
+        assert len({d["git_sha"] for d in docs}) == 1
+
+    def test_each_policy_seed_warm_starts_from_the_same_seeds_risk_checkpoint(
+        self, monkeypatch, tmp_path
+    ):
+        # J3: the triage backbone starts from risk; seed s must get risk seed s
+        import train.loop
+
+        monkeypatch.chdir(tmp_path)
+        config = DignityConfig.from_yaml(str(ROOT / "config/smoke.yaml"))
+        config.eval.n_train_seeds = 2
+        config.eval.n_bootstrap = 5
+        _, data = prepare_data(config)
+        risk = _fit_risk(config, data, "tuning")
+        risk_paths = [r.best_path for _, r in risk[0]]
+        assert len(set(risk_paths)) == 2
+
+        loaded, real = [], train.loop.load_backbone
+
+        def spy(model, path, *rest):
+            loaded.append(path)
+            return real(model, path, *rest)
+
+        monkeypatch.setattr(train.loop, "load_backbone", spy)
+        run_policy(config, "tuning", data, risk)
+        assert loaded == risk_paths
+        # the shared run config is never edited by the per-seed warm start
+        assert config.train.init_backbone_from is None
