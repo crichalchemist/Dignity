@@ -199,6 +199,7 @@ class TestDecisionRule:
         assert review_capacity(20, 0.05) == 1
         assert review_capacity(100, 0.07) == 7  # 0.07 * 100 = 7.000000000000001
         assert review_capacity(30, 0.1) == 3
+        assert review_capacity(100, 0.29) == 29  # 0.29 * 100 = 28.999999999999996
 
     def test_decisions_are_int64_indices_into_actions(self):
         a = decide_actions(self.PROBS, review_budget=0.10)

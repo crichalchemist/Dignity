@@ -8,8 +8,8 @@ import pandas as pd
 import pytest
 
 import eval.metrics as metrics_module
-from core.config import DignityConfig
-from eval.baselines import block_tree, risk_score_forecast
+from core.config import DignityConfig, PolicyConfig
+from eval.baselines import block_tree, risk_score_forecast, threshold_policy
 from eval.metrics import (
     bootstrap_ci,
     forecast_metrics,
@@ -25,6 +25,7 @@ from eval.plots import (
     plot_pr_curves,
 )
 from eval.run import _early_warning, _spread, config_hash, main
+from models.head.policy import cost_matrix
 from train.checkpoint import load_checkpoint
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -155,6 +156,23 @@ class TestBaselines:
         out = risk_score_forecast(s, horizon=4)
         assert out.shape == (3, 4) and (out == s[:, None]).all()
         assert out.dtype == np.float32
+
+    def test_blocks_do_not_count_toward_the_review_budget(self):
+        C = cost_matrix(PolicyConfig().costs)
+        val_s = np.r_[np.full(100, 0.1), np.full(100, 0.9)]
+        val_y = np.r_[np.zeros(100, int), np.ones(100, int)]
+        a = threshold_policy(val_s, val_y, np.array([0.1, 0.9]), C, budget=0.05)
+        assert a.tolist() == [0, 2]  # 50% blocked is allowed
+        assert a.dtype == np.int64
+
+    def test_baseline_never_sends_more_than_capacity_to_review_on_test(self):
+        C = cost_matrix(PolicyConfig().costs)
+        # val: 1900 normals at 0.0, 100 mixed (50/50) at 0.5 -> reviewing 0.5 is optimal
+        val_s = np.r_[np.zeros(1900), np.full(100, 0.5)]
+        val_y = np.r_[np.zeros(1900, int), np.tile([0, 1], 50)]
+        test_s = np.r_[np.full(100, 0.5), np.zeros(100)]  # 50% in the review band
+        a = threshold_policy(val_s, val_y, test_s, C, budget=0.05)
+        assert (a == 1).sum() == 10 and (a == 2).sum() == 0
 
 
 PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
