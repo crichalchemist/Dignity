@@ -7,7 +7,14 @@ import pytest
 
 import eval.metrics as metrics_module
 from eval.baselines import block_tree
-from eval.metrics import bootstrap_ci, model_gate, risk_metrics, threshold_at_fpr
+from eval.metrics import (
+    bootstrap_ci,
+    forecast_metrics,
+    lead_times,
+    model_gate,
+    risk_metrics,
+    threshold_at_fpr,
+)
 from eval.plots import plot_per_type_recall, plot_pr_curves
 from eval.run import config_hash, main
 
@@ -245,3 +252,71 @@ class TestEvalRunSmoke:
         assert config_hash(a) == config_hash(DignityConfig())
         assert config_hash(a) != config_hash(b)
         assert len(config_hash(a)) == 16
+
+
+class TestForecastMetrics:
+    def test_active_anomaly_windows_are_excluded_from_forecast_scoring(self):
+        y = np.array([[0, 1], [1, 1], [0, 0], [0, 1], [1, 1], [0, 0]], np.float32)
+        score = y.copy()
+        score[4:] = 1 - y[4:]  # adversarial, but masked out
+        mask = np.array([1, 1, 1, 1, 0, 0], bool)
+        m = forecast_metrics(
+            y, score, mask, np.array([0, 0, 1, 1, 2, 2]), n_boot=50, seed=0
+        )
+        assert [h["value"] for h in m["pr_auc_by_horizon"]] == [1.0, 1.0]
+        assert m["prevalence_by_horizon"] == [0.25, 0.75]
+
+    def test_horizon_without_onsets_reports_none_not_a_fake_score(self):
+        y = np.array([[0, 1], [0, 1], [0, 0], [0, 1], [0, 1], [0, 0]], np.float32)
+        mask = np.ones(6, bool)
+        m = forecast_metrics(
+            y, y.copy(), mask, np.array([0, 0, 1, 1, 2, 2]), n_boot=20, seed=0
+        )
+        assert m["pr_auc_by_horizon"][0] == {
+            "value": None,
+            "ci_low": None,
+            "ci_high": None,
+        }
+        assert m["pr_auc_by_horizon"][1]["value"] == 1.0
+
+    def test_forecast_metrics_survive_strict_json(self):
+        y = np.array([[0, 1], [1, 1], [0, 0], [0, 1]], np.float32)
+        m = forecast_metrics(
+            y, y.copy(), np.ones(4, bool), np.array([0, 0, 1, 1]), n_boot=10, seed=0
+        )
+        json.dumps(m, allow_nan=False)
+        assert all(type(p) is float for p in m["prevalence_by_horizon"])
+
+
+class TestLeadTimes:
+    def _fixture(self):
+        # H = 3. Block 0: windows end at rows 4..9, onset at row 8 (rows 8-9 active).
+        # Block 1: windows end at rows 4..9, onset at row 7; its window ending at
+        # row 6 is masked (anomaly active) with a loud alarm that is not a warning.
+        y = np.array(
+            [[0, 0, 0], [0, 0, 1], [0, 1, 1], [1, 1, 1], [0, 0, 0], [0, 0, 0]]
+            + [[0, 0, 1], [0, 1, 1], [1, 1, 1], [0, 0, 0], [0, 0, 0], [0, 0, 0]],
+            np.float32,
+        )
+        mask = np.array([1, 1, 1, 1, 0, 0, 1, 1, 0, 0, 0, 0], bool)
+        alarm = np.array(
+            [0.1, 0.5, 0.9, 0.95, 0.99, 0.99] + [0.1, 0.1, 0.99] + [0.1] * 3
+        )
+        return alarm, y, mask, np.repeat([0, 1], 6), np.tile(np.arange(4, 10), 2)
+
+    def test_lead_time_counts_rows_from_first_alarm_to_onset(self):
+        alarm, y, mask, block, end_row = self._fixture()
+        r = lead_times(alarm, 0.5, y, mask, block, end_row)
+        assert r == {"median": 3.0, "values": [3], "n_onsets": 2, "n_missed": 1}
+
+    def test_lead_times_are_plain_python_numbers_for_json(self):
+        alarm, y, mask, block, end_row = self._fixture()
+        r = lead_times(alarm, 0.5, y, mask, block, end_row)
+        assert all(type(v) is int for v in r["values"])
+        assert type(r["median"]) is float
+        json.dumps(r, allow_nan=False)
+
+    def test_no_alarm_at_all_gives_null_median(self):
+        alarm, y, mask, block, end_row = self._fixture()
+        r = lead_times(alarm, float("inf"), y, mask, block, end_row)
+        assert r == {"median": None, "values": [], "n_onsets": 2, "n_missed": 2}
