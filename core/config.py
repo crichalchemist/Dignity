@@ -101,6 +101,10 @@ class DataConfig:
             self.synthetic = SyntheticConfig(**self.synthetic)
 
 
+# higher is better for all of these: best.pt is kept on a strict ">"
+_SELECT_METRICS = ("pr_auc", "auroc", "recall_at_1pct_fpr")
+
+
 @dataclass
 class TrainConfig:
     """Training configuration."""
@@ -112,6 +116,31 @@ class TrainConfig:
     gradient_clip: float = 1.0
     checkpoint_dir: str = "./runs"
     save_interval: int = 5
+    select_metric: str = "pr_auc"  # best.pt = highest val value of this metric
+    pos_weight: float | None = None  # None = n_neg / n_pos of train
+    chance_guard_auroc: float | None = 0.55  # warn below this at guard_epochs
+    guard_epochs: int = 5
+    patience: int | None = 10  # early stopping; None disables
+
+    def __post_init__(self):
+        if self.select_metric not in _SELECT_METRICS:
+            raise ValueError(
+                f"train.select_metric={self.select_metric!r} is not allowed; "
+                f"expected one of {_SELECT_METRICS}"
+            )
+
+
+@dataclass
+class EvalConfig:
+    """The `eval:` block: seeds and output locations for the evaluation run."""
+
+    tuning_seed: int = 1000  # frozen; the model never sees eval_seed before M7
+    eval_seed: int = 2026  # frozen
+    n_train_seeds: int = 3
+    n_bootstrap: int = 1000
+    epsilons: list[float] = field(default_factory=lambda: [0.1, 0.3, 1.0, 3.0, 10.0])
+    out_dir: str = "results/v1.0"
+    img_dir: str = "docs/img"
 
 
 _MECHANISMS = ("laplace", "generalize")
@@ -211,6 +240,7 @@ class DignityConfig:
     model: ModelConfig = field(default_factory=ModelConfig)
     data: DataConfig = field(default_factory=DataConfig)
     train: TrainConfig = field(default_factory=TrainConfig)
+    eval: EvalConfig = field(default_factory=EvalConfig)
     privacy: PrivacyConfig | None = None
     device: str = "cuda"
     seed: int = 42
@@ -237,6 +267,7 @@ class DignityConfig:
             model=ModelConfig(**config_dict.get("model", {})),
             data=DataConfig(**config_dict.get("data", {})),
             train=TrainConfig(**config_dict.get("train", {})),
+            eval=EvalConfig(**config_dict.get("eval", {})),
             privacy=(
                 PrivacyConfig(**(config_dict["privacy"] or {}))
                 if "privacy" in config_dict
@@ -252,6 +283,7 @@ class DignityConfig:
             "model": _yaml_safe(self.model),
             "data": _yaml_safe(self.data),
             "train": _yaml_safe(self.train),
+            "eval": _yaml_safe(self.eval),
             "device": self.device,
             "seed": self.seed,
         }

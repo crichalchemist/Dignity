@@ -1,4 +1,4 @@
-"""Tuning tool. Runs on the tuning seed only; M3 reads the seeds from config.eval."""
+"""Tuning tool. Runs on the tuning seed only; seeds come from `core.config.EvalConfig`."""
 
 import argparse
 import json
@@ -8,13 +8,13 @@ from pathlib import Path
 import numpy as np
 from sklearn.metrics import roc_auc_score
 
-from core.config import DignityConfig
+from core.config import DignityConfig, EvalConfig
 from data.pipeline import TransactionPipeline, WindowSet
 from data.source.synthetic import RAW_COLUMNS, SyntheticGenerator
 from eval.baselines import block_tree, window_logistic
 
-TUNING_SEED = 1000
-EVAL_SEED = 2026
+TUNING_SEED = EvalConfig().tuning_seed
+EVAL_SEED = EvalConfig().eval_seed
 
 _ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_PRESETS = {
