@@ -93,6 +93,19 @@ reachable). It covers BTC/USD and ETH/USD over 2023-11..2024-11 and
 the four values by 20% of their range. The `fetched=` dates in the sources are UTC. `fee_rate` and `tx_count` are
 only plausibility-checked (v1.1: DGNTY-44).
 
+**Presets and the data gate** - `config/synthetic_{easy,medium,hard}.yaml` are the
+three difficulty presets. `python -m eval.gates` generates each one, splits it by block
+and fits two baselines on the train blocks: `window_logistic` (scored on val windows)
+and `block_tree` (scored on val blocks). The gate passes only if all four checks hold:
+each baseline's AUROC on `hard` lies in [0.55, 0.80]; AUROC falls strictly from
+`easy` to `medium` to `hard` for both baselines; and the `window_logistic` recall at
+10% FPR on `hard`, taken per onset-position bucket (five buckets, windows whose anomaly
+starts inside the window), has a max-min spread of at most 0.1, so position alone does
+not predict the label. The gate is a tuning tool: it defaults to the tuning seed 1000, the
+CLI refuses the evaluation seed 2026 (exit code 2), and the test split is never read.
+The values the shipped presets reach on seed 1000 are recorded in
+[`data_gate_tuning.json`](../results/v1.0/data_gate_tuning.json).
+
 **source/crypto.py** - Cryptocurrency data
 ```python
 from data.source.crypto import load_crypto_prices

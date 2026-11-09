@@ -45,9 +45,9 @@ format that export no longer supports (DGNTY-3, DGNTY-35). No shipped config wri
 ## Commands
 
 ```bash
-# Tests (185 collected: test_core 34, test_data 66, test_models 14, test_privacy 34,
+# Tests (200 collected: test_core 34, test_data 68, test_models 14, test_privacy 34,
 # test_operator 4, test_docs 4, test_train 9, test_checkpoint 3, test_export 7,
-# test_calibration 3, test_labels 7 — one skips without CUDA)
+# test_calibration 3, test_labels 7, test_gates 11, test_ci 2 — one skips without CUDA)
 # every test is limited to 300 s (pytest.ini; pytest-timeout)
 pytest tests/ -v
 pytest tests/test_models.py -v                       # one file
@@ -61,6 +61,8 @@ pre-commit run --all-files
 
 # The CI coverage gate — measures only core/privacy.py (pyproject [tool.coverage.run] include)
 pytest tests/ --cov --cov-fail-under=100
+
+python -m eval.gates --seed 1000   # data gate; tuning seed only, refuses 2026
 
 # Train
 # checkpoints land in ./runs/<task>/ (gitignored); never in checkpoints/

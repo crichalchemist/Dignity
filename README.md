@@ -63,7 +63,7 @@ cfg = DignityConfig.from_yaml("config/synthetic_easy.yaml")
 df = SyntheticGenerator(cfg.data.synthetic).generate()
 
 print(df.shape)
-# (32000, 10): 200 blocks x 160 hourly rows; the event-record columns label every row
+# (160000, 10): 1000 blocks x 160 hourly rows; the event-record columns label every row
 ```
 
 #### Privacy Operations

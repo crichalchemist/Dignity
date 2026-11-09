@@ -818,8 +818,13 @@ class TestGeneratorCalibration:
     """The normal process matches the committed Bitstamp reference (DGNTY-11)."""
 
     @pytest.mark.parametrize(
-        "preset", ["config/synthetic_easy.yaml"]
-    )  # M2.14 adds medium, hard
+        "preset",
+        [
+            "config/synthetic_easy.yaml",
+            "config/synthetic_medium.yaml",
+            "config/synthetic_hard.yaml",
+        ],
+    )
     def test_normal_process_lands_inside_calibration_bands(self, preset):
         cfg = DignityConfig.from_yaml(str(ROOT / preset))
         assert cfg.data.synthetic.block_len == CALIBRATION_CHUNK_LEN  # estimator parity
