@@ -78,6 +78,16 @@ generator = SyntheticGenerator(num_entities=100, num_transactions=10000)
 data = generator.generate()
 ```
 
+**Calibration** - `data/calibration/reference_stats.json` holds the bands the
+synthetic generator's statistics must fall inside. `python -m scripts.calibrate`
+builds it from public Bitstamp hourly bars (Kraken's OHLC endpoint ignores
+`since` and serves only the latest 720 candles, so no 12-month window is
+reachable). It covers BTC/USD and ETH/USD over 2023-11..2024-11 and
+2024-11..2025-11, takes the median of each statistic over 160-bar chunks
+(`data/stats.py`) after dropping zero-volume bars, and widens the min/max of
+the four values by 20% of their range. The `fetched=` dates in the sources are UTC. `fee_rate` and `tx_count` are
+only plausibility-checked (v1.1: DGNTY-44).
+
 **source/crypto.py** - Cryptocurrency data
 ```python
 from data.source.crypto import load_crypto_prices
