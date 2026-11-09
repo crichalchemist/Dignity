@@ -131,6 +131,7 @@ def _tiny_window_set(rng: np.random.Generator):
         forecast_mask=y == 0,
         block_index=np.arange(n) // 6,
         onset_offset=np.where(y == 1, 0, -1),
+        end_row=19 + np.arange(n) % 6,
         anomaly_type=np.where(y == 1, "wash_trading", "none").astype(object),
     )
 

@@ -13,7 +13,7 @@ from torch.amp import GradScaler
 
 from core.config import DignityConfig
 from data.loader import create_dataloader
-from data.pipeline import SplitData, TransactionPipeline
+from data.pipeline import SplitData, TransactionPipeline, WindowSet
 from data.source.synthetic import SyntheticGenerator
 from eval.metrics import risk_metrics
 from train.checkpoint import (
@@ -24,9 +24,10 @@ from train.checkpoint import (
     save_checkpoint,
 )
 from train.engine import predict, train_epoch
-from train.losses import risk_loss
+from train.losses import forecast_loss, risk_loss
 
 _VAL_METRICS = ("auroc", "pr_auc", "recall_at_1pct_fpr", "brier")
+_FORECAST_VAL_METRICS = ("auroc", "pr_auc", "recall_at_1pct_fpr")
 
 
 class ChanceGuardWarning(RuntimeWarning):
@@ -70,6 +71,63 @@ def prepare_data(config: DignityConfig) -> tuple[pd.DataFrame, SplitData]:
     return df, split_data
 
 
+def _task_targets(task: str, ws: WindowSet) -> dict[str, np.ndarray]:
+    if task == "risk":
+        return {"y": ws.y_risk.astype(np.float32)}
+    if task == "forecast":
+        return {"y": ws.y_forecast.astype(np.float32), "mask": ws.forecast_mask}
+    raise NotImplementedError(f"task={task!r} does not train end to end yet")
+
+
+def _task_loss(config: DignityConfig, train_ws: WindowSet):
+    task = config.model.task
+    if task == "risk":
+        return risk_loss(resolve_pos_weight(config.train.pos_weight, train_ws.y_risk))
+    if task == "forecast":
+        labels = train_ws.y_forecast[train_ws.forecast_mask].ravel()
+        return forecast_loss(resolve_pos_weight(config.train.pos_weight, labels))
+    raise NotImplementedError(f"task={task!r} does not train end to end yet")
+
+
+def _val_metrics(
+    config: DignityConfig, val_ws: WindowSet, score: np.ndarray, seed: int
+) -> tuple[dict[str, float], float | None]:
+    """The row's ``val_*`` entries and the AUROC the chance guard reads."""
+    if config.model.task == "risk":
+        val = risk_metrics(
+            val_ws.y_risk, score, val_ws.block_index, n_boot=0, seed=seed
+        )
+        return {f"val_{k}": float(val[k]["value"]) for k in _VAL_METRICS}, float(
+            val["auroc"]["value"]
+        )
+    # forecast: mean over horizons whose masked column holds both classes;
+    # risk_metrics raises on a one-class column, so those are skipped
+    mask = val_ws.forecast_mask
+    blocks = val_ws.block_index[mask]
+    columns = []
+    for h in range(score.shape[1]):
+        y = val_ws.y_forecast[mask, h].astype(np.int8)
+        if len(np.unique(y)) < 2:
+            columns.append(None)
+            continue
+        columns.append(risk_metrics(y, score[mask, h], blocks, n_boot=0, seed=seed))
+    scored = [c for c in columns if c is not None]
+    if not scored:
+        return {f"val_{k}": float("nan") for k in _FORECAST_VAL_METRICS}, None
+    row = {
+        f"val_{k}": float(np.mean([c[k]["value"] for c in scored]))
+        for k in _FORECAST_VAL_METRICS
+    }
+    last = columns[-1]
+    return row, None if last is None else float(last["auroc"]["value"])
+
+
+def _head_kwargs(config: DignityConfig) -> dict:
+    if config.model.task == "forecast":
+        return {"horizon": config.model.horizon}
+    return {}
+
+
 def fit(
     config: DignityConfig,
     data: SplitData,
@@ -77,7 +135,10 @@ def fit(
     run_dir: str,
     resume_from: str | None = None,
 ) -> FitResult:
-    """Train a risk model; write best.pt, last.pt and history.json to run_dir."""
+    """Train a risk or forecast model.
+
+    Writes best.pt, last.pt and history.json to run_dir.
+    """
     torch.manual_seed(seed)
     device = torch.device(config.device if torch.cuda.is_available() else "cpu")
     use_amp = config.train.use_amp and device.type == "cuda"
@@ -87,10 +148,14 @@ def fit(
     out.mkdir(parents=True, exist_ok=True)
 
     meta = make_meta(
-        config, data.feature_names, data.scaler_center, data.scaler_scale, {}
+        config,
+        data.feature_names,
+        data.scaler_center,
+        data.scaler_scale,
+        _head_kwargs(config),
     )
     model = build_model_from_meta(meta).to(device)
-    loss_fn = risk_loss(resolve_pos_weight(train_cfg.pos_weight, data.train.y_risk))
+    loss_fn = _task_loss(config, data.train)
     optimizer = torch.optim.AdamW(
         model.parameters(), lr=train_cfg.lr, weight_decay=train_cfg.weight_decay
     )
@@ -120,7 +185,7 @@ def fit(
 
     train_loader = create_dataloader(
         data.train.X,
-        {"y": data.train.y_risk.astype(np.float32)},
+        _task_targets(config.model.task, data.train),
         batch_size=config.data.batch_size,
         shuffle=True,
         num_workers=config.data.num_workers,
@@ -137,6 +202,7 @@ def fit(
 
     history: list[dict] = []
     stale = 0
+    wrote_best = False
     for epoch in range(start_epoch, epochs + 1):
         lr = optimizer.param_groups[0]["lr"]  # the lr this epoch trains with
         train_metrics = train_epoch(
@@ -150,22 +216,21 @@ def fit(
             grad_clip=train_cfg.gradient_clip,
         )
         score = predict(model, val_loader, device)["score"]
-        val = risk_metrics(
-            data.val.y_risk, score, data.val.block_index, n_boot=0, seed=seed
-        )
+        val_row, guard_auroc = _val_metrics(config, data.val, score, seed)
         row = {"epoch": epoch, "lr": float(lr), "train_loss": train_metrics["loss"]}
-        row.update({f"val_{k}": float(val[k]["value"]) for k in _VAL_METRICS})
+        row.update(val_row)
         history.append(row)
         print(
             f"epoch {epoch}/{epochs} lr={row['lr']:.3e} "
             f"train_loss={row['train_loss']:.4f} "
-            + " ".join(f"val_{k}={row[f'val_{k}']:.4f}" for k in _VAL_METRICS)
+            + " ".join(f"{k}={v:.4f}" for k, v in val_row.items())
         )
 
         selected = row[f"val_{train_cfg.select_metric}"]
         if selected > best_metric:
             best_metric = selected
             stale = 0
+            wrote_best = True
             save_checkpoint(
                 out / "best.pt",
                 model,
@@ -198,10 +263,11 @@ def fit(
         if (
             epoch == train_cfg.guard_epochs
             and guard is not None
-            and row["val_auroc"] < guard
+            and guard_auroc is not None
+            and guard_auroc < guard
         ):
             warnings.warn(
-                f"val AUROC {row['val_auroc']:.3f} below chance guard "
+                f"val AUROC {guard_auroc:.3f} below chance guard "
                 f"{guard} after {epoch} epochs",
                 ChanceGuardWarning,
                 stacklevel=2,
@@ -218,7 +284,8 @@ def fit(
     history_path.write_text(json.dumps(previous + history, indent=2))
 
     best_path = out / "best.pt"
-    if not best_path.exists():
+    # a best.pt left by an earlier run does not count; a resumed run keeps its own
+    if not (wrote_best or (resume_from and best_path.exists())):
         raise RuntimeError(
             f"no best checkpoint was written: validation {config.train.select_metric} "
             f"never improved (NaN or no epochs run) in run_dir {out}"

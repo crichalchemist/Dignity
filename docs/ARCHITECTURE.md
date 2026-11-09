@@ -161,15 +161,11 @@ head = RiskHead(
 )
 ```
 
-**head/forecast.py** - Sequence Forecasting
+**head/forecast.py** - Early Warning
 ```python
 from models.head.forecast import ForecastHead
 
-head = ForecastHead(
-    input_dim=128,
-    hidden_dim=128,
-    forecast_horizon=5,  # Predict next 5 timesteps
-)
+head = ForecastHead(input_size=256, horizon=10)  # P(onset within h rows), h = 1..10
 ```
 
 **head/policy.py** - Decision Policy
@@ -259,9 +255,11 @@ Dense layer 1 (hidden_dim → hidden_dim)
     ↓
 ReLU + Dropout
     ↓
-Dense layer 2 (hidden_dim → forecast_horizon)
+Dense layer 2 (hidden_dim → horizon)
     ↓
-Output: (batch, forecast_horizon)
+Cumulative hazard: 1 - exp(-cumsum(softplus(z)))
+    ↓
+Output: (batch, horizon) probabilities
 ```
 
 #### PolicyHead

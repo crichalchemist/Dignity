@@ -1,15 +1,33 @@
 import json
 import time
+from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pandas as pd
 import pytest
 
 import eval.metrics as metrics_module
-from eval.baselines import block_tree
-from eval.metrics import bootstrap_ci, model_gate, risk_metrics, threshold_at_fpr
-from eval.plots import plot_per_type_recall, plot_pr_curves
-from eval.run import config_hash, main
+from core.config import DignityConfig
+from eval.baselines import block_tree, risk_score_forecast
+from eval.metrics import (
+    bootstrap_ci,
+    forecast_metrics,
+    lead_times,
+    model_gate,
+    risk_metrics,
+    threshold_at_fpr,
+)
+from eval.plots import (
+    plot_forecast_pr_auc,
+    plot_lead_times,
+    plot_per_type_recall,
+    plot_pr_curves,
+)
+from eval.run import _early_warning, _spread, config_hash, main
+from train.checkpoint import load_checkpoint
+
+ROOT = Path(__file__).resolve().parents[1]
 
 Y = np.array([0, 0, 0, 0, 1, 1, 1, 1])
 S = np.array([0.1, 0.2, 0.3, 0.4, 0.9, 0.8, 0.35, 0.05])
@@ -132,6 +150,12 @@ class TestBaselines:
         y, _ = block_tree(df_train, df_test)
         assert y.tolist() == [0, 0, 1]  # ascending block_id: 2, 5, 9
 
+    def test_risk_score_baseline_predicts_the_same_risk_at_every_horizon(self):
+        s = np.array([0.1, 0.7, 0.4], np.float32)
+        out = risk_score_forecast(s, horizon=4)
+        assert out.shape == (3, 4) and (out == s[:, None]).all()
+        assert out.dtype == np.float32
+
 
 PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
 
@@ -204,29 +228,29 @@ class TestEvalRunSmoke:
         for png in ("risk_pr_curve.png", "risk_per_type_recall.png"):
             assert (tmp_path / "runs/smoke/img" / png).stat().st_size > 0
 
-    @pytest.mark.parametrize("task", ["forecast", "policy"])
     def test_unbuilt_tasks_are_refused_not_silently_skipped(
-        self, task, capsys, monkeypatch, tmp_path
+        self, capsys, monkeypatch, tmp_path
     ):
         monkeypatch.chdir(tmp_path)
 
         def boom(*args, **kwargs):
             raise AssertionError("must not run")
 
-        monkeypatch.setattr("eval.run.run_risk", boom)
+        # prepare_data is the first data-touching call of every task path
+        monkeypatch.setattr("eval.run.prepare_data", boom)
         with pytest.raises(SystemExit) as exc:
-            main(["--smoke", "--seed", "tuning", "--tasks", task])
+            main(["--smoke", "--seed", "tuning", "--tasks", "policy"])
         assert exc.value.code == 2
         assert "not implemented until M4" in capsys.readouterr().err
 
     def test_smoke_preset_cannot_be_combined_with_the_evaluation_seed(
         self, monkeypatch
     ):
-        # run_risk is booby-trapped so the refusal must happen before any work
+        # prepare_data is booby-trapped so the refusal must happen before any work
         def boom(*args, **kwargs):
-            raise AssertionError("run_risk reached")
+            raise AssertionError("prepare_data reached")
 
-        monkeypatch.setattr("eval.run.run_risk", boom)
+        monkeypatch.setattr("eval.run.prepare_data", boom)
         with pytest.raises(SystemExit) as exc:
             main(["--smoke", "--seed", "eval"])
         assert exc.value.code == 2
@@ -237,11 +261,271 @@ class TestEvalRunSmoke:
         assert exc.value.code == 2
 
     def test_one_hash_identifies_one_configuration(self):
-        from core.config import DignityConfig
-
         a = DignityConfig()
         b = DignityConfig()
         b.data.synthetic.seed += 1
         assert config_hash(a) == config_hash(DignityConfig())
         assert config_hash(a) != config_hash(b)
         assert len(config_hash(a)) == 16
+
+
+class TestForecastMetrics:
+    def test_active_anomaly_windows_are_excluded_from_forecast_scoring(self):
+        y = np.array([[0, 1], [1, 1], [0, 0], [0, 1], [1, 1], [0, 0]], np.float32)
+        score = y.copy()
+        score[4:] = 1 - y[4:]  # adversarial, but masked out
+        mask = np.array([1, 1, 1, 1, 0, 0], bool)
+        m = forecast_metrics(
+            y, score, mask, np.array([0, 0, 1, 1, 2, 2]), n_boot=50, seed=0
+        )
+        assert [h["value"] for h in m["pr_auc_by_horizon"]] == [1.0, 1.0]
+        assert m["prevalence_by_horizon"] == [0.25, 0.75]
+
+    def test_horizon_without_onsets_reports_none_not_a_fake_score(self):
+        y = np.array([[0, 1], [0, 1], [0, 0], [0, 1], [0, 1], [0, 0]], np.float32)
+        mask = np.ones(6, bool)
+        m = forecast_metrics(
+            y, y.copy(), mask, np.array([0, 0, 1, 1, 2, 2]), n_boot=20, seed=0
+        )
+        assert m["pr_auc_by_horizon"][0] == {
+            "value": None,
+            "ci_low": None,
+            "ci_high": None,
+        }
+        assert m["pr_auc_by_horizon"][1]["value"] == 1.0
+
+    def test_single_class_or_empty_horizons_report_none_never_nan(self):
+        # horizon 1 is all positive once masked, horizon 0 all negative
+        y = np.array([[0, 1], [0, 1], [0, 0], [0, 1]], np.float32)
+        mask = np.array([1, 1, 0, 0], bool)
+        block = np.array([0, 0, 1, 1])
+        m = forecast_metrics(y, y.copy(), mask, block, n_boot=10, seed=0)
+        none = {"value": None, "ci_low": None, "ci_high": None}
+        assert m["pr_auc_by_horizon"] == [none, none]
+        empty = forecast_metrics(y, y.copy(), np.zeros(4, bool), block, 10, 0)
+        assert empty["pr_auc_by_horizon"] == [none, none]
+        assert empty["prevalence_by_horizon"] == [None, None]
+        json.dumps(m, allow_nan=False)
+        json.dumps(empty, allow_nan=False)
+
+    def test_forecast_metrics_survive_strict_json(self):
+        y = np.array([[0, 1], [1, 1], [0, 0], [0, 1]], np.float32)
+        m = forecast_metrics(
+            y, y.copy(), np.ones(4, bool), np.array([0, 0, 1, 1]), n_boot=10, seed=0
+        )
+        json.dumps(m, allow_nan=False)
+        assert all(type(p) is float for p in m["prevalence_by_horizon"])
+
+
+class TestLeadTimes:
+    def _fixture(self):
+        # H = 3. Block 0: windows end at rows 4..9, onset at row 8 (rows 8-9 active).
+        # Block 1: windows end at rows 4..9, onset at row 7; its window ending at
+        # row 6 is masked (anomaly active) with a loud alarm that is not a warning.
+        y = np.array(
+            [[0, 0, 0], [0, 0, 1], [0, 1, 1], [1, 1, 1], [0, 0, 0], [0, 0, 0]]
+            + [[0, 0, 1], [0, 1, 1], [1, 1, 1], [0, 0, 0], [0, 0, 0], [0, 0, 0]],
+            np.float32,
+        )
+        mask = np.array([1, 1, 1, 1, 0, 0, 1, 1, 0, 0, 0, 0], bool)
+        alarm = np.array(
+            [0.1, 0.5, 0.9, 0.95, 0.99, 0.99] + [0.1, 0.1, 0.99] + [0.1] * 3
+        )
+        return alarm, y, mask, np.repeat([0, 1], 6), np.tile(np.arange(4, 10), 2)
+
+    def test_lead_time_counts_rows_from_first_alarm_to_onset(self):
+        alarm, y, mask, block, end_row = self._fixture()
+        r = lead_times(alarm, 0.5, y, mask, block, end_row)
+        assert r == {"median": 3.0, "values": [3], "n_onsets": 2, "n_missed": 1}
+
+    def test_lead_times_are_plain_python_numbers_for_json(self):
+        alarm, y, mask, block, end_row = self._fixture()
+        r = lead_times(alarm, 0.5, y, mask, block, end_row)
+        assert all(type(v) is int for v in r["values"])
+        assert type(r["median"]) is float
+        json.dumps(r, allow_nan=False)
+
+    def test_no_alarm_at_all_gives_null_median(self):
+        alarm, y, mask, block, end_row = self._fixture()
+        r = lead_times(alarm, float("inf"), y, mask, block, end_row)
+        assert r == {"median": None, "values": [], "n_onsets": 2, "n_missed": 2}
+
+
+def _windows(y, mask, block, end_row):
+    """The WindowSet fields ``_early_warning`` reads."""
+    return SimpleNamespace(
+        y_forecast=np.asarray(y, np.float32),
+        forecast_mask=np.asarray(mask, bool),
+        block_index=np.asarray(block),
+        end_row=np.asarray(end_row),
+    )
+
+
+class TestEarlyWarning:
+    def _split(self):
+        # H = 2; 200 val windows so a 1% FPR budget can admit a threshold
+        rng = np.random.default_rng(0)
+        y = (rng.random((200, 2)) < 0.3).astype(np.float32)
+        y[:, 0] = y[:, 1]
+        ws = _windows(y, np.ones(200, bool), np.arange(200) // 10, np.arange(200) % 10)
+        return ws, y
+
+    def test_an_unreachable_false_alarm_budget_is_null_not_infinity(self):
+        # J12: every negative outscores every positive, so no finite threshold
+        # fits 1% FPR; threshold_at_fpr says +inf and strict JSON must still work
+        ws, y = self._split()
+        score = 1.0 - y
+        r = _early_warning(ws, ws, score, score, n_boot=0, seed=0)
+        assert r["threshold"] is None
+        assert r["lead_time"]["n_missed"] == r["lead_time"]["n_onsets"]
+        json.dumps(r, allow_nan=False)
+
+    def test_a_perfect_detector_gets_a_finite_float_threshold(self):
+        ws, y = self._split()
+        r = _early_warning(ws, ws, y.copy(), y.copy(), n_boot=0, seed=0)
+        assert type(r["threshold"]) is float
+        assert set(r) == {
+            "pr_auc_by_horizon",
+            "prevalence_by_horizon",
+            "lead_time",
+            "threshold",
+        }
+        json.dumps(r, allow_nan=False)
+
+    def test_the_alarm_threshold_is_set_on_validation_never_on_test(self):
+        ws, y = self._split()
+        test = _windows(y, np.ones(200, bool), ws.block_index, ws.end_row)
+        # a test split whose scores are all zero would give threshold 0 if the
+        # threshold were (wrongly) read from test
+        r = _early_warning(ws, test, y.copy(), np.zeros_like(y), n_boot=0, seed=0)
+        assert r["threshold"] > 0
+
+    def test_spread_ignores_seeds_without_a_value(self):
+        s = _spread([2.0, None, 4.0])
+        assert s["values"] == [2.0, None, 4.0] and s["mean"] == 3.0
+        assert _spread([None])["mean"] is None
+
+
+class TestForecastPlots:
+    def _result(self, values):
+        entry = {"value": 0.5, "ci_low": 0.3, "ci_high": 0.7}
+        side = {
+            "pr_auc_by_horizon": [
+                entry,
+                {"value": None, "ci_low": None, "ci_high": None},
+            ],
+            "prevalence_by_horizon": [0.1, 0.1],
+            "lead_time": {
+                "median": 3.0 if values else None,
+                "values": values,
+                "n_onsets": 5,
+                "n_missed": 5 - len(values),
+            },
+            "threshold": 0.4,
+        }
+        return {"metrics": side, "baselines": {"risk_score_forecast": side}}
+
+    def test_forecast_charts_are_written_as_png(self, tmp_path):
+        r = self._result([2, 3, 4])
+        plot_forecast_pr_auc(r, str(tmp_path / "pr.png"))
+        plot_lead_times(r, str(tmp_path / "lead.png"))
+        assert (tmp_path / "pr.png").read_bytes()[:8] == PNG_MAGIC
+        assert (tmp_path / "lead.png").read_bytes()[:8] == PNG_MAGIC
+
+    def test_lead_time_chart_survives_a_model_that_never_alarmed(self, tmp_path):
+        plot_lead_times(self._result([]), str(tmp_path / "lead.png"))
+        assert (tmp_path / "lead.png").stat().st_size > 0
+
+
+class TestEvalRunForecast:
+    @pytest.fixture(scope="class")
+    def run(self, tmp_path_factory):
+        import os
+
+        import eval.run as run_module
+
+        tmp = tmp_path_factory.mktemp("forecast_smoke")
+        fitted_tasks = []
+        real_fit = run_module.fit
+
+        def spy(config, *args, **kwargs):
+            fitted_tasks.append(config.model.task)
+            return real_fit(config, *args, **kwargs)
+
+        cwd = os.getcwd()
+        os.chdir(tmp)
+        run_module.fit = spy
+        try:
+            assert main(["--smoke", "--seed", "tuning", "--tasks", "forecast"]) == 0
+            forecast_only = list(fitted_tasks)
+            risk_json_after_forecast_only = (
+                tmp / "runs/smoke/results/risk.json"
+            ).exists()
+            fitted_tasks.clear()
+            assert (
+                main(["--smoke", "--seed", "tuning", "--tasks", "risk,forecast"]) == 0
+            )
+            both = list(fitted_tasks)
+        finally:
+            run_module.fit = real_fit
+            os.chdir(cwd)
+        return SimpleNamespace(
+            root=tmp,
+            forecast_only=forecast_only,
+            risk_json_after_forecast_only=risk_json_after_forecast_only,
+            both=both,
+        )
+
+    def test_forecast_results_report_every_horizon_against_the_baseline(self, run):
+        out = run.root / "runs/smoke/results"
+        img = run.root / "runs/smoke/img"
+        smoke_cfg = DignityConfig.from_yaml(str(ROOT / "config/smoke.yaml"))
+        r = json.loads((out / "forecast.json").read_text())
+        H = smoke_cfg.model.horizon
+        base = r["baselines"]["risk_score_forecast"]
+        assert set(r) == {"config_hash", "seed", "git_sha", "metrics", "baselines"}
+        assert len(r["metrics"]["pr_auc_by_horizon"]) == H
+        assert len(r["metrics"]["prevalence_by_horizon"]) == H
+        assert len(base["pr_auc_by_horizon"]) == H
+        assert set(r["baselines"]) == {"risk_score_forecast"}
+        assert set(r["metrics"]["lead_time"]) == {
+            "median",
+            "values",
+            "n_onsets",
+            "n_missed",
+        }
+        assert {
+            "pr_auc_by_horizon",
+            "prevalence_by_horizon",
+            "lead_time",
+            "threshold",
+        } == set(base)
+        assert (img / "forecast_pr_auc_by_horizon.png").exists()
+        assert (img / "forecast_lead_time.png").exists()
+
+    def test_forecast_results_carry_the_training_seed_spread(self, run):
+        # spec 8a: CI over blocks AND spread across training seeds
+        r = json.loads((run.root / "runs/smoke/results/forecast.json").read_text())
+        spread = r["metrics"]["seed_spread"]
+        assert spread["train_seeds"] == [42]
+        assert len(spread["mean_pr_auc"]["values"]) == 1
+        assert len(spread["lead_time_median"]["values"]) == 1
+
+    def test_risk_is_fitted_not_reported_when_only_forecast_is_asked_for(self, run):
+        # the first run asked for forecast only; risk.json belongs to the second
+        assert run.forecast_only == ["risk", "forecast"]
+        assert not run.risk_json_after_forecast_only
+
+    def test_risk_is_fitted_once_when_both_tasks_are_asked_for(self, run):
+        assert run.both == ["risk", "forecast"]
+        assert (run.root / "runs/smoke/results/risk.json").exists()
+
+    def test_forecast_never_overwrites_the_risk_checkpoint(self, run):
+        # J2: both tasks train under one eval run; each keeps its own best.pt
+        base = run.root / "runs/smoke/train/eval_tuning"
+        tasks = {}
+        for task in ("risk", "forecast"):
+            tasks[task] = load_checkpoint(str(base / task / "train_seed_42/best.pt"))[
+                "meta"
+            ].task
+        assert tasks == {"risk": "risk", "forecast": "forecast"}

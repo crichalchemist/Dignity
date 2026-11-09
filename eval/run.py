@@ -5,6 +5,7 @@ python -m eval.run --smoke --seed tuning
 """
 
 import argparse
+import copy
 import dataclasses
 import hashlib
 import json
@@ -18,9 +19,21 @@ from core.config import DignityConfig
 from data.loader import create_dataloader
 from data.pipeline import TransactionPipeline
 from data.source.synthetic import RAW_COLUMNS
-from eval.baselines import block_tree, majority, window_logistic
-from eval.metrics import model_gate, risk_metrics
-from eval.plots import plot_per_type_recall, plot_pr_curves
+from eval.baselines import block_tree, majority, risk_score_forecast, window_logistic
+from eval.metrics import (
+    FPR_BUDGET,
+    forecast_metrics,
+    lead_times,
+    model_gate,
+    risk_metrics,
+    threshold_at_fpr,
+)
+from eval.plots import (
+    plot_forecast_pr_auc,
+    plot_lead_times,
+    plot_per_type_recall,
+    plot_pr_curves,
+)
 from train.checkpoint import build_model_from_meta, load_checkpoint
 from train.engine import predict
 from train.loop import FitResult, fit, prepare_data
@@ -47,18 +60,28 @@ def _git_sha() -> str:
 def _train_seeds(
     config: DignityConfig, data, seed_name: str
 ) -> list[tuple[int, FitResult]]:
-    """Train one model per training seed; model init is independent of the data."""
+    """Train one model per training seed; model init is independent of the data.
+
+    The task is part of the run directory, so tasks never share a ``best.pt``.
+    """
     runs = []
     for k in range(config.eval.n_train_seeds):
         s = config.seed + k
         run_dir = Path(config.train.checkpoint_dir) / f"eval_{seed_name}"
-        run_dir = run_dir / f"train_seed_{s}"
+        run_dir = run_dir / config.model.task / f"train_seed_{s}"
         runs.append((s, fit(config, data, s, str(run_dir))))
     return runs
 
 
-def _score(config: DignityConfig, result: FitResult, X: np.ndarray) -> np.ndarray:
-    """Score windows with the best (validation-selected) checkpoint."""
+def _task_config(config: DignityConfig, task: str) -> DignityConfig:
+    """A copy of ``config`` for ``task``; the shared config is never mutated."""
+    task_config = copy.deepcopy(config)
+    task_config.model.task = task
+    return task_config
+
+
+def _predict(config: DignityConfig, result: FitResult, X: np.ndarray) -> dict:
+    """Predict windows with the best (validation-selected) checkpoint."""
     device = torch.device(config.device if torch.cuda.is_available() else "cpu")
     ckpt = load_checkpoint(result.best_path, map_location=device)
     model = build_model_from_meta(result.meta).to(device)
@@ -71,7 +94,19 @@ def _score(config: DignityConfig, result: FitResult, X: np.ndarray) -> np.ndarra
         num_workers=config.data.num_workers,
         pin_memory=device.type == "cuda",
     )
-    return predict(model, loader, device)["score"]
+    return predict(model, loader, device)
+
+
+def _fit_risk(config: DignityConfig, data, seed_name: str) -> tuple[list, list, list]:
+    """Risk models and their val and test scores, one per training seed.
+
+    Reported by ``run_risk`` and the baseline of every forecast, so fitted once.
+    """
+    risk_config = _task_config(config, "risk")
+    runs = _train_seeds(risk_config, data, seed_name)
+    val = [_predict(risk_config, r, data.val.X)["score"] for _, r in runs]
+    test = [_predict(risk_config, r, data.test.X)["score"] for _, r in runs]
+    return runs, val, test
 
 
 def _payload(metrics: dict, baselines: dict, run_ctx: dict) -> dict:
@@ -115,26 +150,39 @@ def _fmt_ci(entry: dict) -> str:
     return f"{_fmt(entry)} [{low:.4f}, {high:.4f}]"
 
 
-def _spread(values: list[float]) -> dict:
+def _spread(values: list[float | None]) -> dict:
+    """Mean and std over the seeds that have a value (``None`` is skipped)."""
+    known = [v for v in values if v is not None]
     return {
         "values": values,
-        "mean": float(np.mean(values)),
-        "std": float(np.std(values, ddof=1)) if len(values) >= 2 else None,
+        "mean": float(np.mean(known)) if known else None,
+        "std": float(np.std(known, ddof=1)) if len(known) >= 2 else None,
     }
 
 
 def run_risk(
-    config: DignityConfig, seed_name: str, run_ctx: dict | None = None
+    config: DignityConfig,
+    seed_name: str,
+    run_ctx: dict | None = None,
+    df=None,
+    data=None,
+    risk: tuple[list, list, list] | None = None,
 ) -> dict:
-    """Train, score the test split once, write risk.json and charts; return payload."""
+    """Write risk.json and charts; return payload.
+
+    Without ``df``/``data``/``risk`` (``_fit_risk``'s result) it prepares and
+    trains itself. ``main`` passes them so the risk fit is shared with forecast.
+    """
     run_ctx = run_ctx or _run_ctx(config)
     seed = config.data.synthetic.seed
     n_boot = config.eval.n_bootstrap
 
-    df, data = prepare_data(config)
+    if data is None:
+        df, data = prepare_data(config)
     train, test = data.train, data.test
-    runs = _train_seeds(config, data, seed_name)
-    scores = [_score(config, result, test.X) for _, result in runs]
+    if risk is None:
+        risk = _fit_risk(config, data, seed_name)
+    runs, _, scores = risk
     score_0 = scores[0]  # headline model: first training seed, declared in advance
 
     metrics = risk_metrics(
@@ -245,6 +293,105 @@ def run_risk(
     return _payload(metrics, baselines, run_ctx)
 
 
+def _early_warning(val, test, val_score, test_score, n_boot: int, seed: int) -> dict:
+    """Per-horizon PR-AUC and lead time of ``[N, H]`` scores on the test split.
+
+    The alarm threshold is the 1% FPR point of the last-horizon val column over
+    unmasked windows; ``None`` in the result when no finite threshold fits.
+    """
+    last = test_score.shape[1] - 1
+    m = val.forecast_mask
+    y_val, s_val = val.y_forecast[m, last], val_score[m, last]
+    threshold = float("inf")
+    if len(np.unique(y_val)) == 2:
+        threshold = threshold_at_fpr(y_val, s_val, FPR_BUDGET)
+    metrics = forecast_metrics(
+        test.y_forecast,
+        test_score,
+        test.forecast_mask,
+        test.block_index,
+        n_boot,
+        seed,
+    )
+    metrics["lead_time"] = lead_times(
+        test_score[:, last],
+        threshold,
+        test.y_forecast,
+        test.forecast_mask,
+        test.block_index,
+        test.end_row,
+    )
+    metrics["threshold"] = threshold if np.isfinite(threshold) else None
+    return metrics
+
+
+def _mean_pr_auc(side: dict) -> float | None:
+    values = [e["value"] for e in side["pr_auc_by_horizon"] if e["value"] is not None]
+    return float(np.mean(values)) if values else None
+
+
+def run_forecast(
+    config: DignityConfig,
+    seed_name: str,
+    data,
+    risk: tuple[list, list, list],
+    run_ctx: dict | None = None,
+) -> dict:
+    """Fit the early-warning head per seed; compare it with today's risk score."""
+    run_ctx = run_ctx or _run_ctx(config)
+    seed = config.data.synthetic.seed
+    n_boot = config.eval.n_bootstrap
+    horizon = config.model.horizon
+    forecast_config = _task_config(config, "forecast")
+    runs = _train_seeds(forecast_config, data, seed_name)
+    _, risk_val, risk_test = risk
+
+    model_sides = []
+    for k, (_, result) in enumerate(runs):
+        boot = n_boot if k == 0 else 0  # CIs only for the headline seed
+        val_score = _predict(forecast_config, result, data.val.X)["score"]
+        test_score = _predict(forecast_config, result, data.test.X)["score"]
+        model_sides.append(
+            _early_warning(data.val, data.test, val_score, test_score, boot, seed)
+        )
+    # the baseline is reported for the headline (first) seed only
+    baseline_side = _early_warning(
+        data.val,
+        data.test,
+        risk_score_forecast(risk_val[0], horizon),
+        risk_score_forecast(risk_test[0], horizon),
+        n_boot,
+        seed,
+    )
+
+    metrics = model_sides[0]  # headline model: first training seed
+    metrics["seed_spread"] = {
+        "train_seeds": [s for s, _ in runs],
+        "mean_pr_auc": _spread([_mean_pr_auc(m) for m in model_sides]),
+        "lead_time_median": _spread([m["lead_time"]["median"] for m in model_sides]),
+    }
+    baselines = {"risk_score_forecast": baseline_side}
+
+    img_dir = Path(config.eval.img_dir)
+    img_dir.mkdir(parents=True, exist_ok=True)
+    result = _payload(metrics, baselines, run_ctx)
+    plot_forecast_pr_auc(result, str(img_dir / "forecast_pr_auc_by_horizon.png"))
+    plot_lead_times(result, str(img_dir / "forecast_lead_time.png"))
+
+    path = _write_result(config, "forecast", metrics, baselines, run_ctx)
+    base = baselines["risk_score_forecast"]
+    print(
+        f"forecast mean pr_auc: model {metrics['seed_spread']['mean_pr_auc']['values'][0]}"
+        f" | risk_score_forecast {_mean_pr_auc(base)}"
+    )
+    print(
+        f"lead time median: model {metrics['lead_time']['median']} "
+        f"| risk_score_forecast {base['lead_time']['median']}"
+    )
+    print(f"wrote {path}")
+    return result
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Run the Dignity evaluation.")
     source = parser.add_mutually_exclusive_group(required=True)
@@ -256,9 +403,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--tasks", default="risk")
     args = parser.parse_args(argv)
 
-    for task in args.tasks.split(","):
-        if task.strip() != "risk":
-            parser.error(f"task {task.strip()} is not implemented until M4")
+    tasks = {t.strip() for t in args.tasks.split(",")}
+    for task in sorted(tasks - {"risk", "forecast"}):
+        parser.error(f"task {task} is not implemented until M4")
     if args.smoke and args.seed == "eval":
         parser.error("--smoke never runs on the evaluation seed")
 
@@ -268,7 +415,13 @@ def main(argv: list[str] | None = None) -> int:
     config.data.synthetic.seed = getattr(config.eval, f"{args.seed}_seed")
     run_ctx = _run_ctx(config)  # once, after the seed override
 
-    run_risk(config, args.seed, run_ctx)
+    # forecast baselines score with the risk models, so risk is always fitted
+    df, data = prepare_data(config)
+    risk = _fit_risk(config, data, args.seed)
+    if "risk" in tasks:
+        run_risk(config, args.seed, run_ctx, df, data, risk)
+    if "forecast" in tasks:
+        run_forecast(config, args.seed, data, risk, run_ctx)
     return 0
 
 

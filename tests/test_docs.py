@@ -26,6 +26,8 @@ REMOVED = (
     "add_noise",
     "gaussian mechanism",
     "generate_dataset(",
+    "volume forecast",
+    "price forecast",
 )
 
 

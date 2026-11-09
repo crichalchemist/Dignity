@@ -10,11 +10,13 @@ from pathlib import Path
 import numpy as np
 import pytest
 import torch
+import yaml
 from torch.amp import GradScaler
 
+from core.config import DignityConfig
 from data.loader import create_dataloader
 from models.dignity import Dignity
-from train.checkpoint import load_checkpoint
+from train.checkpoint import build_model_from_meta, load_checkpoint
 from train.cli import main
 from train.engine import predict, train_epoch
 from train.loop import (
@@ -24,7 +26,7 @@ from train.loop import (
     prepare_data,
     resolve_pos_weight,
 )
-from train.losses import risk_loss
+from train.losses import forecast_loss, risk_loss
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -104,6 +106,29 @@ class TestTrainEpoch:
         )
         assert CountingScaler.steps == 2
 
+    def test_forecast_trains_one_cpu_epoch_with_masked_targets(self):
+        X = np.random.randn(8, 20, 3).astype("float32")
+        targets = {
+            "y": (np.random.rand(8, 4) > 0.5).astype("float32"),
+            "mask": np.array([True, False] * 4),
+        }
+        loader = create_dataloader(X, targets, batch_size=4, shuffle=False)
+        model = Dignity(
+            task="forecast", input_size=3, hidden_size=16, n_layers=1, horizon=4
+        )
+        opt = torch.optim.AdamW(model.parameters(), lr=1e-3)
+        m = train_epoch(
+            model,
+            loader,
+            opt,
+            forecast_loss(None),
+            torch.device("cpu"),
+            GradScaler("cuda", enabled=False),
+            use_amp=False,
+            grad_clip=1.0,
+        )
+        assert math.isfinite(m["loss"])
+
 
 class TestPredict:
     def test_scores_every_unlabelled_window_even_with_a_two_row_tail(self):
@@ -114,6 +139,38 @@ class TestPredict:
         model = Dignity(task="risk", input_size=3, hidden_size=16, n_layers=1)
         score = predict(model, loader, torch.device("cpu"))["score"]
         assert score.shape == (66,) and ((score >= 0) & (score <= 1)).all()
+
+    def test_forecast_predictions_give_one_score_per_horizon(self):
+        loader = create_dataloader(
+            np.random.randn(8, 20, 3), None, batch_size=4, shuffle=False
+        )
+        model = Dignity(
+            task="forecast", input_size=3, hidden_size=16, n_layers=1, horizon=4
+        )
+        score = predict(model, loader, torch.device("cpu"))["score"]
+        assert score.shape == (8, 4) and score.dtype == np.float32
+
+
+class TestForecastLoss:
+    def test_windows_with_an_active_anomaly_do_not_train_the_warning(self):
+        p = torch.tensor([[0.5, 0.5], [0.01, 0.01]])
+        batch = {
+            "y": torch.tensor([[1.0, 0.0], [1.0, 1.0]]),
+            "mask": torch.tensor([True, False]),
+        }
+        assert forecast_loss(None)(p, batch).item() == pytest.approx(math.log(2))
+
+    def test_pos_weight_scales_only_positive_terms(self):
+        p = torch.tensor([[0.5, 0.5]])
+        batch = {"y": torch.tensor([[1.0, 0.0]]), "mask": torch.tensor([True])}
+        assert forecast_loss(3.0)(p, batch).item() == pytest.approx(2 * math.log(2))
+
+    def test_batch_of_only_active_anomaly_windows_gives_zero_not_nan(self):
+        p = torch.full((2, 3), 0.3, requires_grad=True)
+        batch = {"y": torch.ones(2, 3), "mask": torch.tensor([False, False])}
+        loss = forecast_loss(None)(p, batch)
+        assert loss.item() == 0.0
+        loss.backward()  # still part of the graph
 
 
 class TestRiskLoss:
@@ -233,6 +290,18 @@ class TestFit:
         with pytest.raises(RuntimeError, match="pr_auc"):
             fit(tiny_fit_config, tiny_split, seed=0, run_dir=str(tmp_path))
 
+    def test_a_stale_best_checkpoint_is_not_mistaken_for_this_runs(
+        self, tiny_split, tiny_fit_config, tmp_path, monkeypatch
+    ):
+        # J2: another run's best.pt sitting in run_dir must not satisfy a fit that
+        # itself never selected a checkpoint
+        fit(tiny_fit_config, tiny_split, seed=0, run_dir=str(tmp_path))
+        assert (tmp_path / "best.pt").exists()
+        nan = float("nan")
+        _script_val_metrics(monkeypatch, [nan] * 3, [0.9, 0.6, 0.95])
+        with pytest.raises(RuntimeError, match="pr_auc"):
+            fit(tiny_fit_config, tiny_split, seed=0, run_dir=str(tmp_path))
+
     def test_a_run_leaves_a_self_describing_record_of_every_epoch(
         self, tiny_split, tiny_fit_config, tmp_path
     ):
@@ -344,6 +413,164 @@ class TestFit:
         )
         # an equal epoch 3 must not replace it
         assert load_checkpoint(first.best_path)["epoch"] == 1
+
+
+def _script_forecast_val_metrics(monkeypatch, pr_auc, auroc):
+    """Scripted per-epoch forecast val metrics: one risk_metrics call per horizon."""
+    horizon = 10  # tiny_split labels are 10 wide and every column has both classes
+    calls = {"n": 0}
+
+    def scripted(y, score, block_index, n_boot, seed, anomaly_type=None):
+        epoch = calls["n"] // horizon
+        calls["n"] += 1
+        return {
+            "auroc": {"value": auroc[epoch]},
+            "pr_auc": {"value": pr_auc[epoch]},
+            "recall_at_1pct_fpr": {"value": 0.5},
+            "brier": {"value": 0.25},
+        }
+
+    monkeypatch.setattr("train.loop.risk_metrics", scripted)
+
+
+def _script_forecast_columns(monkeypatch, pr_auc, auroc):
+    """Per-column scripted val metrics, same values every epoch.
+
+    risk_metrics is called once per scorable horizon, in column order, so call k of
+    an epoch gets pr_auc[k] / auroc[k]. Returns the class counts it was called with.
+    """
+    seen = []
+
+    def scripted(y, score, block_index, n_boot, seed, anomaly_type=None):
+        k = len(seen) % len(auroc)
+        seen.append(len(np.unique(y)))
+        return {
+            "auroc": {"value": auroc[k]},
+            "pr_auc": {"value": pr_auc[k]},
+            "recall_at_1pct_fpr": {"value": 0.5},
+            "brier": {"value": 0.25},
+        }
+
+    monkeypatch.setattr("train.loop.risk_metrics", scripted)
+    return seen
+
+
+@pytest.fixture
+def forecast_fit_config(tiny_fit_config):
+    tiny_fit_config.model.task = "forecast"
+    tiny_fit_config.model.horizon = 10
+    return tiny_fit_config
+
+
+class TestFitForecast:
+    def test_forecast_fit_saves_a_checkpoint_that_rebuilds_with_its_horizon(
+        self, tiny_split, forecast_fit_config, tmp_path
+    ):
+        cfg = forecast_fit_config
+        r = fit(cfg, tiny_split, seed=0, run_dir=str(tmp_path))
+        assert r.meta.head_kwargs == {"horizon": cfg.model.horizon}
+        assert 0.0 <= r.best_metric <= 1.0
+        model = build_model_from_meta(load_checkpoint(r.best_path)["meta"])
+        out, _ = model(torch.randn(2, 20, r.meta.input_size))
+        assert out.shape == (2, cfg.model.horizon)
+
+    def test_forecast_pos_weight_refuses_a_train_split_without_onsets(
+        self, tiny_split, forecast_fit_config, tmp_path
+    ):
+        tiny_split.train.y_forecast[:] = 0
+        with pytest.raises(ValueError, match="no positive"):
+            fit(forecast_fit_config, tiny_split, seed=0, run_dir=str(tmp_path))
+
+    def test_forecast_best_checkpoint_is_the_epoch_with_highest_val_metric(
+        self, tiny_split, forecast_fit_config, tmp_path, monkeypatch
+    ):
+        # scripted values: selection by the configured metric differs from
+        # "keep the first", "keep the last" and "select on the other metric"
+        _script_forecast_val_metrics(monkeypatch, [0.6, 0.9, 0.7], [0.9, 0.6, 0.95])
+        r = fit(forecast_fit_config, tiny_split, seed=0, run_dir=str(tmp_path))
+        metric = forecast_fit_config.train.select_metric
+        assert metric == "pr_auc"
+        assert r.best_metric == max(h[f"val_{metric}"] for h in r.history) == 0.9
+        assert load_checkpoint(r.best_path)["epoch"] == 2
+
+    def test_forecast_history_rows_carry_the_per_horizon_mean_metrics(
+        self, tiny_split, forecast_fit_config, tmp_path
+    ):
+        r = fit(forecast_fit_config, tiny_split, seed=0, run_dir=str(tmp_path))
+        assert set(r.history[0]) == {
+            "epoch",
+            "lr",
+            "train_loss",
+            "val_auroc",
+            "val_pr_auc",
+            "val_recall_at_1pct_fpr",
+        }
+        assert json.loads((tmp_path / "history.json").read_text()) == r.history
+
+    def test_forecast_val_skips_horizons_without_both_classes(
+        self, tiny_split, forecast_fit_config, tmp_path, monkeypatch
+    ):
+        # horizon 0 has no positive among masked val rows; the 9 scorable columns
+        # get distinct scripted values so only a mean over them gives 0.45 / 0.7
+        pr = [0.05 + 0.1 * k for k in range(9)]
+        au = [0.9 - 0.05 * k for k in range(9)]
+        seen = _script_forecast_columns(monkeypatch, pr, au)
+        tiny_split.val.y_forecast[:, 0] = 0
+        r = fit(forecast_fit_config, tiny_split, seed=0, run_dir=str(tmp_path))
+        assert seen and set(seen) == {2}
+        assert len(seen) == 3 * 9  # 3 epochs, 9 scorable horizons
+        for row in r.history:
+            assert row["val_pr_auc"] == pytest.approx(0.45)
+            assert row["val_auroc"] == pytest.approx(0.7)
+
+    def test_forecast_val_with_no_positive_in_any_horizon_fails_loudly(
+        self, tiny_split, forecast_fit_config, tmp_path
+    ):
+        tiny_split.val.y_forecast[:] = 0
+        with pytest.raises(RuntimeError, match="no best checkpoint"):
+            fit(forecast_fit_config, tiny_split, seed=0, run_dir=str(tmp_path))
+
+    def test_forecast_chance_guard_fires_when_only_the_last_horizon_is_below(
+        self, tiny_split, forecast_fit_config, tmp_path, monkeypatch
+    ):
+        # mean AUROC 0.82 and column 0 are fine; only column H-1 is under 0.5
+        _script_forecast_columns(monkeypatch, [0.5] * 10, [0.9] * 9 + [0.1])
+        forecast_fit_config.train.chance_guard_auroc = 0.5
+        forecast_fit_config.train.guard_epochs = 1
+        with pytest.warns(ChanceGuardWarning, match="chance guard") as rec:
+            fit(forecast_fit_config, tiny_split, seed=0, run_dir=str(tmp_path))
+        assert sum(w.category is ChanceGuardWarning for w in rec) == 1
+
+    def test_forecast_chance_guard_ignores_a_weak_first_horizon(
+        self, tiny_split, forecast_fit_config, tmp_path, monkeypatch
+    ):
+        _script_forecast_columns(monkeypatch, [0.5] * 10, [0.1] + [0.9] * 9)
+        forecast_fit_config.train.chance_guard_auroc = 0.5
+        forecast_fit_config.train.guard_epochs = 1
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", ChanceGuardWarning)
+            fit(forecast_fit_config, tiny_split, seed=0, run_dir=str(tmp_path))
+
+    def test_forecast_chance_guard_is_skipped_when_the_last_horizon_is_one_class(
+        self, tiny_split, forecast_fit_config, tmp_path, monkeypatch
+    ):
+        # every scorable column is below the guard, but column H-1 cannot be scored
+        _script_forecast_columns(monkeypatch, [0.5] * 9, [0.1] * 9)
+        tiny_split.val.y_forecast[:, 9] = 0
+        forecast_fit_config.train.chance_guard_auroc = 0.5
+        forecast_fit_config.train.guard_epochs = 1
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", ChanceGuardWarning)
+            fit(forecast_fit_config, tiny_split, seed=0, run_dir=str(tmp_path))
+
+    def test_forecast_config_trains_through_the_cli(self, monkeypatch, tmp_path):
+        monkeypatch.chdir(tmp_path)
+        raw = yaml.safe_load((ROOT / "config/smoke.yaml").read_text())
+        raw["model"]["task"] = "forecast"
+        path = tmp_path / "forecast_smoke.yaml"
+        path.write_text(yaml.safe_dump(raw))
+        DignityConfig.from_yaml(str(path))  # the edited preset is itself valid
+        assert main(["--config", str(path)]) == 0
 
 
 class TestPosWeight:

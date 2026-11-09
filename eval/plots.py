@@ -49,3 +49,58 @@ def plot_per_type_recall(per_type: dict, path: str) -> None:
     ax.set_ylabel("recall")
     fig.savefig(path, dpi=150, bbox_inches="tight")
     plt.close(fig)
+
+
+def plot_forecast_pr_auc(result: dict, path: str) -> None:
+    """PR-AUC per horizon for the model and the risk-score baseline, with CIs.
+
+    ``result`` is a forecast.json payload; the dashed line is the prevalence.
+    """
+    plt = _pyplot()
+    fig, ax = plt.subplots(figsize=(6, 4.5))
+    sides = {
+        "model": result["metrics"],
+        "risk_score_forecast": result["baselines"]["risk_score_forecast"],
+    }
+    for name, side in sides.items():
+        entries = side["pr_auc_by_horizon"]
+        known = [h for h, e in enumerate(entries) if e["value"] is not None]
+        values = [float(entries[h]["value"]) for h in known]
+        line = ax.plot([h + 1 for h in known], values, marker="o", label=name)[0]
+        for h in known:
+            low, high = entries[h]["ci_low"], entries[h]["ci_high"]
+            if low is None or high is None:
+                continue
+            v = float(entries[h]["value"])
+            err = [[max(v - low, 0.0)], [max(high - v, 0.0)]]
+            ax.errorbar([h + 1], [v], yerr=err, color=line.get_color(), capsize=3)
+    prevalence = result["metrics"]["prevalence_by_horizon"]
+    known = [h for h, p in enumerate(prevalence) if p is not None]
+    ax.plot(
+        [h + 1 for h in known],
+        [prevalence[h] for h in known],
+        linestyle="--",
+        color="gray",
+        label="prevalence",
+    )
+    ax.set_xlabel("horizon (rows ahead)")
+    ax.set_ylabel("PR-AUC")
+    ax.set_ylim(0, 1.05)
+    ax.legend(loc="upper right")
+    fig.savefig(path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+
+
+def plot_lead_times(result: dict, path: str) -> None:
+    """Histogram of rows of warning before each caught onset; misses in the title."""
+    plt = _pyplot()
+    lead = result["metrics"]["lead_time"]
+    fig, ax = plt.subplots(figsize=(6, 4.5))
+    values = lead["values"]
+    if values:
+        ax.hist(values, bins=range(0, int(max(values)) + 2), align="left")
+    ax.set_xlabel("lead time (rows before onset)")
+    ax.set_ylabel("onsets")
+    ax.set_title(f"{lead['n_missed']} of {lead['n_onsets']} onsets missed")
+    fig.savefig(path, dpi=150, bbox_inches="tight")
+    plt.close(fig)

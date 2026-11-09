@@ -1,8 +1,9 @@
 # Forecasting Configuration
-# Optimized for time-series prediction
+# Early warning: P(a new anomaly starts within 1..H rows)
 
 model:
   task: forecast
+  horizon: 10
   input_size: 9
   hidden_size: 512  # Larger for forecasting
   n_layers: 3  # Deeper for temporal patterns
@@ -11,7 +12,7 @@ model:
 
 data:
   source: synthetic
-  seq_len: 200  # Longer sequences for forecasting
+  seq_len: 200  # longer context for early warning; block_len 260 >= seq_len + horizon + 1
   batch_size: 32  # Smaller batch for memory
   split: [0.7, 0.15, 0.15]  # train / val / test blocks
   synthetic:

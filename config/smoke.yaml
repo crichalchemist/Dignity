@@ -8,7 +8,7 @@ data:
   num_workers: 0
   split: [0.7, 0.15, 0.15]
   label_overlap: 0.0
-  synthetic: {n_blocks: 60, block_len: 80, contamination: 0.5, seed: 1000}
+  synthetic: {n_blocks: 60, block_len: 120, contamination: 0.5, seed: 1000}
 train: {epochs: 1, use_amp: false, checkpoint_dir: runs/smoke/train, save_interval: 1,
         guard_epochs: 1, chance_guard_auroc: null, patience: null}
 eval: {n_train_seeds: 1, n_bootstrap: 50, out_dir: runs/smoke/results, img_dir: runs/smoke/img}

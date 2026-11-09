@@ -535,6 +535,21 @@ class TestSequenceAwareSplit:
                 np.testing.assert_array_equal(w.y_risk[idx], positive.astype(np.int8))
                 np.testing.assert_array_equal(w.onset_offset[idx], first)
 
+    def test_end_row_places_every_window_inside_its_block(self, easy_frame):
+        # Lead time looks up, per onset, the windows ending 1..H rows before it;
+        # that needs each window's last row as a row-in-block.
+        seq, horizon, block_len = 100, 10, 160
+        d = _split(
+            TransactionPipeline(seq_len=seq, features=list(RAW_COLUMNS)),
+            easy_frame,
+            np.random.default_rng(0),
+        )
+        for w in (d.train, d.val, d.test):
+            assert w.end_row.dtype == np.int64
+            for b in np.unique(w.block_index):
+                rows = w.end_row[w.block_index == b]
+                assert rows.tolist() == list(range(seq - 1, block_len - horizon))
+
     def test_validation_outliers_are_not_absorbed_by_the_scaler(self):
         # Five constant blocks; the one in val and the one in test are six orders
         # of magnitude larger. If the scaler had seen them, its IQR would swallow

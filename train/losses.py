@@ -25,3 +25,27 @@ def risk_loss(
         return F.binary_cross_entropy(p, y, weight=w)
 
     return loss_fn
+
+
+def forecast_loss(
+    pos_weight: float | None,
+) -> Callable[[Tensor, dict[str, Tensor]], Tensor]:
+    """Return a masked mean binary cross-entropy over per-horizon onset probabilities.
+
+    Windows with ``mask`` False (an anomaly already active) are excluded. The mean
+    is over every unmasked element across all horizons. ``pos_weight`` weights
+    positive labels and leaves negatives at 1; the head emits probabilities, so
+    ``BCEWithLogits``' ``pos_weight`` does not apply.
+    """
+
+    def loss_fn(outputs: Tensor, batch: dict[str, Tensor]) -> Tensor:
+        m = batch["mask"]
+        if m.sum() == 0:
+            return outputs.sum() * 0.0
+        y = batch["y"][m].float()
+        w = None
+        if pos_weight is not None:
+            w = 1 + (pos_weight - 1) * y
+        return F.binary_cross_entropy(outputs[m].float(), y, weight=w)
+
+    return loss_fn
