@@ -41,3 +41,8 @@ class TestDocs:
                     if term.lower() in line.lower():
                         hits.append(f"{path.relative_to(ROOT)}:{lineno}: {term!r}")
         assert hits == []
+
+    def test_pytest_ini_promises_no_timeouts_that_nothing_enforces(self):
+        text = (ROOT / "pytest.ini").read_text().lower()
+        assert "timeout" not in text
+        assert "mapped" not in text  # the "fast: ... mapped to 5s via conftest" claim

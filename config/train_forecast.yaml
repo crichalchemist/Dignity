@@ -32,7 +32,7 @@ train:
   weight_decay: 0.00001
   use_amp: true
   gradient_clip: 1.0
-  checkpoint_dir: ./checkpoints/forecast
+  checkpoint_dir: ./runs/forecast
   log_interval: 10
   save_interval: 5
 

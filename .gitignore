@@ -50,6 +50,7 @@ htmlcov/
 *.pth
 *.onnx
 checkpoints/
+runs/
 output_central/
 data/data/
 *.h5
