@@ -45,7 +45,7 @@ format that export no longer supports (DGNTY-3, DGNTY-35). No shipped config wri
 ## Commands
 
 ```bash
-# Tests (102 collected: test_core 24, test_data 23, test_models 11, test_privacy 34,
+# Tests (108 collected: test_core 27, test_data 23, test_models 14, test_privacy 34,
 # test_operator 4, test_docs 4, test_train 2 — one skips without CUDA)
 # every test is limited to 300 s (pytest.ini; pytest-timeout)
 pytest tests/ -v
@@ -164,7 +164,7 @@ a mechanism, it needs a test in `tests/test_privacy.py` or CI's 100% gate on tha
 - Type hints use modern union syntax (`np.ndarray | None`) — `target-version = "py310"`.
 - Config is dataclass-backed: `DignityConfig{model,data,train}` in `core/config.py`, loaded via
   `DignityConfig.from_yaml`. Add a field to the dataclass **and** to `config/base.yaml`; unknown
-  YAML keys raise `TypeError` at load.
+  keys, top-level or nested, raise `TypeError` at load. `data.source` accepts only `synthetic`.
 - A `privacy:` block in YAML is optional and validated at load (`PrivacyConfig`). No block =
   no privacy stage. `bounds` are public parameters chosen a priori — never derive them from data.
 - Tests are organized as classes (`TestSignalProcessor`, `TestDignityModel`, …); node ids are

@@ -2,6 +2,7 @@
 
 import pytest
 import torch
+import torch.nn as nn
 
 from models.backbone.attention import AdditiveAttention
 from models.backbone.cnn1d import CNN1D
@@ -146,3 +147,22 @@ class TestDignityModel:
 
         assert predictions.shape == (2, 1)
         assert not model.training  # Should be in eval mode
+
+    def test_cnn_kernel_size_reaches_the_backbone(self):
+        model = Dignity(
+            task="risk", input_size=7, hidden_size=32, n_layers=1, cnn_kernel_size=5
+        )
+        kernels = [
+            m.kernel_size
+            for m in model.backbone.cnn.modules()
+            if isinstance(m, nn.Conv1d)
+        ]
+        assert kernels == [(5,), (5,)]
+
+    def test_misspelled_head_kwarg_is_rejected(self):
+        with pytest.raises(TypeError, match="bogus_kwarg"):
+            Dignity(task="risk", input_size=9, bogus_kwarg=1)
+
+    def test_head_kwarg_for_another_task_is_rejected(self):
+        with pytest.raises(TypeError, match="pred_len"):
+            Dignity(task="risk", input_size=9, pred_len=5)

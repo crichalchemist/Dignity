@@ -10,7 +10,7 @@ model:
   cnn_kernel_size: 3
 
 data:
-  source: synthetic  # synthetic, crypto, gdelt
+  source: synthetic  # only "synthetic" in v1.0; other sources are v1.1 (DGNTY-41)
   seq_len: 100
   batch_size: 64
   test_size: 0.2
