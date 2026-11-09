@@ -723,6 +723,21 @@ class TestFitPolicy:
         )
         assert [h["epoch"] for h in resumed.history] == [3]
 
+    def test_resume_refuses_an_m1_era_checkpoint_without_select_metric(
+        self, tiny_split, tiny_fit_config, tmp_path
+    ):
+        # M1-era meta has no select_metric: best_metric may be any metric, so
+        # resuming would compare a PR-AUC against an unknown number (J6)
+        tiny_fit_config.train.epochs = 1
+        fit(tiny_fit_config, tiny_split, 0, str(tmp_path))
+        last = tmp_path / "last.pt"
+        raw = torch.load(last, weights_only=True)
+        del raw["meta"]["config"]["train"]["select_metric"]
+        torch.save(raw, last)
+        tiny_fit_config.train.epochs = 2
+        with pytest.raises(ValueError, match="was selected on None"):
+            fit(tiny_fit_config, tiny_split, 0, str(tmp_path), resume_from=str(last))
+
 
 def _backbone_state(path):
     state = load_checkpoint(path)["model_state"]
@@ -762,6 +777,47 @@ class TestLoadBackbone:
     def test_warm_start_refuses_a_backbone_of_another_width(self, risk_best):
         with pytest.raises(ValueError, match="shape"):
             load_backbone(self._policy_model(hidden_size=8), risk_best, ["a", "b", "c"])
+
+    def test_warm_start_refuses_a_deeper_backbone_instead_of_loading_layer_zero(
+        self, tiny_split, tiny_fit_config, tmp_path
+    ):
+        # strict=False once dropped the extra layers, so a 2-layer risk
+        # checkpoint silently warm-started a 1-layer policy from layer 0 only
+        tiny_fit_config.model.task = "risk"
+        tiny_fit_config.model.n_layers = 2
+        tiny_fit_config.train.epochs = 1
+        deep = fit(tiny_fit_config, tiny_split, 0, str(tmp_path / "deep")).best_path
+        with pytest.raises(ValueError, match="extra"):
+            load_backbone(self._policy_model(), deep, ["a", "b", "c"])
+
+    def test_warm_start_names_the_missing_backbone_tensors(
+        self, tiny_split, tiny_fit_config, tmp_path
+    ):
+        tiny_fit_config.model.task = "risk"
+        tiny_fit_config.train.epochs = 1
+        best = fit(tiny_fit_config, tiny_split, 0, str(tmp_path / "r")).best_path
+        model = Dignity(task="policy", input_size=3, hidden_size=16, n_layers=2)
+        with pytest.raises(ValueError, match="missing"):
+            load_backbone(model, best, ["a", "b", "c"])
+
+    def test_resume_restores_full_state_so_the_warm_start_is_skipped(
+        self, tiny_split, tiny_fit_config, tmp_path, monkeypatch
+    ):
+        tiny_fit_config.model.task = "policy"
+        tiny_fit_config.train.epochs = 1
+        fit(tiny_fit_config, tiny_split, 0, str(tmp_path))
+        calls = []
+        monkeypatch.setattr("train.loop.load_backbone", lambda *a: calls.append(a))
+        tiny_fit_config.train.epochs = 2
+        tiny_fit_config.train.init_backbone_from = str(tmp_path / "gone.pt")
+        resumed = fit(
+            tiny_fit_config,
+            tiny_split,
+            0,
+            str(tmp_path),
+            resume_from=str(tmp_path / "last.pt"),
+        )
+        assert calls == [] and [h["epoch"] for h in resumed.history] == [2]
 
     def test_only_a_policy_fit_with_a_configured_path_warm_starts(
         self, tiny_split, tiny_fit_config, tmp_path, monkeypatch

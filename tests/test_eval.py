@@ -175,6 +175,28 @@ class TestBaselines:
         a = threshold_policy(val_s, val_y, test_s, C, budget=0.05)
         assert (a == 1).sum() == 10 and (a == 2).sum() == 0
 
+    def test_baseline_keeps_the_highest_scored_reviews_under_the_cap(self):
+        C = cost_matrix(PolicyConfig().costs)
+        val_s = np.r_[np.zeros(1900), np.full(100, 0.5)]
+        val_y = np.r_[np.zeros(1900, int), np.tile([0, 1], 50)]
+        # 100 distinct review-band scores; index order is ascending, so keeping
+        # the first-k or the lowest-k would pick the wrong rows
+        test_s = np.r_[np.linspace(0.41, 0.49, 100), np.zeros(100)]
+        a = threshold_policy(val_s, val_y, test_s, C, budget=0.05)
+        assert (a == 1).sum() == 10
+        assert np.flatnonzero(a == 1).tolist() == list(range(90, 100))
+
+    def test_baseline_thresholds_do_not_depend_on_score_precision(self):
+        C = cost_matrix(PolicyConfig().costs)
+        val_s = np.r_[np.zeros(1900), np.full(100, 0.1)]
+        val_y = np.r_[np.zeros(1900, int), np.tile([0, 1], 50)]
+        test_s = np.array([0.0, 0.1, 0.1], np.float64)
+        a64 = threshold_policy(val_s, val_y, test_s, C, budget=0.05)
+        a32 = threshold_policy(
+            val_s.astype(np.float32), val_y, test_s.astype(np.float32), C, 0.05
+        )
+        assert a32.tolist() == a64.tolist()
+
 
 PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
 

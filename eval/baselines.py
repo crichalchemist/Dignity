@@ -38,7 +38,7 @@ def threshold_policy(
     highest scores; the rest go to allow. Returns int64 [N].
     """
     costs = costs.astype(np.float64)  # float64: ties must not depend on NEP 50
-    val_scores = np.asarray(val_scores)
+    val_scores = np.asarray(val_scores, dtype=np.float64)
     val_y = np.asarray(val_y).astype(np.int64)
     grid = np.unique(np.append(np.quantile(val_scores, np.linspace(0, 1, 101)), np.inf))
 
@@ -55,7 +55,7 @@ def threshold_policy(
                 best_cost, best = cost, (t_review, t_block)
 
     t_review, t_block = best
-    test_scores = np.asarray(test_scores)
+    test_scores = np.asarray(test_scores, dtype=np.float64)
     actions = np.where(
         test_scores >= t_block, 2, np.where(test_scores >= t_review, 1, 0)
     ).astype(np.int64)

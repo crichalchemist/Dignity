@@ -150,7 +150,8 @@ def load_backbone(model, path: str, feature_names: list[str]) -> None:
     """Copy only the ``backbone.*`` tensors of a checkpoint into ``model``.
 
     The head is left untouched. Raises ValueError when the checkpoint was trained
-    on other features or any backbone tensor has another shape.
+    on other features, its backbone tensors are not exactly the model's, or any
+    has another shape.
     """
     ckpt = load_checkpoint(path, map_location="cpu")
     if ckpt["meta"].feature_names != list(feature_names):
@@ -160,9 +161,13 @@ def load_backbone(model, path: str, feature_names: list[str]) -> None:
         )
     saved = {k: v for k, v in ckpt["model_state"].items() if k.startswith("backbone.")}
     current = {k: v for k, v in model.state_dict().items() if k.startswith("backbone.")}
+    if set(saved) != set(current):
+        raise ValueError(
+            f"{path}: backbone tensors differ from the model's; "
+            f"missing {sorted(set(current) - set(saved))}, "
+            f"extra {sorted(set(saved) - set(current))}"
+        )
     for k, v in current.items():
-        if k not in saved:
-            raise ValueError(f"{path}: backbone tensor {k} is missing")
         if saved[k].shape != v.shape:
             raise ValueError(
                 f"{path}: backbone tensor {k} has shape {tuple(saved[k].shape)}, "
@@ -198,7 +203,8 @@ def fit(
         _head_kwargs(config),
     )
     model = build_model_from_meta(meta).to(device)
-    if model.task == "policy" and train_cfg.init_backbone_from:
+    # resume restores the full state below, so a warm start would be overwritten
+    if model.task == "policy" and train_cfg.init_backbone_from and not resume_from:
         load_backbone(model, train_cfg.init_backbone_from, data.feature_names)
     loss_fn = _task_loss(config, data.train)
     optimizer = torch.optim.AdamW(
