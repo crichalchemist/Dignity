@@ -34,6 +34,7 @@ setup(
             "ruff>=0.1.0",
             "pre-commit>=3.0",
         ],
+        "eval": ["matplotlib>=3.7,<3.10"],
     },
     entry_points={
         "console_scripts": [
