@@ -68,7 +68,8 @@ Someone watching the person who runs the model. This is the **operator layer**.
   so they must be set a priori in config. They are visible to any adversary.
 - **The unit of privacy is one released value** (one row of one column). A subject
   who contributes m rows is protected at m·ε by group privacy, not ε. In the
-  shipped synthetic path every subject contributes `seq_len + 20` rows. User-level
+  shipped synthetic path every subject contributes one block of
+  `synthetic.block_len` rows (160 by default). User-level
   accounting is not implemented; the CLI's "ε spent" line is the per-value ledger.
 - **Pseudonymization is a primitive, not a pipeline stage.** No current data
   source carries identifier columns, so `PrivacyManager.pseudonymize` is exposed

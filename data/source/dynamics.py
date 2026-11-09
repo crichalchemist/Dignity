@@ -11,20 +11,22 @@ import numpy as np
 
 @dataclass(frozen=True)
 class NormalProcessParams:
-    """Starting values for the normal-process dynamics.
+    """Defaults for the normal-process dynamics.
 
-    The calibration builder tunes these inside the bands set in M2.10.
+    The GARCH and log-volume values are tuned (M2.10) so the easy preset's normal
+    process lands inside the Bitstamp reference bands (data/calibration).
     """
 
-    garch_omega: float = 7e-7
-    garch_alpha: float = 0.08
-    garch_beta: float = 0.90
-    t_dof: float = 5.0
+    # Sets the hourly return scale (~0.6%, BTC-like); no effect on scale-free stats.
+    garch_omega: float = 2.8e-6
+    garch_alpha: float = 0.22
+    garch_beta: float = 0.70
+    t_dof: float = 3.6
     regime_switch_prob: float = 0.0  # the generator overrides this from config
     regime_vol: tuple[float, float, float] = (0.6, 1.0, 2.0)
     regime_log_volume: tuple[float, float, float] = (-0.3, 0.0, 0.4)
-    ar1_phi: float = 0.6
-    log_volume_innov_sd: float = 0.5
+    ar1_phi: float = 0.56
+    log_volume_innov_sd: float = 0.9
     log_volume_mean: float = 4.6
     block_level_sd: float = 0.5
     price_level_mean: float = 6.9
@@ -60,9 +62,14 @@ def garch_returns(
 def ar1_log_volume(
     n: int, params: NormalProcessParams, rng: np.random.Generator
 ) -> np.ndarray:
-    """AR(1) log-volume deviations with centred lognormal innovations."""
-    s = params.log_volume_innov_sd
-    eps = np.exp(rng.normal(0.0, s, size=n)) - np.exp(s * s / 2.0)
+    """AR(1) log-volume deviations with Gaussian shocks in log space.
+
+    Volume, the exponential of the log level, is therefore lognormal. Centred
+    lognormal shocks were dropped in the M2.10 calibration escalation: they raise
+    volume CV and log-volume skew together, so no shock size fit both reference
+    bands. There is no floor clip (DGNTY-11).
+    """
+    eps = rng.normal(0.0, params.log_volume_innov_sd, size=n)
     x = np.empty(n)
     x[0] = 0.0
     for t in range(1, n):

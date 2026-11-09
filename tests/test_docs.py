@@ -25,6 +25,7 @@ REMOVED = (
     "quantize_amounts",
     "add_noise",
     "gaussian mechanism",
+    "generate_dataset(",
 )
 
 

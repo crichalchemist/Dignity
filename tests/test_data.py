@@ -1,6 +1,7 @@
 """Test data pipeline."""
 
 import dataclasses
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -8,8 +9,9 @@ import pytest
 import scipy.stats
 import torch
 
-from core.config import PrivacyConfig
-from core.privacy import BudgetExhausted
+from core.config import DignityConfig, PrivacyConfig, SyntheticConfig
+from core.privacy import BudgetExhausted, PrivacyManager
+from data.labels import window_starts
 from data.loader import TransactionDataset, create_dataloader
 from data.pipeline import TransactionPipeline
 from data.source.anomalies import (
@@ -25,55 +27,189 @@ from data.source.dynamics import (
     regime_path,
     tx_counts,
 )
-from data.source.synthetic import SyntheticGenerator
+from data.source.synthetic import RAW_COLUMNS, SyntheticGenerator
+from data.stats import CALIBRATION_CHUNK_LEN, calibration_stats, load_reference_stats
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+def _per_block(frame: pd.DataFrame) -> pd.DataFrame:
+    """One row per block: ground truth (any anomalous row) and the block label."""
+    return frame.groupby("block_id").agg(
+        truth=("is_anomalous", "any"),
+        label=("block_label", "first"),
+        n_labels=("block_label", "nunique"),
+    )
 
 
 class TestSyntheticGenerator:
-    """Test synthetic data generation."""
+    """The seeded event-record generator: one row per step, typed anomalies."""
 
-    def test_normal_sequence(self):
-        """Test normal sequence generation."""
-        gen = SyntheticGenerator(seed=42)
-        data = gen.generate_normal_sequence(length=1000)
+    def test_frame_has_exactly_the_event_record_schema(self, easy_frame):
+        assert list(easy_frame.columns) == [
+            "timestamp",
+            "volume",
+            "price",
+            "fee_rate",
+            "tx_count",
+            "block_id",
+            "is_anomalous",
+            "anomaly_type",
+            "anomaly_id",
+            "block_label",
+        ]
+        assert tuple(easy_frame.columns[1:5]) == RAW_COLUMNS
+        assert len(easy_frame) == 100 * 160
+        dtypes = {
+            "timestamp": np.int64,
+            "volume": np.float64,
+            "price": np.float64,
+            "fee_rate": np.float64,
+            "tx_count": np.int64,
+            "block_id": np.int64,
+            "is_anomalous": np.bool_,
+            "anomaly_id": np.int64,
+            "block_label": np.int8,
+        }
+        for column, dtype in dtypes.items():
+            assert easy_frame[column].dtype == dtype, column
+        # object on pandas 2 (CI 3.10), str on pandas 3: both are string dtypes
+        assert pd.api.types.is_string_dtype(easy_frame["anomaly_type"])
 
-        assert "volume" in data
-        assert "price" in data
-        assert "fee_rate" in data
-        assert "tx_count" in data
+        # blocks are contiguous and the clock is hourly in ms within every block
+        block_ids = easy_frame["block_id"].to_numpy()
+        assert (block_ids == np.repeat(np.arange(100), 160)).all()
+        steps = easy_frame.groupby("block_id")["timestamp"].diff().dropna()
+        assert (steps == 3_600_000).all()
 
-        assert len(data["volume"]) == 1000
-        assert np.all(data["volume"] > 0)
+        # downstream log/ratio signals need finite, positive raw values
+        raw = easy_frame[list(RAW_COLUMNS)].to_numpy(dtype=float)
+        assert np.isfinite(raw).all()
+        assert (easy_frame["volume"] > 0).all() and (easy_frame["price"] > 0).all()
 
-    def test_anomalous_sequence(self):
-        """Test anomalous pattern generation."""
-        gen = SyntheticGenerator(seed=42)
+        none = ~easy_frame["is_anomalous"]
+        assert (easy_frame.loc[none, "anomaly_type"] == "none").all()
+        assert (easy_frame.loc[none, "anomaly_id"] == -1).all()
+        hit = easy_frame[~none]
+        assert len(hit) > 0
+        assert set(hit["anomaly_type"]) <= set(ANOMALY_TYPES)
+        assert (hit["anomaly_id"] >= 0).all()
+        # an anomaly id names one event: it never reappears in another block
+        assert (hit.groupby("anomaly_id")["block_id"].nunique() == 1).all()
 
-        # Test different anomaly types
-        for anomaly_type in ["volume_spike", "price_manipulation", "fee_evasion"]:
-            data = gen.generate_anomalous_sequence(
-                length=100, anomaly_type=anomaly_type
-            )
+    def test_same_seed_reproduces_the_frame_despite_global_rng_noise(
+        self, easy_config
+    ):  # DGNTY-19
+        a = SyntheticGenerator(easy_config.data.synthetic).generate()
+        np.random.rand(10)
+        b = SyntheticGenerator(easy_config.data.synthetic).generate()
+        pd.testing.assert_frame_equal(a, b)
 
-            assert len(data["volume"]) == 100
-            assert "volume" in data and "price" in data
+    def test_constructing_the_generator_leaves_the_global_rng_untouched(
+        self, easy_config
+    ):  # DGNTY-19
+        np.random.seed(123)  # not 42: a reseed with config.seed must show
+        np.random.rand(7)
+        before = np.random.get_state()
+        SyntheticGenerator(easy_config.data.synthetic).generate()
+        after = np.random.get_state()
+        assert after[0] == before[0] and (after[1] == before[1]).all()
+        assert after[2:] == before[2:]  # compare pos too, not only the key array
 
-    def test_dataset_generation(self):
-        """Test balanced dataset generation."""
-        gen = SyntheticGenerator(seed=42)
-        df = gen.generate_dataset(num_normal=100, num_anomalous=50, seq_len=50)
+    def test_injected_rng_overrides_the_config_seed(self, easy_config):
+        base = dataclasses.replace(easy_config.data.synthetic, n_blocks=20)
+        seed_1 = dataclasses.replace(base, seed=1)
+        seed_2 = dataclasses.replace(base, seed=2)
+        a = SyntheticGenerator(seed_1, rng=np.random.default_rng(7)).generate()
+        b = SyntheticGenerator(seed_2, rng=np.random.default_rng(7)).generate()
+        pd.testing.assert_frame_equal(a, b)
+        assert not a.equals(SyntheticGenerator(seed_1).generate())
 
-        assert len(df) == (100 + 50) * 50  # sequences * seq_len
-        assert "label" in df.columns
-        assert set(df["label"].unique()) == {0, 1}
+    def test_normal_and_anomalous_blocks_are_interleaved(self):
+        # the legacy generator emitted every normal block, then every anomalous one
+        frame = SyntheticGenerator(
+            SyntheticConfig(n_blocks=400, contamination=0.3)
+        ).generate()
+        truth = _per_block(frame)["truth"].to_numpy()
+        for half in (truth[:200], truth[200:]):
+            assert 0.15 <= half.mean() <= 0.45
+
+    def test_anomaly_onsets_and_durations_vary_across_the_block(self):  # DGNTY-16
+        cfg = SyntheticConfig(
+            n_blocks=200,
+            anomalies_per_block=(1, 3),
+            duration_range=(3, 60),
+            severity_range=(0.3, 1.0),
+        )
+        frame = SyntheticGenerator(cfg).generate()
+        row = pd.Series(np.arange(len(frame)) % cfg.block_len, index=frame.index)
+        hit = frame["is_anomalous"]
+        spans = row[hit].groupby(frame.loc[hit, "anomaly_id"]).agg(["min", "max"])
+        durations = spans["max"] - spans["min"] + 1
+        assert spans["min"].min() < 10
+        assert spans["max"].max() + 1 > 150
+        assert durations.nunique() >= 20
+        assert durations.between(3, 60).all()
+
+    def test_block_label_is_the_truth_without_noise_and_flipped_with_full_noise(
+        self,
+    ):
+        cfg = SyntheticConfig(n_blocks=60, contamination=0.5)
+        clean = _per_block(SyntheticGenerator(cfg).generate())
+        assert clean["truth"].any() and not clean["truth"].all()
+        assert (clean["n_labels"] == 1).all()
+        assert (clean["label"] == clean["truth"].astype(int)).all()
+
+        noisy_cfg = dataclasses.replace(cfg, label_noise=1.0)
+        noisy = _per_block(SyntheticGenerator(noisy_cfg).generate())
+        assert (noisy["n_labels"] == 1).all()
+        assert (noisy["label"] == 1 - noisy["truth"].astype(int)).all()
+
+    def test_benign_spikes_are_never_labelled(self):
+        cfg = SyntheticConfig(n_blocks=50, contamination=0.0, benign_spike_rate=1.0)
+        frame = SyntheticGenerator(cfg).generate()
+        assert not frame["is_anomalous"].any()
+        assert (frame["block_label"] == 0).all()
+        assert (frame["anomaly_type"] == "none").all()
+        assert (frame["anomaly_id"] == -1).all()
+        # the spikes were applied. Only block 0 is compared: both runs reach its
+        # spike draw with the same RNG state, but the injector consumes draws the
+        # calm run does not, so every later block differs even if a spike is a no-op
+        calm = SyntheticGenerator(
+            dataclasses.replace(cfg, benign_spike_rate=0.0)
+        ).generate()
+        first = frame["block_id"] == 0
+        assert not frame.loc[first, list(RAW_COLUMNS)].equals(
+            calm.loc[first, list(RAW_COLUMNS)]
+        )
+
+    def test_type_weights_restrict_the_typology(self):
+        cfg = SyntheticConfig(
+            n_blocks=50, contamination=1.0, type_weights={"fee_spike": 1.0}
+        )
+        frame = SyntheticGenerator(cfg).generate()
+        assert set(frame.loc[frame["is_anomalous"], "anomaly_type"]) == {"fee_spike"}
+
+    def test_unknown_anomaly_type_is_rejected(self):
+        with pytest.raises(ValueError, match="nope"):
+            SyntheticGenerator(SyntheticConfig(type_weights={"nope": 1.0}))
+
+    def test_zero_tx_median_raises_instead_of_an_infinite_fee(self, monkeypatch):
+        # congestion_fee divides by capacity_ratio * median(tx_count) (M2.3 carry)
+        def no_transactions(volume, params, rng):
+            return np.zeros(len(volume), dtype=np.int64)
+
+        monkeypatch.setattr("data.source.synthetic.tx_counts", no_transactions)
+        with pytest.raises(ValueError, match="tx_count"):
+            SyntheticGenerator(SyntheticConfig(n_blocks=2)).generate()
 
 
 class TestTransactionPipeline:
     """Test data preprocessing pipeline."""
 
-    def test_signal_computation(self):
+    def test_signal_computation(self, easy_frame):
         """Test signal feature computation."""
-        gen = SyntheticGenerator(seed=42)
-        df_raw = gen.generate_dataset(num_normal=10, num_anomalous=0, seq_len=100)
+        df_raw = easy_frame[list(RAW_COLUMNS)]
 
         pipeline = TransactionPipeline(seq_len=50)
         df_processed = pipeline.compute_signals(df_raw)
@@ -82,11 +218,9 @@ class TestTransactionPipeline:
         assert "volatility" in df_processed.columns
         assert "momentum" in df_processed.columns
 
-    def test_fit_transform(self):
+    def test_fit_transform(self, easy_frame):
         """Test scaling pipeline."""
-        gen = SyntheticGenerator(seed=42)
-        df = gen.generate_dataset(num_normal=50, num_anomalous=10, seq_len=100)
-        df = df.drop("label", axis=1)
+        df = easy_frame[list(RAW_COLUMNS)]
 
         pipeline = TransactionPipeline(seq_len=50)
         X = pipeline.fit_transform(df)
@@ -94,8 +228,8 @@ class TestTransactionPipeline:
         assert X.shape[0] == len(df)
         assert X.shape[1] > 0  # Has features
 
-        # Check scaling (should be roughly centered)
-        assert np.abs(X.mean()) < 1.0
+        # RobustScaler centres on the median; the mean of skewed volumes is not 0
+        assert np.abs(np.median(X, axis=0)).max() < 1.0
 
     def test_sequence_creation(self):
         """Test sliding window sequence creation."""
@@ -115,17 +249,26 @@ class TestTransactionPipeline:
 
     def test_full_pipeline(self):
         """Test complete processing pipeline."""
-        gen = SyntheticGenerator(seed=42)
-        df = gen.generate_dataset(num_normal=100, num_anomalous=20, seq_len=200)
-        labels = df["label"].values
-        df = df.drop("label", axis=1)
+        df = _frame(500)
+        labels = np.zeros(500, dtype=int)
 
-        pipeline = TransactionPipeline(seq_len=100)
+        # _frame's price is 0 at row 0, so momentum is inf there (DGNTY-46); leave
+        # momentum out of the features so the scaler sees only finite values.
+        pipeline = TransactionPipeline(
+            seq_len=100, features=["volume", "price", "fee_rate", "tx_count"]
+        )
         X_seq, y_seq = pipeline.process(df, labels, fit=True, stride=10)
 
         assert X_seq.ndim == 3  # [sequences, seq_len, features]
         assert y_seq.ndim == 1  # [sequences]
         assert len(X_seq) == len(y_seq)
+
+    def test_two_dimensional_targets_are_rejected_not_misaligned(self):
+        # Forecast targets only come from data.labels.forecast_labels; the old 2-D
+        # branch silently took rows after the window and misaligned them.
+        p = TransactionPipeline(seq_len=10)
+        with pytest.raises(ValueError, match="forecast_labels"):
+            p.create_sequences(np.zeros((30, 3)), np.zeros((30, 4)))
 
 
 class _ZeroNoise:
@@ -263,15 +406,6 @@ class TestPrivacyStage:
         assert len(priv.privacy_manager.pseudonymize("x")) == 64
 
 
-def _blocks_frame(n_normal: int, n_anomalous: int, block_len: int):
-    """Synthetic dataset as (raw frame, per-row labels); one block per sequence."""
-    gen = SyntheticGenerator(seed=0)
-    df = gen.generate_dataset(
-        num_normal=n_normal, num_anomalous=n_anomalous, seq_len=block_len
-    )
-    return df.drop(columns="label"), df["label"].to_numpy()
-
-
 class _ReversedOrder:
     """Stand-in rng: the highest-numbered blocks come first, so they land in val."""
 
@@ -279,79 +413,124 @@ class _ReversedOrder:
         return np.arange(n)[::-1]
 
 
+def _labelled(df: pd.DataFrame, block_len: int) -> pd.DataFrame:
+    """Add the event-record columns to a hand frame of equal-length blocks."""
+    out = df.copy()
+    out["block_id"] = np.arange(len(df)) // block_len
+    out["is_anomalous"] = False
+    out["anomaly_type"] = "none"
+    out["anomaly_id"] = -1
+    return out
+
+
+def _split(pipeline, df, rng):
+    return pipeline.process_blocks(df, (0.7, 0.15, 0.15), 10, 0.0, rng)
+
+
 class TestSequenceAwareSplit:
-    """process_blocks treats each generated sequence as an indivisible unit."""
+    """process_blocks treats each generated block as an indivisible unit."""
 
-    def test_each_split_sees_both_classes(self):
-        # generate_dataset emits every normal block, then every anomalous block.
-        # A positional split produced an all-normal train set and an all-anomalous
-        # val set, so the risk head learned "always 0" and validation was meaningless.
-        df, labels = _blocks_frame(80, 20, block_len=60)
-        pipeline = TransactionPipeline(
-            seq_len=50, features=["volume", "price", "fee_rate"]
+    def test_each_split_sees_both_classes(self, easy_frame):
+        # A positional split once produced an all-normal train set and an
+        # all-anomalous val set, so the risk head learned "always 0" and
+        # validation was meaningless.
+        d = _split(
+            TransactionPipeline(seq_len=100, features=list(RAW_COLUMNS)),
+            easy_frame,
+            np.random.default_rng(0),
         )
-        (X_tr, y_tr), (X_va, y_va) = pipeline.process_blocks(
-            df, labels, block_len=60, test_size=0.2, rng=np.random.default_rng(0)
-        )
-        assert set(np.unique(y_tr)) == {0, 1}
-        assert set(np.unique(y_va)) == {0, 1}
-        assert len(X_tr) == len(y_tr)
-        assert len(X_va) == len(y_va)
+        for w in (d.train, d.val, d.test):
+            assert set(np.unique(w.y_risk)) == {0, 1}
 
-    def test_windows_never_span_two_sequences(self):
-        # With the window as long as the block, each block yields exactly one
-        # window; a window crossing a joint would show up as an extra sequence.
-        df, labels = _blocks_frame(8, 2, block_len=50)
-        pipeline = TransactionPipeline(seq_len=50, features=["volume", "price"])
-        (X_tr, _), (X_va, _) = pipeline.process_blocks(
-            df, labels, block_len=50, test_size=0.2, rng=np.random.default_rng(1)
+    def test_every_block_lands_in_exactly_one_split(self, easy_frame):
+        d = _split(
+            TransactionPipeline(seq_len=100, features=list(RAW_COLUMNS)),
+            easy_frame,
+            np.random.default_rng(0),
         )
-        assert len(X_tr) + len(X_va) == 10
-        assert len(X_va) == 2
-        assert X_tr.shape[1:] == (50, 2)
+        sets = [set(np.unique(w.block_index)) for w in (d.train, d.val, d.test)]
+        assert not (sets[0] & sets[1] or sets[0] & sets[2] or sets[1] & sets[2])
+        assert set.union(*sets) == set(easy_frame["block_id"])
+        assert [len(s) for s in sets] == [70, 15, 15]
+
+    def test_windows_never_span_two_blocks(self, easy_frame):
+        # Each block yields exactly len(window_starts) windows; a window crossing
+        # a joint would show up as an extra one.
+        d = _split(
+            TransactionPipeline(seq_len=100, features=list(RAW_COLUMNS)),
+            easy_frame,
+            np.random.default_rng(0),
+        )
+        assert len(d.train.X) == 70 * len(window_starts(160, 100, 10))
+        assert d.train.X.shape[1:] == (100, 4)
+        assert d.train.X.dtype == np.float32
+
+    def test_every_positive_window_contains_an_anomalous_row(self, easy_frame):
+        # DGNTY-18/39: a risk label with no anomalous row inside would teach noise.
+        d = _split(
+            TransactionPipeline(seq_len=100, features=list(RAW_COLUMNS)),
+            easy_frame,
+            np.random.default_rng(0),
+        )
+        for w in (d.train, d.val, d.test):
+            assert (w.onset_offset[w.y_risk == 1] >= 0).all()
+            assert (w.onset_offset[w.y_risk == 0] == -1).all()
 
     def test_validation_outliers_are_not_absorbed_by_the_scaler(self):
-        # Five constant blocks; the two that land in val are six orders of magnitude
-        # larger. If the scaler had seen them, its IQR would swallow the gap and the
-        # val rows would scale to about 1. Fit on train only, they stay enormous.
+        # Five constant blocks; the one in val and the one in test are six orders
+        # of magnitude larger. If the scaler had seen them, its IQR would swallow
+        # the gap and they would scale to about 1. Fit on train only, they stay
+        # enormous.
         block_len = 4
         volume = np.concatenate(
-            [np.full(block_len, v) for v in (1.0, 2.0, 3.0, 1e6, 1e6)]
+            [np.full(block_len, v) for v in (1e6, 1e6, 1.0, 2.0, 3.0)]
         )
-        df = pd.DataFrame({"volume": volume + np.arange(len(volume)) * 0.01})
-        labels = np.zeros(len(df), dtype=int)
-        pipeline = TransactionPipeline(seq_len=block_len, features=["volume"])
-        (X_tr, _), (X_va, _) = pipeline.process_blocks(
-            df, labels, block_len=block_len, test_size=0.4, rng=_ReversedOrder()
+        df = _labelled(
+            pd.DataFrame({"volume": volume + np.arange(len(volume)) * 0.01}),
+            block_len,
         )
-        assert np.abs(X_tr).max() < 10
-        assert np.abs(X_va).min() > 100
+        pipeline = TransactionPipeline(seq_len=3, features=["volume"])
+        d = pipeline.process_blocks(df, (0.6, 0.2, 0.2), 1, 0.0, _ReversedOrder())
+        assert set(np.unique(d.val.block_index)) == {1}
+        assert set(np.unique(d.test.block_index)) == {0}
+        assert np.abs(d.train.X).max() < 10
+        assert np.abs(d.val.X).min() > 100 and np.abs(d.test.X).min() > 100
 
-    def test_single_privacy_release_covers_both_splits(self):
-        # The budget equals the per-column epsilon, so a second release for the
-        # val half would raise BudgetExhausted. Both halves come from one draw.
-        df, labels = _blocks_frame(8, 2, block_len=60)
+    def test_single_privacy_release_covers_all_three_splits(self, easy_frame):
+        # The budget equals the per-column epsilon, so a second release for any
+        # split would raise BudgetExhausted. All three come from one draw.
         pipeline = TransactionPipeline(
-            seq_len=50,
+            seq_len=100,
             features=["volume", "price"],
             privacy=_laplace_price(eps_total=1.0, eps=1.0),
             privacy_rng=_ZeroNoise(),
         )
-        pipeline.process_blocks(
-            df, labels, block_len=60, test_size=0.2, rng=np.random.default_rng(0)
-        )
+        d = _split(pipeline, easy_frame, np.random.default_rng(0))
         assert pipeline.privacy_manager.budget.spent == pytest.approx(1.0)
+        assert d.epsilon_spent == {"train": 1.0, "val": 1.0, "test": 1.0}
 
-    def test_frame_not_divisible_into_blocks_is_rejected(self):
-        df, labels = _blocks_frame(3, 0, block_len=20)
-        pipeline = TransactionPipeline(seq_len=10, features=["volume"])
-        with pytest.raises(ValueError, match="block_len"):
+    def test_no_privacy_reports_no_epsilon(self, easy_frame):
+        d = _split(
+            TransactionPipeline(seq_len=100, features=list(RAW_COLUMNS)),
+            easy_frame,
+            np.random.default_rng(0),
+        )
+        assert d.epsilon_spent == {}
+
+    def test_block_too_short_for_a_window_and_horizon_is_rejected(self):
+        df = _labelled(_frame(60), 20)
+        pipeline = TransactionPipeline(seq_len=15, features=["volume"])
+        with pytest.raises(ValueError, match="block"):
             pipeline.process_blocks(
-                df.iloc[:-1],
-                labels[:-1],
-                block_len=20,
-                test_size=0.2,
-                rng=np.random.default_rng(0),
+                df, (0.7, 0.15, 0.15), 10, 0.0, np.random.default_rng(0)
+            )
+
+    def test_fewer_than_three_blocks_is_rejected(self):
+        df = _labelled(_frame(40), 20)
+        pipeline = TransactionPipeline(seq_len=5, features=["volume"])
+        with pytest.raises(ValueError, match="blocks"):
+            pipeline.process_blocks(
+                df, (0.7, 0.15, 0.15), 1, 0.0, np.random.default_rng(0)
             )
 
 
@@ -537,6 +716,63 @@ class TestAnomalyInjectors:
         b = _block()
         out = inject_benign_spike(b, np.random.default_rng(3))
         assert (out["volume"] > b["volume"] * 1.9).any()
+
+
+def _normal_frame(preset: str) -> pd.DataFrame:
+    """The preset's normal process alone: no anomalies or spikes, 200 blocks."""
+    synthetic = DignityConfig.from_yaml(str(ROOT / preset)).data.synthetic
+    normal = dataclasses.replace(
+        synthetic, contamination=0.0, benign_spike_rate=0.0, n_blocks=200
+    )
+    return SyntheticGenerator(normal).generate()
+
+
+class TestGeneratorCalibration:
+    """The normal process matches the committed Bitstamp reference (DGNTY-11)."""
+
+    @pytest.mark.parametrize(
+        "preset", ["config/synthetic_easy.yaml"]
+    )  # M2.14 adds medium, hard
+    def test_normal_process_lands_inside_calibration_bands(self, preset):
+        cfg = DignityConfig.from_yaml(str(ROOT / preset))
+        assert cfg.data.synthetic.block_len == CALIBRATION_CHUNK_LEN  # estimator parity
+        df = _normal_frame(preset)
+        stats = calibration_stats(df["price"].to_numpy(), df["volume"].to_numpy())
+        bands = load_reference_stats()
+        outside = {
+            k: (v, bands[k]["min"], bands[k]["max"])
+            for k, v in stats.items()
+            if not bands[k]["min"] <= v <= bands[k]["max"]
+        }
+        assert outside == {}
+
+
+class TestNormalProcessPlausibility:
+    """fee_rate and tx_count are not calibrated (v1.1), only kept plausible."""
+
+    def test_fee_rate_has_a_nonzero_iqr(self):  # DGNTY-17
+        fee = _normal_frame("config/synthetic_easy.yaml")["fee_rate"].to_numpy()
+        q25, q75 = np.percentile(fee, [25, 75])
+        assert q75 > q25
+
+    def test_tx_count_tracks_volume_within_blocks(self):
+        df = _normal_frame("config/synthetic_easy.yaml")
+        corr = df.groupby("block_id")[["tx_count", "volume"]].apply(
+            lambda b: np.corrcoef(b["tx_count"], b["volume"])[0, 1]
+        )
+        assert corr.median() > 0.5
+
+    def test_tx_count_is_overdispersed(self):
+        df = _normal_frame("config/synthetic_easy.yaml")
+        tx = df.groupby("block_id")["tx_count"]
+        assert (tx.var() / tx.mean()).median() > 1
+
+    def test_generalized_fee_rate_keeps_at_least_eight_classes(self):  # DGNTY-17
+        shipped = DignityConfig.from_yaml(str(ROOT / "config/train_risk.yaml")).privacy
+        bins = shipped.features["fee_rate"].bins  # the shipped settings, not literals
+        fee = _normal_frame("config/synthetic_easy.yaml")["fee_rate"].to_numpy()
+        out = PrivacyManager.generalize_amounts(fee, bins=bins, k=shipped.k)
+        assert len(np.unique(out)) >= bins - 2
 
 
 if __name__ == "__main__":
