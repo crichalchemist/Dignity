@@ -9,18 +9,11 @@ class SignalProcessor:
 
     @staticmethod
     def volatility(values: np.ndarray, window: int = 20) -> np.ndarray:
-        """Calculate rolling volatility (standard deviation)."""
-        if len(values) < window:
-            return np.zeros_like(values)
-
+        """Rolling std of the `window` rows before row i (fewer during warm-up;
+        0 at row 0). Never reads row i or later."""
         result = np.zeros_like(values)
-        for i in range(window, len(values)):
-            result[i] = np.std(values[i - window : i])
-
-        # Fill initial values with first valid volatility
-        if window < len(values):
-            result[:window] = result[window]
-
+        for i in range(1, len(values)):
+            result[i] = np.std(values[max(0, i - window) : i])
         return result
 
     @staticmethod
