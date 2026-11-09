@@ -8,6 +8,12 @@ from .head.forecast import ForecastHead
 from .head.policy import PolicyHead
 from .head.risk import RiskHead
 
+_HEAD_KWARGS = {
+    "risk": {"head_hidden"},
+    "forecast": {"pred_len", "num_features", "head_hidden"},
+    "policy": {"n_actions", "head_hidden"},
+}
+
 
 class Dignity(nn.Module):
     """
@@ -27,6 +33,7 @@ class Dignity(nn.Module):
         hidden_size: int = 256,
         n_layers: int = 2,
         dropout: float = 0.1,
+        cnn_kernel_size: int = 3,
         **task_kwargs,
     ):
         """
@@ -36,9 +43,18 @@ class Dignity(nn.Module):
             hidden_size: Backbone hidden size
             n_layers: Number of LSTM layers
             dropout: Dropout probability
+            cnn_kernel_size: CNN kernel size in the backbone
             **task_kwargs: Additional task-specific arguments
         """
         super().__init__()
+
+        if task not in _HEAD_KWARGS:
+            raise ValueError(f"Unknown task: {task}")
+        unknown = set(task_kwargs) - _HEAD_KWARGS[task]
+        if unknown:
+            raise TypeError(
+                f"unexpected head kwargs for task={task!r}: {sorted(unknown)}"
+            )
 
         self.task = task
 
@@ -48,6 +64,7 @@ class Dignity(nn.Module):
             hidden_size=hidden_size,
             n_layers=n_layers,
             dropout=dropout,
+            cnn_kernel_size=cnn_kernel_size,
         )
 
         # Task-specific head

@@ -7,7 +7,7 @@ import pandas as pd
 import pytest
 import yaml
 
-from core.config import DignityConfig, PrivacyConfig
+from core.config import DataConfig, DignityConfig, PrivacyConfig
 from core.signals import SignalProcessor
 from data.source.synthetic import SyntheticGenerator
 
@@ -131,6 +131,23 @@ class TestDignityConfig:
         root = Path(__file__).resolve().parents[1]
         lines = (root / ".gitignore").read_text().splitlines()
         assert "runs/" in lines and "checkpoints/" in lines
+
+    def test_unknown_top_level_key_is_rejected(self, tmp_path):
+        p = tmp_path / "c.yaml"
+        p.write_text(yaml.safe_dump({"model": {}, "trainer": {"epochs": 1}}))
+        with pytest.raises(TypeError, match="trainer"):
+            DignityConfig.from_yaml(str(p))
+
+    # guards the unknown-key and data.source checks against every shipped preset
+    def test_every_shipped_config_still_loads(self):
+        paths = sorted((Path(__file__).parent.parent / "config").glob("*.yaml"))
+        assert paths
+        for p in paths:
+            DignityConfig.from_yaml(str(p))
+
+    def test_unsupported_data_source_is_rejected_not_silently_synthetic(self):
+        with pytest.raises(ValueError, match="crypto"):
+            DataConfig(source="crypto")
 
 
 def _valid_privacy_block():

@@ -1,6 +1,6 @@
 """Configuration management for Dignity models and training."""
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from pathlib import Path
 
 import yaml
@@ -18,11 +18,15 @@ class ModelConfig:
     cnn_kernel_size: int = 3
 
 
+_SOURCES = ("synthetic",)
+
+
 @dataclass
 class DataConfig:
     """Data pipeline configuration."""
 
-    source: str = "synthetic"  # synthetic, crypto, gdelt
+    # only "synthetic" in v1.0; other sources are v1.1 (DGNTY-41)
+    source: str = "synthetic"
     seq_len: int = 100
     batch_size: int = 64
     test_size: float = 0.2
@@ -40,6 +44,13 @@ class DataConfig:
             "regime",
         ]
     )
+
+    def __post_init__(self):
+        if self.source not in _SOURCES:
+            raise ValueError(
+                f"data.source={self.source!r} is not supported in v1.0; "
+                f"expected one of {_SOURCES}"
+            )
 
 
 @dataclass
@@ -149,6 +160,10 @@ class DignityConfig:
         """Load configuration from YAML file."""
         with open(path) as f:
             config_dict = yaml.safe_load(f)
+
+        unknown = sorted(set(config_dict) - {f.name for f in fields(cls)})
+        if unknown:
+            raise TypeError(f"unknown top-level config keys: {unknown}")
 
         return cls(
             model=ModelConfig(**config_dict.get("model", {})),
