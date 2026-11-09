@@ -290,6 +290,18 @@ class TestFit:
         with pytest.raises(RuntimeError, match="pr_auc"):
             fit(tiny_fit_config, tiny_split, seed=0, run_dir=str(tmp_path))
 
+    def test_a_stale_best_checkpoint_is_not_mistaken_for_this_runs(
+        self, tiny_split, tiny_fit_config, tmp_path, monkeypatch
+    ):
+        # J2: another run's best.pt sitting in run_dir must not satisfy a fit that
+        # itself never selected a checkpoint
+        fit(tiny_fit_config, tiny_split, seed=0, run_dir=str(tmp_path))
+        assert (tmp_path / "best.pt").exists()
+        nan = float("nan")
+        _script_val_metrics(monkeypatch, [nan] * 3, [0.9, 0.6, 0.95])
+        with pytest.raises(RuntimeError, match="pr_auc"):
+            fit(tiny_fit_config, tiny_split, seed=0, run_dir=str(tmp_path))
+
     def test_a_run_leaves_a_self_describing_record_of_every_epoch(
         self, tiny_split, tiny_fit_config, tmp_path
     ):

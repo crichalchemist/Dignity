@@ -199,6 +199,7 @@ def fit(
 
     history: list[dict] = []
     stale = 0
+    wrote_best = False
     for epoch in range(start_epoch, epochs + 1):
         lr = optimizer.param_groups[0]["lr"]  # the lr this epoch trains with
         train_metrics = train_epoch(
@@ -226,6 +227,7 @@ def fit(
         if selected > best_metric:
             best_metric = selected
             stale = 0
+            wrote_best = True
             save_checkpoint(
                 out / "best.pt",
                 model,
@@ -279,7 +281,8 @@ def fit(
     history_path.write_text(json.dumps(previous + history, indent=2))
 
     best_path = out / "best.pt"
-    if not best_path.exists():
+    # a best.pt left by an earlier run does not count; a resumed run keeps its own
+    if not (wrote_best or (resume_from and best_path.exists())):
         raise RuntimeError(
             f"no best checkpoint was written: validation {config.train.select_metric} "
             f"never improved (NaN or no epochs run) in run_dir {out}"

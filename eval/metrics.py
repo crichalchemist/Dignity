@@ -164,7 +164,9 @@ def forecast_metrics(
 
     ``y`` and ``score`` are ``[N, H]``; ``mask`` drops windows whose last row is
     inside an active anomaly (their score reacts to it, it is not a warning).
-    A horizon with no positive reports ``None`` rather than a fake score.
+    A horizon whose masked column lacks a positive or a negative (or has no rows)
+    reports ``None`` rather than a fake score; its prevalence is ``None`` when
+    the mask selects no row.
     """
     y = np.asarray(y)
     score = np.asarray(score)
@@ -174,7 +176,7 @@ def forecast_metrics(
     by_horizon = []
     for h in range(y.shape[1]):
         yh, sh = y[mask, h], score[mask, h]
-        if not (yh == 1).any():
+        if len(np.unique(yh)) < 2:
             by_horizon.append({"value": None, "ci_low": None, "ci_high": None})
             continue
 
@@ -184,7 +186,9 @@ def forecast_metrics(
         by_horizon.append(_entry(pr_auc(yh, sh), stat, blocks, n_boot, seed))
     return {
         "pr_auc_by_horizon": by_horizon,
-        "prevalence_by_horizon": [float(y[mask, h].mean()) for h in range(y.shape[1])],
+        "prevalence_by_horizon": [
+            float(y[mask, h].mean()) if mask.any() else None for h in range(y.shape[1])
+        ],
     }
 
 

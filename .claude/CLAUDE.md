@@ -45,9 +45,10 @@ format that export no longer supports (DGNTY-3, DGNTY-35). No shipped config wri
 ## Commands
 
 ```bash
-# Tests (258 collected: test_core 41, test_data 68, test_models 14, test_privacy 34,
-# test_operator 4, test_docs 4, test_train 27, test_checkpoint 3, test_export 7,
-# test_calibration 3, test_labels 7, test_gates 11, test_ci 3, test_eval 22, test_colab_eval 10 — one skips without CUDA)
+# Tests (292 collected: test_core 42, test_data 69, test_models 14, test_privacy 34,
+# test_operator 4, test_docs 4, test_train 41, test_checkpoint 3, test_export 7,
+# test_calibration 3, test_labels 7, test_gates 11, test_ci 3, test_eval 40,
+# test_colab_eval 10 — one skips without CUDA)
 # every test is limited to 300 s (pytest.ini; pytest-timeout)
 pytest tests/ -v
 pytest tests/test_models.py -v                       # one file
@@ -64,6 +65,7 @@ pytest tests/ --cov --cov-fail-under=100
 
 python -m eval.gates --seed 1000   # data gate; tuning seed only, refuses 2026
 python -m eval.run --smoke --seed tuning  # CI-sized end-to-end evaluation; outputs under runs/smoke/
+python -m eval.run --smoke --seed tuning --tasks risk,forecast  # --tasks forecast also fits risk (baseline) but writes only forecast.json
 python -m eval.run --config config/synthetic_hard.yaml --seed tuning  # full run on a Colab GPU; see docs/RESULTS.md
 
 # Train
@@ -100,7 +102,7 @@ train/engine.py                     →  train_epoch / predict
 train/loop.py fit                  →  shared loop (cli, notebook, eval.run); best.pt on val PR-AUC
 train/checkpoint.py                 →  self-describing checkpoints (FORMAT_VERSION 2) / build_model_from_meta
 train/losses.py                     →  risk_loss, forecast_loss (masked per-horizon BCE)
-eval/{metrics,baselines,plots,run}.py → risk.json + charts; CIs bootstrap blocks, not windows
+eval/{metrics,baselines,plots,run}.py → risk.json, forecast.json + charts; CIs bootstrap blocks, not windows
 export/to_onnx.py                   →  export + verify + benchmark
 ```
 
@@ -147,6 +149,11 @@ a mechanism, it needs a test in `tests/test_privacy.py` or CI's 100% gate on tha
   run proves nothing about it; `tests/test_train.py` has a GPU-only test. If you ever switch the
   head to logits, switch the loss to `BCEWithLogitsLoss` in the same change and re-check ONNX
   consumers that expect probabilities.
+- **Forecast is early warning, and `eval.run` fits risk for it.** Forecast windows with an
+  anomaly active at their last row are masked out of the loss, the metrics and lead time
+  (`forecast_mask`). `--tasks forecast` (and later `policy`) also fits risk once per training
+  seed, because their baseline is today's risk score, but writes `risk.json` only when `risk`
+  is in `--tasks`. Each task trains under its own `eval_<seed>/<task>/train_seed_<s>/` directory.
 - **Timestamps are milliseconds everywhere.** `CryptoSource._normalize_timestamp` auto-detects
   seconds (`< 2e10`), ms (`2e10–3e13`), ns (`> 3e13`), and datetime strings, normalizing all to ms
   to match CCXT's native format. Any new data source must emit ms or a join against crypto data
