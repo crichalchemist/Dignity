@@ -4,6 +4,8 @@ Trained cost-sensitively (train/losses.expected_cost_loss); ONNX consumers get
 logits and apply softmax, then decide_actions.
 """
 
+import math
+
 import numpy as np
 import torch
 import torch.nn as nn
@@ -17,6 +19,27 @@ def cost_matrix(costs: dict[str, dict[str, float]]) -> np.ndarray:
     return np.array(
         [[costs[a]["normal"], costs[a]["anomaly"]] for a in ACTIONS], np.float32
     )
+
+
+def review_capacity(n: int, budget: float) -> int:
+    """Analyst capacity: how many of n cases may be sent to review."""
+    return math.floor(budget * n + 1e-9)
+
+
+def decide_actions(probs: np.ndarray, review_budget: float) -> np.ndarray:
+    """Argmax over ACTIONS, then the review cap.
+
+    Only the review_capacity most review-likely rows keep review; the rest go
+    to their next-best action (allow or block). Returns int64 [N].
+    """
+    actions = probs.argmax(1).astype(np.int64)
+    review = np.flatnonzero(actions == 1)
+    k = review_capacity(len(probs), review_budget)
+    if len(review) > k:
+        order = review[np.argsort(-probs[review, 1], kind="stable")]
+        over = order[k:]
+        actions[over] = np.where(probs[over, 0] >= probs[over, 2], 0, 2)
+    return actions
 
 
 class PolicyHead(nn.Module):

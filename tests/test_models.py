@@ -12,7 +12,13 @@ from models.backbone.hybrid import DignityBackbone
 from models.backbone.lstm import StackedLSTM
 from models.dignity import Dignity
 from models.head.forecast import ForecastHead
-from models.head.policy import ACTIONS, PolicyHead, cost_matrix
+from models.head.policy import (
+    ACTIONS,
+    PolicyHead,
+    cost_matrix,
+    decide_actions,
+    review_capacity,
+)
 from models.head.risk import RiskHead
 
 
@@ -173,3 +179,28 @@ class TestDignityModel:
     def test_head_kwarg_for_another_task_is_rejected(self):
         with pytest.raises(TypeError, match="horizon"):
             Dignity(task="risk", input_size=9, horizon=5)
+
+
+class TestDecisionRule:
+    PROBS = np.array(
+        [[0.05, 0.90, 0.05], [0.15, 0.80, 0.05], [0.25, 0.70, 0.05], [0.05, 0.60, 0.35]]
+        + [[0.90, 0.05, 0.05]] * 16
+    )
+
+    def test_reviews_over_analyst_capacity_go_to_their_next_best_action(self):
+        a = decide_actions(self.PROBS, review_budget=0.10)  # capacity 2 of 20
+        assert a[:4].tolist() == [1, 1, 0, 2] and (a[4:] == 0).all()
+
+    def test_reviews_within_capacity_are_left_alone(self):
+        a = decide_actions(self.PROBS, review_budget=0.25)  # capacity 5
+        assert a[:4].tolist() == [1, 1, 1, 1]
+
+    def test_review_capacity_survives_float_error_in_the_budget(self):
+        assert review_capacity(20, 0.05) == 1
+        assert review_capacity(100, 0.07) == 7  # 0.07 * 100 = 7.000000000000001
+        assert review_capacity(30, 0.1) == 3
+
+    def test_decisions_are_int64_indices_into_actions(self):
+        a = decide_actions(self.PROBS, review_budget=0.10)
+        assert a.dtype == np.int64 and a.shape == (20,)
+        assert set(a.tolist()) <= set(range(len(ACTIONS)))
