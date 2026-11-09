@@ -15,6 +15,7 @@ import hashlib
 import hmac
 import math
 import secrets
+from dataclasses import dataclass
 
 import numpy as np
 
@@ -23,6 +24,24 @@ _MIN_KEY_BYTES = 16
 
 class BudgetExhausted(ValueError):  # noqa: N818
     """Raised when a spend would exceed the configured epsilon total."""
+
+
+@dataclass(frozen=True)
+class Generalization:
+    """Equivalence classes fitted on one release, applicable to another.
+
+    Class ``c`` covers ``[boundaries[c-1], boundaries[c])`` with open ends, and is
+    released as ``representatives[c]``, the midpoint of the fit records' min and
+    max in that class. k holds on the fit data only.
+    """
+
+    boundaries: np.ndarray
+    representatives: np.ndarray
+
+    def apply(self, values: np.ndarray) -> np.ndarray:
+        """Map each value to the representative of the class it falls in."""
+        cls = np.searchsorted(self.boundaries, np.ravel(values), side="right")
+        return self.representatives[cls].reshape(np.shape(values))
 
 
 class PrivacyBudget:
@@ -153,6 +172,20 @@ class PrivacyManager:
         remain. Each record is replaced by the midpoint of its class's min and
         max, a function of the class alone. This is k-anonymity for this column
         as released; features derived from it downstream carry no k claim.
+        Equivalent to fitting and applying on the same release.
+        """
+        return PrivacyManager.fit_generalization(values, bins=bins, k=k).apply(values)
+
+    @staticmethod
+    def fit_generalization(
+        values: np.ndarray,
+        *,
+        bins: int = 10,
+        k: int = 5,
+    ) -> Generalization:
+        """Fit the k-anonymous classes of ``generalize_amounts`` on ``values``.
+
+        Apply the result to any release; k holds for the records fitted on.
         """
         if k < 2:
             raise ValueError("k must be at least 2")
@@ -166,11 +199,12 @@ class PrivacyManager:
         edges = np.unique(np.quantile(x, np.linspace(0.0, 1.0, bins + 1)))
         if edges.size < 2:
             # every value identical: one class of size n >= k
-            return np.full(np.shape(values), x[0])
+            return Generalization(np.empty(0), np.array([x[0]]))
 
         # bin i covers [edges[i], edges[i+1]); the last bin is closed on the right
         idx = np.searchsorted(edges, x, side="right") - 1
         idx = np.clip(idx, 0, edges.size - 2)
+        orig = idx.copy()
 
         while True:
             counts = np.bincount(idx, minlength=edges.size - 1)
@@ -189,8 +223,10 @@ class PrivacyManager:
             target = min(candidates, key=lambda b: (counts[b], b))
             idx[idx == i] = target
 
-        out = np.empty(n)
-        for b in np.unique(idx):
-            members = idx == b
-            out[members] = (x[members].min() + x[members].max()) / 2.0
-        return out.reshape(np.shape(values))
+        classes = np.unique(idx)
+        lowest = np.array([orig[idx == b].min() for b in classes])
+        reps = np.array(
+            [(x[idx == b].min() + x[idx == b].max()) / 2.0 for b in classes]
+        )
+        order = np.argsort(lowest)
+        return Generalization(edges[lowest[order][1:]], reps[order])
