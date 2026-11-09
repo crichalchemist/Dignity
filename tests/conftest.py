@@ -1,9 +1,18 @@
 """Pytest configuration and fixtures for Dignity tests."""
 
+import dataclasses
+from pathlib import Path
+
 import numpy as np
+import pandas as pd
 import pytest
 import torch
 import yaml
+
+from core.config import DignityConfig
+
+ROOT = Path(__file__).resolve().parents[1]
+EASY_PRESET = ROOT / "config" / "synthetic_easy.yaml"
 
 BASE_FEATURES = [
     "volume",
@@ -44,28 +53,48 @@ def reset_random_seeds():
 
 
 @pytest.fixture
-def tiny_train_config(tmp_path, monkeypatch):
-    """Factory for a CPU training config that runs in seconds."""
-    import train.cli
+def easy_config() -> DignityConfig:
+    """The shipped easy preset, resolved from the repo root, not the CWD."""
+    return DignityConfig.from_yaml(str(EASY_PRESET))
+
+
+@pytest.fixture(scope="session")
+def easy_frame() -> pd.DataFrame:
+    """Easy-preset event-record frame with 100 blocks, generated once per session.
+
+    Shared across tests: read it, never mutate it.
+    """
     from data.source.synthetic import SyntheticGenerator
 
-    class _Small(SyntheticGenerator):
-        def generate_dataset(self, num_normal=800, num_anomalous=200, seq_len=100):
-            return super().generate_dataset(
-                num_normal=40, num_anomalous=10, seq_len=seq_len
-            )
+    synthetic = DignityConfig.from_yaml(str(EASY_PRESET)).data.synthetic
+    return SyntheticGenerator(dataclasses.replace(synthetic, n_blocks=100)).generate()
 
-    monkeypatch.setattr(train.cli, "SyntheticGenerator", _Small)
+
+@pytest.fixture
+def tiny_train_config(tmp_path):
+    """Factory for a CPU training config that runs in seconds."""
 
     def make(name="tiny", **sections):
         cfg = {
-            "model": {"task": "risk", "hidden_size": 8, "n_layers": 1, "dropout": 0.0},
+            "model": {
+                "task": "risk",
+                "hidden_size": 8,
+                "n_layers": 1,
+                "dropout": 0.0,
+                "horizon": 5,
+            },
             "data": {
                 "seq_len": 10,
                 "batch_size": 64,
-                "test_size": 0.2,
                 "num_workers": 0,
                 "features": BASE_FEATURES,
+                "synthetic": {
+                    "n_blocks": 50,
+                    "block_len": 40,
+                    "contamination": 0.5,
+                    "duration_range": [3, 20],
+                    "seed": 0,
+                },
             },
             "train": {
                 "epochs": 1,

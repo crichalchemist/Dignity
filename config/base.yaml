@@ -8,12 +8,14 @@ model:
   n_layers: 2
   dropout: 0.1
   cnn_kernel_size: 3
+  horizon: 10  # forecast H
 
 data:
   source: synthetic  # only "synthetic" in v1.0; other sources are v1.1 (DGNTY-41)
   seq_len: 100
   batch_size: 64
-  test_size: 0.2
+  split: [0.7, 0.15, 0.15]  # train / val / test blocks
+  label_overlap: 0.0  # risk positive if anomaly overlap fraction > this
   num_workers: 4
   features:
     - volume
@@ -25,6 +27,21 @@ data:
     - directional_change
     - volume_volatility
     - regime
+# Event-record generator (data.synthetic) — commented out; every field at default.
+# To override, uncomment these lines in place: they nest under data: above.
+#   synthetic:
+#     n_blocks: 1000
+#     block_len: 160              # >= seq_len + horizon + 1
+#     contamination: 0.3
+#     anomalies_per_block: [1, 3]
+#     duration_range: [3, 60]
+#     severity_range: [0.3, 1.0]
+#     type_weights: {wash_trading: 1.0, pump_and_dump: 1.0, fee_spike: 1.0,
+#                    flash_crash: 1.0, layering: 1.0, fee_evasion: 1.0}
+#     benign_spike_rate: 0.0
+#     label_noise: 0.0
+#     regime_switch_prob: 0.0
+#     seed: 42
 
 train:
   epochs: 50

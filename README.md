@@ -56,14 +56,14 @@ pip install -e .
 #### Generate Synthetic Data
 
 ```python
+from core.config import DignityConfig
 from data.source.synthetic import SyntheticGenerator
 
-# Generate synthetic transaction sequences
-gen = SyntheticGenerator(seed=42)
-df = gen.generate_dataset(num_normal=800, num_anomalous=200, seq_len=120)
+cfg = DignityConfig.from_yaml("config/synthetic_easy.yaml")
+df = SyntheticGenerator(cfg.data.synthetic).generate()
 
 print(df.shape)
-# Output: (120000, 5) — 1000 sequences of 120 rows glued end to end, plus a label column
+# (32000, 10): 200 blocks x 160 hourly rows; the event-record columns label every row
 ```
 
 #### Privacy Operations

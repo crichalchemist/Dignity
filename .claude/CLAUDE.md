@@ -45,7 +45,7 @@ format that export no longer supports (DGNTY-3, DGNTY-35). No shipped config wri
 ## Commands
 
 ```bash
-# Tests (158 collected: test_core 27, test_data 46, test_models 14, test_privacy 34,
+# Tests (185 collected: test_core 34, test_data 66, test_models 14, test_privacy 34,
 # test_operator 4, test_docs 4, test_train 9, test_checkpoint 3, test_export 7,
 # test_calibration 3, test_labels 7 — one skips without CUDA)
 # every test is limited to 300 s (pytest.ini; pytest-timeout)
@@ -83,10 +83,13 @@ why `E402` is ignored for `data/`, `train/`, `export/`-adjacent trees in `pyproj
 One data path, one backbone, three interchangeable heads. The pieces only make sense together:
 
 ```
-data/source/{synthetic,crypto}.py   →  raw DataFrame (volume, price, fee_rate, tx_count[, label])
+data/source/synthetic.py            →  event-record frame: raw columns + block_id, is_anomalous,
+                                       anomaly_type, anomaly_id, block_label
+data/source/crypto.py               →  raw DataFrame (volume, price[, fee_rate, tx_count]), no labels
 core/privacy.py                     →  privacy stage: runs once per fit/transform, BEFORE signals
 data/pipeline.py TransactionPipeline→  compute_signals → RobustScaler → sliding windows
-                                       (process_blocks: per-sequence split for synthetic)
+                                       (process_blocks: block split 70/15/15 → SplitData)
+data/labels.py                      →  risk/forecast labels from the event record
 data/loader.py                      →  TransactionDataset (dict batches) / create_dataloader
 models/dignity.py Dignity           →  DignityBackbone + one head
 train/engine.py                     →  train_epoch / predict
@@ -117,15 +120,20 @@ a mechanism, it needs a test in `tests/test_privacy.py` or CI's 100% gate on tha
   `[f for f in self.features if f in df.columns]` and stores it as `self.available_features`.
   `compute_signals` only ever derives `volume_volatility`, `volatility`, `momentum`, and
   `directional_change`. So `base.yaml`'s 9-feature list resolves to **7** against synthetic data
-  (`price_change` and `regime` are never produced), and `train/cli.py` builds the model with
-  `input_size=len(pipeline.available_features)` — **`model.input_size` in YAML is ignored**.
+  (`price_change` and `regime` are never produced), and `train/cli.py` sizes the model from
+  `SplitData.feature_names` (the pipeline's `available_features`) — **`model.input_size`
+  in YAML is ignored**.
   If a model's input width is unexpected, check `available_features` first.
   The checkpoint stores `available_features` in order (`meta.feature_names`).
-- **Synthetic data is 1000 independent sequences glued end to end**, all normal blocks
-  first, then all anomalous. `train/cli.py` therefore uses `TransactionPipeline.process_blocks`
-  (block = `seq_len + 20` rows): shuffle and split at the block level, fit the scaler on train
-  blocks only, and compute signals and windows inside each block. Do not go back to
-  `process()` + a positional slice — that trained on 100% normal and validated on 100%
+- **Synthetic data is an event record of blocks, interleaved.** `SyntheticGenerator` writes one
+  row per step with `block_id`, `is_anomalous`, `anomaly_type`, `anomaly_id` and `block_label`;
+  normal and anomalous blocks are drawn independently, so they interleave. Labels come from the
+  per-row event record, never from a single row. Risk = overlap rule: a window is positive when its
+  anomalous fraction exceeds `data.label_overlap`, never "label of the last row". `create_sequences`
+  rejects 2-D targets; forecast targets come from `data.labels.forecast_labels`.
+  `train/cli.py` uses `TransactionPipeline.process_blocks`: shuffle and split blocks 70/15/15,
+  fit the scaler on train blocks only, and compute signals and windows inside each block. Do not
+  go back to `process()` + a positional slice — that trained on 100% normal and validated on 100%
   anomalous rows (val loss ≈ 42 in the January checkpoints).
 - **AMP and the risk loss.** `RiskHead` ends in a sigmoid and the risk criterion is `BCELoss`,
   which PyTorch refuses inside an autocast region. `train_epoch` therefore computes the loss

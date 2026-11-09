@@ -13,7 +13,7 @@ data:
   source: synthetic
   seq_len: 50  # Shorter sequences
   batch_size: 128  # Larger batches for GPU utilization
-  test_size: 0.15
+  split: [0.7, 0.15, 0.15]  # train / val / test blocks
   num_workers: 2
   features:
     - volume

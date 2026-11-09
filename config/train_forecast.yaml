@@ -13,7 +13,9 @@ data:
   source: synthetic
   seq_len: 200  # Longer sequences for forecasting
   batch_size: 32  # Smaller batch for memory
-  test_size: 0.2
+  split: [0.7, 0.15, 0.15]  # train / val / test blocks
+  synthetic:
+    block_len: 260  # seq_len 200 + horizon 10 + slack
   num_workers: 4
   features:
     - volume

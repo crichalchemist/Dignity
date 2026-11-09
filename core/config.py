@@ -1,6 +1,6 @@
 """Configuration management for Dignity models and training."""
 
-from dataclasses import dataclass, field, fields
+from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
 
 import yaml
@@ -16,9 +16,45 @@ class ModelConfig:
     n_layers: int = 2
     dropout: float = 0.1
     cnn_kernel_size: int = 3
+    horizon: int = 10  # forecast H; also reserved at the end of every block
 
 
 _SOURCES = ("synthetic",)
+
+# core/ must not import data/ (data/pipeline.py imports core.config), so the
+# six anomaly names are repeated here; tests pin them to ANOMALY_TYPES.
+_ANOMALY_NAMES = (
+    "wash_trading",
+    "pump_and_dump",
+    "fee_spike",
+    "flash_crash",
+    "layering",
+    "fee_evasion",
+)
+
+
+@dataclass
+class SyntheticConfig:
+    """Event-record generator parameters (data.synthetic)."""
+
+    n_blocks: int = 1000
+    block_len: int = 160  # must be >= data.seq_len + model.horizon + 1
+    contamination: float = 0.3  # P(block contains >= 1 anomaly)
+    anomalies_per_block: tuple[int, int] = (1, 3)  # inclusive, anomalous blocks
+    duration_range: tuple[int, int] = (3, 60)  # rows, inclusive
+    severity_range: tuple[float, float] = (0.3, 1.0)  # 0 invisible, 1 preset max
+    type_weights: dict[str, float] = field(
+        default_factory=lambda: dict.fromkeys(_ANOMALY_NAMES, 1.0)
+    )
+    benign_spike_rate: float = 0.0  # P(normal block gets an unlabelled burst)
+    label_noise: float = 0.0  # P(block label flipped)
+    regime_switch_prob: float = 0.0  # per-row P(Markov regime change)
+    seed: int = 42
+
+    def __post_init__(self):
+        self.anomalies_per_block = tuple(int(x) for x in self.anomalies_per_block)
+        self.duration_range = tuple(int(x) for x in self.duration_range)
+        self.severity_range = tuple(float(x) for x in self.severity_range)
 
 
 @dataclass
@@ -29,7 +65,6 @@ class DataConfig:
     source: str = "synthetic"
     seq_len: int = 100
     batch_size: int = 64
-    test_size: float = 0.2
     num_workers: int = 4
     features: list = field(
         default_factory=lambda: [
@@ -44,6 +79,9 @@ class DataConfig:
             "regime",
         ]
     )
+    split: tuple[float, float, float] = (0.7, 0.15, 0.15)  # train / val / test blocks
+    label_overlap: float = 0.0  # risk positive if overlap fraction > this
+    synthetic: SyntheticConfig = field(default_factory=SyntheticConfig)
 
     def __post_init__(self):
         if self.source not in _SOURCES:
@@ -51,6 +89,16 @@ class DataConfig:
                 f"data.source={self.source!r} is not supported in v1.0; "
                 f"expected one of {_SOURCES}"
             )
+        self.split = tuple(float(x) for x in self.split)
+        if len(self.split) != 3 or min(self.split) <= 0:
+            raise ValueError(
+                f"data.split={self.split} must be 3 positive fractions "
+                "(train, val, test)"
+            )
+        if abs(sum(self.split) - 1) >= 1e-9:
+            raise ValueError(f"data.split={self.split} must sum to 1")
+        if isinstance(self.synthetic, dict):
+            self.synthetic = SyntheticConfig(**self.synthetic)
 
 
 @dataclass
@@ -143,6 +191,19 @@ class PrivacyConfig:
         }
 
 
+def _yaml_safe(obj) -> dict:
+    """asdict with tuples turned into lists, so safe_load can read the dump."""
+
+    def convert(value):
+        if isinstance(value, dict):
+            return {k: convert(v) for k, v in value.items()}
+        if isinstance(value, (list, tuple)):
+            return [convert(v) for v in value]
+        return value
+
+    return convert(asdict(obj))
+
+
 @dataclass
 class DignityConfig:
     """Main configuration container."""
@@ -153,6 +214,14 @@ class DignityConfig:
     privacy: PrivacyConfig | None = None
     device: str = "cuda"
     seed: int = 42
+
+    def __post_init__(self):
+        need = self.data.seq_len + self.model.horizon + 1
+        if self.data.synthetic.block_len < need:
+            raise ValueError(
+                f"block_len={self.data.synthetic.block_len} must be >= seq_len + "
+                f"horizon + 1 = {need} (at least one row of slack)"
+            )
 
     @classmethod
     def from_yaml(cls, path: str) -> "DignityConfig":
@@ -180,9 +249,9 @@ class DignityConfig:
     def to_yaml(self, path: str) -> None:
         """Save configuration to YAML file."""
         config_dict = {
-            "model": self.model.__dict__,
-            "data": self.data.__dict__,
-            "train": self.train.__dict__,
+            "model": _yaml_safe(self.model),
+            "data": _yaml_safe(self.data),
+            "train": _yaml_safe(self.train),
             "device": self.device,
             "seed": self.seed,
         }

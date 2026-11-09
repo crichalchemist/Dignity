@@ -72,11 +72,16 @@ train_loader, val_loader = create_dataloaders(data, config, split=0.8)
 
 **source/synthetic.py** - Synthetic data generation
 ```python
+from core.config import DignityConfig
 from data.source.synthetic import SyntheticGenerator
 
-generator = SyntheticGenerator(num_entities=100, num_transactions=10000)
-data = generator.generate()
+cfg = DignityConfig.from_yaml("config/synthetic_easy.yaml")
+df = SyntheticGenerator(cfg.data.synthetic).generate()
 ```
+
+The generator writes an event record: one row per step, with `block_id`,
+`is_anomalous`, `anomaly_type`, `anomaly_id` and `block_label` beside the raw columns.
+`data/labels.py` derives the risk and forecast labels of each window from those rows.
 
 **Calibration** - `data/calibration/reference_stats.json` holds the bands the
 synthetic generator's statistics must fall inside. `python -m scripts.calibrate`
@@ -269,17 +274,19 @@ v1.0's documentation milestone.
 ## Data Flow Example
 
 ```python
+import numpy as np
 import torch
 
+from core.config import DignityConfig
 from core.privacy import PrivacyBudget, PrivacyManager
 from data.pipeline import TransactionPipeline
 from data.source.synthetic import SyntheticGenerator
 from models.dignity import Dignity
 
-# 1. Raw transaction frame: volume, price, fee_rate, tx_count per step, plus a label
-df = SyntheticGenerator(seed=42).generate_dataset(
-    num_normal=800, num_anomalous=200, seq_len=120
-)
+cfg = DignityConfig.from_yaml("config/synthetic_easy.yaml")
+
+# 1. Event-record frame: one row per step, raw columns plus block_id and the labels
+df = SyntheticGenerator(cfg.data.synthetic).generate()
 
 # 2. Privacy (see docs/PRIVACY.md). In training this is TransactionPipeline's
 #    privacy stage, driven by the `privacy:` config block and run once before
@@ -289,20 +296,27 @@ noisy_volume = pm.add_laplace_noise(
     df["volume"].to_numpy(), epsilon=1.0, bounds=(0.0, 1000.0)
 )
 
-# 3. Signals, scaling and sliding windows
-#    Shape: (num_windows, seq_len, num_features)
-pipeline = TransactionPipeline(
-    seq_len=100, features=["volume", "fee_rate", "tx_count", "volatility", "momentum"]
+# 3. Block split 70/15/15: the scaler is fit on train blocks, and signals and
+#    windows are computed inside each block. Labels come from the event record.
+pipeline = TransactionPipeline(seq_len=cfg.data.seq_len, features=cfg.data.features)
+data = pipeline.process_blocks(
+    df,
+    cfg.data.split,
+    cfg.model.horizon,
+    cfg.data.label_overlap,
+    np.random.default_rng(cfg.data.synthetic.seed),
 )
-sequences, targets = pipeline.process(df.drop(columns="label"), df["label"].to_numpy())
 
 # 4. Feed to model: Dignity.forward returns (predictions, attention_weights)
-model = Dignity(task="risk", input_size=len(pipeline.available_features))
-x = torch.as_tensor(sequences[:64], dtype=torch.float32)
-y = torch.as_tensor(targets[:64], dtype=torch.float32)
+#    data.train.X: (num_windows, seq_len, num_features)
+model = Dignity(task="risk", input_size=len(data.feature_names))
+x = torch.as_tensor(data.train.X[:64])
+y = torch.as_tensor(data.train.y_risk[:64], dtype=torch.float32)
 predictions, attention = model(x)
 
 # 5. Compute loss and update
+criterion = torch.nn.BCELoss()
+optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
 loss = criterion(predictions.squeeze(-1), y)
 loss.backward()
 optimizer.step()

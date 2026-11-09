@@ -7,9 +7,10 @@ import pandas as pd
 import pytest
 import yaml
 
-from core.config import DataConfig, DignityConfig, PrivacyConfig
+from core.config import DataConfig, DignityConfig, PrivacyConfig, SyntheticConfig
 from core.signals import SignalProcessor
-from data.source.synthetic import SyntheticGenerator
+from data.source.anomalies import ANOMALY_TYPES
+from data.source.synthetic import RAW_COLUMNS, SyntheticGenerator
 
 
 class TestSignalProcessor:
@@ -199,8 +200,8 @@ class TestPrivacyConfig:
     def test_shipped_risk_config_covers_every_raw_model_input(self):
         root = Path(__file__).resolve().parents[1] / "config"
         cfg = DignityConfig.from_yaml(str(root / "train_risk.yaml"))
-        raw_columns = set(SyntheticGenerator(seed=0).generate_normal_sequence(length=8))
-        raw_inputs = (raw_columns - {"label"}) & set(cfg.data.features)
+        raw_columns = set(RAW_COLUMNS)
+        raw_inputs = raw_columns & set(cfg.data.features)
         assert raw_inputs, (
             "shipped features must include at least one raw source column"
         )
@@ -231,3 +232,48 @@ class TestPrivacyConfig:
         mutate(block)
         with pytest.raises(ValueError, match=match):
             PrivacyConfig(**block)
+
+
+def _write(tmp_path, **sections):
+    path = tmp_path / "c.yaml"
+    path.write_text(yaml.safe_dump(sections))
+    return str(path)
+
+
+class TestSyntheticConfig:
+    def test_synthetic_block_loads_with_tuple_ranges(self, tmp_path):
+        cfg = DignityConfig.from_yaml(
+            _write(tmp_path, data={"synthetic": {"duration_range": [5, 9]}})
+        )
+        assert isinstance(cfg.data.synthetic, SyntheticConfig)
+        assert cfg.data.synthetic.duration_range == (5, 9)
+        assert cfg.data.split == (0.7, 0.15, 0.15)
+
+    def test_unknown_synthetic_key_is_rejected(self, tmp_path):
+        with pytest.raises(TypeError, match="nope"):
+            DignityConfig.from_yaml(_write(tmp_path, data={"synthetic": {"nope": 1}}))
+
+    def test_block_must_hold_a_window_plus_the_horizon(self):
+        with pytest.raises(ValueError, match="block_len"):
+            DignityConfig(
+                data=DataConfig(seq_len=100, synthetic=SyntheticConfig(block_len=110))
+            )
+
+    def test_split_fractions_must_sum_to_one(self):
+        with pytest.raises(ValueError, match="split"):
+            DataConfig(split=(0.7, 0.2, 0.2))
+
+    def test_split_must_name_train_val_and_test(self):
+        # [0.8, 0.2] sums to 1 but leaves process_blocks no test fraction
+        with pytest.raises(ValueError, match="data.split"):
+            DataConfig(split=[0.8, 0.2])
+        with pytest.raises(ValueError, match="data.split"):
+            DataConfig(split=[0.9, 0.1, 0.0])
+
+    def test_default_type_weights_cover_every_anomaly_type(self):
+        assert set(SyntheticConfig().type_weights) == set(ANOMALY_TYPES)
+
+    def test_config_with_synthetic_block_round_trips_through_yaml(self, tmp_path):
+        cfg = DignityConfig()
+        cfg.to_yaml(str(tmp_path / "c.yaml"))
+        assert DignityConfig.from_yaml(str(tmp_path / "c.yaml")) == cfg

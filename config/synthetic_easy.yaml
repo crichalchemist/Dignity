@@ -1,0 +1,52 @@
+# Synthetic preset: easy
+# Full config (base sections plus data.synthetic). One long, strong anomaly in half
+# the blocks; no benign spikes, label noise or regime switching.
+
+model:
+  task: risk  # risk, forecast, policy
+  input_size: 9
+  hidden_size: 256
+  n_layers: 2
+  dropout: 0.1
+  cnn_kernel_size: 3
+  horizon: 10  # forecast H
+
+data:
+  source: synthetic  # only "synthetic" in v1.0; other sources are v1.1 (DGNTY-41)
+  seq_len: 100
+  batch_size: 64
+  split: [0.7, 0.15, 0.15]  # train / val / test blocks
+  label_overlap: 0.0  # risk positive if anomaly overlap fraction > this
+  num_workers: 4
+  features:
+    - volume
+    - fee_rate
+    - tx_count
+    - volatility
+    - price_change
+    - momentum
+    - directional_change
+    - volume_volatility
+    - regime
+  synthetic:
+    n_blocks: 200
+    block_len: 160              # >= seq_len + horizon + 1
+    contamination: 0.5
+    anomalies_per_block: [1, 1]
+    duration_range: [30, 60]
+    severity_range: [0.9, 1.0]
+    benign_spike_rate: 0.0
+    label_noise: 0.0
+    regime_switch_prob: 0.0
+
+train:
+  epochs: 50
+  lr: 0.0003
+  weight_decay: 0.00001
+  use_amp: true
+  gradient_clip: 1.0
+  checkpoint_dir: ./runs/easy
+  save_interval: 5
+
+device: cuda
+seed: 42

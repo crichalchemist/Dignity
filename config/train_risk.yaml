@@ -13,7 +13,7 @@ data:
   source: synthetic
   seq_len: 100
   batch_size: 64
-  test_size: 0.2
+  split: [0.7, 0.15, 0.15]  # train / val / test blocks
   num_workers: 4
   features:
     - volume
@@ -36,8 +36,8 @@ train:
   save_interval: 10
 
 # Privacy stage (see docs/PRIVACY.md). Runs on raw columns before signals.
-# bounds are public parameters chosen a priori for the synthetic generator:
-# volume walks from 100 with sigma 20/step; price walks from 100 at 1%/step.
+# bounds are public parameters chosen a priori. They predate the v1.0 event-record
+# generator and do not match its output; M5 (DGNTY-8) re-derives them.
 # These values exercise the stage; they are not tuned for model quality
 # (noise scale = width/epsilon: 2000 for volume, 1000 for price).
 privacy:

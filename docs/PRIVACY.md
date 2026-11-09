@@ -113,12 +113,14 @@ width/ε = 2000 for `volume` and 1000 for `price` — far above the synthetic
 signal, so released values carry little information about the source. Because
 the feature epsilons sum to `epsilon_total`, a pipeline instance can release
 **once**: `process_blocks` (what `train/cli.py` calls) spends the whole budget in
-a single release and only then splits train/val, and any later `transform`
-raises `BudgetExhausted`. `generalize` needs at least `k` rows per release, so a fitted pipeline
-cannot score batches smaller than `k` with the stage on.
+a single release and only then splits train/val/test by block, and any later
+`transform` raises `BudgetExhausted`. `generalize` needs at least `k` rows per
+release, so a fitted pipeline cannot score batches smaller than `k` with the
+stage on.
 
-`dignity-train` prints `Privacy: ε spent X of Y` after preprocessing so the
-ledger is visible, not theoretical.
+`dignity-train` prints `Privacy: ε spent per split: train X, val X, test X`
+(each to three decimals) after preprocessing so the ledger is visible, not
+theoretical.
 
 ## What is not here
 

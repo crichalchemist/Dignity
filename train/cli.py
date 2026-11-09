@@ -58,11 +58,7 @@ def main(argv: list[str] | None = None) -> None:
 
     # Generate/load data
     print("\nGenerating synthetic data...")
-    generator = SyntheticGenerator(seed=config.seed)
-    block_len = config.data.seq_len + 20  # each block yields 21 windows
-    df_train = generator.generate_dataset(
-        num_normal=800, num_anomalous=200, seq_len=block_len
-    )
+    df = SyntheticGenerator(config.data.synthetic).generate()
 
     # Prepare data pipeline
     print("Preprocessing data...")
@@ -72,28 +68,31 @@ def main(argv: list[str] | None = None) -> None:
         privacy=config.privacy,
     )
 
-    # Split at the sequence level: every generated block is one independent
+    # Split at the block level: every generated block is one independent
     # sequence, so the split, the scaler fit, signals and windows all stay
-    # inside blocks. A positional split over the concatenated frame put every
-    # normal block in train and every anomalous block in val.
-    (X_train, y_train), (X_val, y_val) = pipeline.process_blocks(
-        df_train.drop(columns="label"),
-        df_train["label"].to_numpy(),
-        block_len=block_len,
-        test_size=config.data.test_size,
-        rng=np.random.default_rng(config.seed),
+    # inside blocks. data.test stays untouched here.
+    data = pipeline.process_blocks(
+        df,
+        config.data.split,
+        config.model.horizon,
+        config.data.label_overlap,
+        np.random.default_rng(config.data.synthetic.seed),
     )
+    y_val = data.val.y_risk
 
-    if pipeline.privacy_manager is not None:
-        budget = pipeline.privacy_manager.budget
-        print(f"Privacy: ε spent {budget.spent:.3f} of {budget.epsilon_total:.3f}")
+    if data.epsilon_spent:
+        spent = ", ".join(f"{k} {v:.3f}" for k, v in data.epsilon_spent.items())
+        print(f"Privacy: ε spent per split: {spent}")
 
-    print(f"Train sequences: {len(X_train)}, Val sequences: {len(X_val)}")
+    print(
+        f"Train/Val/Test windows: {len(data.train.X)}/{len(data.val.X)}/"
+        f"{len(data.test.X)}"
+    )
 
     # Create dataloaders
     train_loader = create_dataloader(
-        X_train,
-        {"y": y_train},
+        data.train.X,
+        {"y": data.train.y_risk},
         batch_size=config.data.batch_size,
         shuffle=True,
         num_workers=config.data.num_workers,
@@ -101,7 +100,7 @@ def main(argv: list[str] | None = None) -> None:
     )
 
     val_loader = create_dataloader(
-        X_val,
+        data.val.X,
         {"y": y_val},
         batch_size=config.data.batch_size,
         shuffle=False,
@@ -113,9 +112,9 @@ def main(argv: list[str] | None = None) -> None:
     print("\nInitializing model...")
     meta = make_meta(
         config,
-        pipeline.available_features,
-        pipeline.scaler.center_,
-        pipeline.scaler.scale_,
+        data.feature_names,
+        data.scaler_center,
+        data.scaler_scale,
     )
     model = build_model_from_meta(meta).to(device)
 

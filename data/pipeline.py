@@ -1,14 +1,41 @@
 """Data pipeline for preprocessing transaction sequences."""
 
 import os
+from dataclasses import dataclass
 
 import numpy as np
 import pandas as pd
+from numpy.lib.stride_tricks import sliding_window_view
 from sklearn.preprocessing import RobustScaler
 
 from core.config import PrivacyConfig
 from core.privacy import PrivacyBudget, PrivacyManager
 from core.signals import SignalProcessor
+from data.labels import forecast_labels, risk_labels, window_meta, window_starts
+
+
+@dataclass
+class WindowSet:
+    """Windows of one split with every label the three heads need."""
+
+    X: np.ndarray  # float32 [N, seq_len, F]
+    y_risk: np.ndarray  # int8 [N]
+    y_forecast: np.ndarray  # float32 [N, H]
+    forecast_mask: np.ndarray  # bool [N]
+    block_index: np.ndarray  # int64 [N], block_id of each window
+    onset_offset: np.ndarray  # int64 [N], row of first anomalous row, -1 if none
+    anomaly_type: np.ndarray  # object [N], dominant type in window or "none"
+
+
+@dataclass
+class SplitData:
+    train: WindowSet
+    val: WindowSet
+    test: WindowSet
+    feature_names: list[str]
+    scaler_center: np.ndarray
+    scaler_scale: np.ndarray
+    epsilon_spent: dict[str, float]  # per split; {} if no privacy
 
 
 class TransactionPipeline:
@@ -153,53 +180,119 @@ class TransactionPipeline:
     def process_blocks(
         self,
         df: pd.DataFrame,
-        labels: np.ndarray,
-        block_len: int,
-        test_size: float,
+        split: tuple[float, float, float],
+        horizon: int,
+        overlap: float,
         rng,
-    ) -> tuple[tuple[np.ndarray, np.ndarray], tuple[np.ndarray, np.ndarray]]:
-        """Fit, scale and window a frame made of independent equal-length blocks.
+    ) -> SplitData:
+        """Split an event-record frame by block and window each split.
 
-        ``df`` holds ``n_blocks * block_len`` rows of concatenated sequences, the
-        layout ``SyntheticGenerator.generate_dataset`` produces. Blocks are
-        shuffled with ``rng`` and split at the block level, the scaler is fit on
-        the training blocks only, and signals and windows are computed inside
-        each block so nothing crosses a joint. The privacy stage runs once on the
-        whole frame before the split, as a single release.
-
-        Returns ``((X_train, y_train), (X_val, y_val))``.
+        ``df`` is the generator's event record: one row per step with a
+        ``block_id`` column plus ``is_anomalous``, ``anomaly_type`` and
+        ``anomaly_id``. Blocks are shuffled with ``rng`` (its only use) and split
+        at the block level into train/val/test by the ``split`` fractions. The
+        privacy stage releases once (see ``_release``), the scaler is fit on the
+        train blocks only, and signals and windows are computed inside each
+        block so nothing crosses a joint. Labels come from ``data.labels``.
         """
-        n_blocks, remainder = divmod(len(df), block_len)
-        if remainder or n_blocks < 2:
+        ids = np.unique(df["block_id"])
+        if len(ids) < 3:
             raise ValueError(
-                f"{len(df)} rows do not form at least two blocks of "
-                f"block_len={block_len}"
+                f"need at least 3 blocks for a train/val/test split, got {len(ids)}"
+            )
+        lengths = df.groupby("block_id", sort=False).size()
+        if (lengths < self.seq_len + horizon).any():
+            raise ValueError(
+                f"every block needs seq_len + horizon = {self.seq_len + horizon} "
+                f"rows; shortest block has {int(lengths.min())}"
             )
 
-        prepared = self._apply_privacy(df)
-        bounds = [(i * block_len, (i + 1) * block_len) for i in range(n_blocks)]
-        blocks = [prepared.iloc[lo:hi] for lo, hi in bounds]
-        block_labels = [labels[lo:hi] for lo, hi in bounds]
+        n = len(ids)
+        order = np.asarray(rng.permutation(n))
+        n_val = max(1, round(n * split[1]))
+        n_test = max(1, round(n * split[2]))
+        n_train = n - n_val - n_test
+        if n_train < 1:
+            raise ValueError(f"split {split} leaves no train blocks out of {n}")
+        parts = {
+            "train": ids[order[:n_train]],
+            "val": ids[order[n_train : n_train + n_val]],
+            "test": ids[order[n_train + n_val :]],
+        }
 
-        order = np.asarray(rng.permutation(n_blocks))
-        n_val = min(max(round(n_blocks * test_size), 1), n_blocks - 1)
-        val_ids, train_ids = order[:n_val], order[n_val:]
+        frames = {name: df[df["block_id"].isin(b)] for name, b in parts.items()}
+        frames, epsilon_spent = self._release(frames)
 
         self._fit_scaler(
-            pd.concat([self.compute_signals(blocks[i]) for i in train_ids])
+            pd.concat(
+                [
+                    self.compute_signals(block)
+                    for _, block in frames["train"].groupby("block_id", sort=False)
+                ]
+            )
         )
 
-        def windows(ids: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-            xs, ys = [], []
-            for i in ids:
-                x_seq, y_seq = self.create_sequences(
-                    self._transform_on(blocks[i]), block_labels[i]
-                )
-                xs.append(x_seq)
-                ys.append(y_seq)
-            return np.concatenate(xs), np.concatenate(ys)
+        sets = {
+            name: self._windows(frame, horizon, overlap)
+            for name, frame in frames.items()
+        }
+        return SplitData(
+            train=sets["train"],
+            val=sets["val"],
+            test=sets["test"],
+            feature_names=list(self.available_features),
+            scaler_center=self.scaler.center_.copy(),
+            scaler_scale=self.scaler.scale_.copy(),
+            epsilon_spent=epsilon_spent,
+        )
 
-        return windows(train_ids), windows(val_ids)
+    def _release(
+        self, frames: dict[str, pd.DataFrame]
+    ) -> tuple[dict[str, pd.DataFrame], dict[str, float]]:
+        """Apply the privacy stage to the split frames; report epsilon per split.
+
+        M2: one release over all splits together, so every split reports the
+        epsilon of that single release. No privacy => frames unchanged, ``{}``.
+        """
+        if self.privacy_manager is None:
+            return frames, {}
+        before = self.privacy_manager.budget.spent
+        names = list(frames)
+        released = self._apply_privacy(pd.concat([frames[k] for k in names]))
+        spent = self.privacy_manager.budget.spent - before
+        return (
+            {
+                k: released[released["block_id"].isin(frames[k]["block_id"])]
+                for k in names
+            },
+            dict.fromkeys(names, float(spent)),
+        )
+
+    def _windows(self, frame: pd.DataFrame, horizon: int, overlap: float) -> WindowSet:
+        """Window every block of ``frame`` and attach labels from the event record."""
+        parts = []
+        for block_id, block in frame.groupby("block_id", sort=False):
+            x_block = self._transform_on(block)
+            starts = window_starts(len(block), self.seq_len, horizon)
+            x = sliding_window_view(x_block, self.seq_len, axis=0)[starts]
+            flags = block["is_anomalous"].to_numpy(dtype=bool, copy=True)
+            types = block["anomaly_type"].to_numpy(dtype=object, copy=True)
+            aid = block["anomaly_id"].to_numpy(copy=True)
+            y_fc, mask = forecast_labels(aid, flags, starts, self.seq_len, horizon)
+            onset, dominant = window_meta(flags, types, starts, self.seq_len)
+            parts.append(
+                (
+                    x.transpose(0, 2, 1).astype(np.float32),
+                    risk_labels(flags, starts, self.seq_len, overlap),
+                    y_fc,
+                    mask,
+                    np.full(len(starts), block_id, dtype=np.int64),
+                    onset,
+                    dominant,
+                )
+            )
+        cols = [np.concatenate(c) for c in zip(*parts, strict=True)]
+        return WindowSet(*cols)
 
     def _fit_on(self, df: pd.DataFrame) -> None:
         """Fit the scaler. ``df`` must already have had privacy applied."""
@@ -235,7 +328,7 @@ class TransactionPipeline:
 
         Args:
             X: Feature array [n_samples, n_features]
-            y: Optional labels [n_samples] or [n_samples, label_dim]
+            y: Optional labels [n_samples]
             stride: Stride for sliding window
 
         Returns:
@@ -264,24 +357,15 @@ class TransactionPipeline:
         # Handle labels
         y_seq = None
         if y is not None:
-            if y.ndim == 1:
-                # Classification labels (take label at sequence end)
-                y_seq = np.array(
-                    [y[i * stride + self.seq_len - 1] for i in range(n_sequences)]
+            if y.ndim != 1:
+                raise ValueError(
+                    "2-D targets are not supported; build forecast targets with "
+                    "data.labels.forecast_labels"
                 )
-            else:
-                # Regression targets (take window after sequence)
-                pred_len = y.shape[1] if y.ndim > 1 else 1
-                y_seq = np.array(
-                    [
-                        y[
-                            i * stride + self.seq_len : i * stride
-                            + self.seq_len
-                            + pred_len
-                        ]
-                        for i in range(n_sequences)
-                    ]
-                )
+            # Classification labels (take label at sequence end)
+            y_seq = np.array(
+                [y[i * stride + self.seq_len - 1] for i in range(n_sequences)]
+            )
 
         return X_seq, y_seq
 
