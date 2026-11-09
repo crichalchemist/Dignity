@@ -1,10 +1,15 @@
 import json
+import time
 
 import numpy as np
+import pandas as pd
 import pytest
 
 import eval.metrics as metrics_module
+from eval.baselines import block_tree
 from eval.metrics import bootstrap_ci, model_gate, risk_metrics, threshold_at_fpr
+from eval.plots import plot_per_type_recall, plot_pr_curves
+from eval.run import config_hash, main
 
 Y = np.array([0, 0, 0, 0, 1, 1, 1, 1])
 S = np.array([0.1, 0.2, 0.3, 0.4, 0.9, 0.8, 0.35, 0.05])
@@ -106,3 +111,137 @@ class TestModelGate:
             model_gate(
                 {"value": 0.6, "ci_low": None, "ci_high": None}, {"m": {"value": 0.1}}
             )
+
+
+class TestBaselines:
+    def test_block_tree_rows_follow_ascending_block_id(self, easy_frame):
+        # eval.run pairs model scores pooled in np.unique(block_index) order with
+        # block_tree's rows; the two orders must agree.
+        df = easy_frame
+        df_train = df[df.block_id < 30]
+        labels = df[df.block_id >= 30].groupby("block_id")["block_label"].max()
+        normal = labels[labels == 0].index[:2]
+        anomalous = labels[labels == 1].index[:1]
+        df_test = pd.concat(
+            [
+                df[df.block_id == b].assign(block_id=new)
+                for b, new in ((anomalous[0], 9), (normal[0], 2), (normal[1], 5))
+            ],
+            ignore_index=True,
+        )  # row order: 9, 2, 5
+        y, _ = block_tree(df_train, df_test)
+        assert y.tolist() == [0, 0, 1]  # ascending block_id: 2, 5, 9
+
+
+PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
+
+
+class TestPlots:
+    def test_charts_are_written_as_png(self, tmp_path):
+        y, s = np.array([0, 1, 0, 1]), np.array([0.1, 0.9, 0.4, 0.6])
+        plot_pr_curves({"model": (y, s)}, str(tmp_path / "pr.png"))
+        plot_per_type_recall(
+            {
+                "wash_trading": {
+                    "value": 0.5,
+                    "ci_low": 0.2,
+                    "ci_high": 0.8,
+                    "n_windows": 4,
+                }
+            },
+            str(tmp_path / "t.png"),
+        )
+        assert (tmp_path / "pr.png").read_bytes()[:8] == PNG_MAGIC
+        assert (tmp_path / "t.png").stat().st_size > 0
+
+    def test_per_type_chart_survives_missing_or_edge_intervals(self, tmp_path):
+        # H22: a type without a CI draws a bare bar; a CI that touches the value
+        # (or rounds past it) must not hand matplotlib a negative error.
+        per_type = {
+            "wash_trading": {
+                "value": 0.5,
+                "ci_low": None,
+                "ci_high": None,
+                "n_windows": 4,
+            },
+            "fee_spike": {"value": 0.0, "ci_low": 0.0, "ci_high": 0.3, "n_windows": 3},
+            "rug_pull": {"value": 0.4, "ci_low": 0.5, "ci_high": 0.3, "n_windows": 2},
+        }
+        plot_per_type_recall(per_type, str(tmp_path / "t.png"))
+        assert (tmp_path / "t.png").read_bytes()[:8] == PNG_MAGIC
+
+    def test_per_type_chart_accepts_no_types(self, tmp_path):
+        plot_per_type_recall({}, str(tmp_path / "t.png"))
+        assert (tmp_path / "t.png").stat().st_size > 0
+
+
+class TestEvalRunSmoke:
+    def test_smoke_evaluation_writes_results_schema_and_charts_within_a_minute(
+        self, monkeypatch, tmp_path, capsys
+    ):
+        monkeypatch.chdir(tmp_path)  # all smoke outputs land in tmp_path
+        t0 = time.perf_counter()
+        assert main(["--smoke", "--seed", "tuning"]) == 0
+        assert time.perf_counter() - t0 < 60
+        printed = capsys.readouterr().out
+        assert "majority" in printed and "window_logistic" in printed  # spec 5.3
+        out = json.loads((tmp_path / "runs/smoke/results/risk.json").read_text())
+        assert set(out) == {"config_hash", "seed", "git_sha", "metrics", "baselines"}
+        assert out["seed"] == 1000
+        assert {
+            "auroc",
+            "pr_auc",
+            "recall_at_1pct_fpr",
+            "brier",
+            "prevalence",
+            "per_type",
+            "block_level",
+            "seed_spread",
+            "model_gate",
+        } <= set(out["metrics"])
+        assert set(out["baselines"]) == {"majority", "window_logistic", "block_tree"}
+        assert isinstance(out["metrics"]["model_gate"]["passed"], bool)
+        for png in ("risk_pr_curve.png", "risk_per_type_recall.png"):
+            assert (tmp_path / "runs/smoke/img" / png).stat().st_size > 0
+
+    @pytest.mark.parametrize("task", ["forecast", "policy"])
+    def test_unbuilt_tasks_are_refused_not_silently_skipped(
+        self, task, capsys, monkeypatch, tmp_path
+    ):
+        monkeypatch.chdir(tmp_path)
+
+        def boom(*args, **kwargs):
+            raise AssertionError("must not run")
+
+        monkeypatch.setattr("eval.run.run_risk", boom)
+        with pytest.raises(SystemExit) as exc:
+            main(["--smoke", "--seed", "tuning", "--tasks", task])
+        assert exc.value.code == 2
+        assert "not implemented until M4" in capsys.readouterr().err
+
+    def test_smoke_preset_cannot_be_combined_with_the_evaluation_seed(
+        self, monkeypatch
+    ):
+        # run_risk is booby-trapped so the refusal must happen before any work
+        def boom(*args, **kwargs):
+            raise AssertionError("run_risk reached")
+
+        monkeypatch.setattr("eval.run.run_risk", boom)
+        with pytest.raises(SystemExit) as exc:
+            main(["--smoke", "--seed", "eval"])
+        assert exc.value.code == 2
+
+    def test_config_and_smoke_are_mutually_exclusive(self):
+        with pytest.raises(SystemExit) as exc:
+            main(["--smoke", "--config", "config/smoke.yaml", "--seed", "tuning"])
+        assert exc.value.code == 2
+
+    def test_one_hash_identifies_one_configuration(self):
+        from core.config import DignityConfig
+
+        a = DignityConfig()
+        b = DignityConfig()
+        b.data.synthetic.seed += 1
+        assert config_hash(a) == config_hash(DignityConfig())
+        assert config_hash(a) != config_hash(b)
+        assert len(config_hash(a)) == 16

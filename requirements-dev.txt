@@ -1,2 +1,5 @@
 # Test tooling (dev/CI only; not a runtime dependency)
 pytest-timeout>=2.3
+
+# Evaluation charts (dev/eval only; not a runtime dependency)
+matplotlib>=3.7,<3.10
