@@ -1,5 +1,6 @@
 """Public docs must not reintroduce claims or APIs this project removed."""
 
+import re
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -45,10 +46,14 @@ class TestDocs:
                         hits.append(f"{path.relative_to(ROOT)}:{lineno}: {term!r}")
         assert hits == []
 
-    def test_pytest_ini_promises_no_timeouts_that_nothing_enforces(self):
-        text = (ROOT / "pytest.ini").read_text().lower()
-        assert "timeout" not in text
-        assert "mapped" not in text  # the "fast: ... mapped to 5s via conftest" claim
+    def test_a_configured_timeout_is_enforced_by_a_plugin_ci_installs(self):
+        # M0.2 removed a timeout claim nothing enforced; a timeout line is only
+        # honest if pytest-timeout is installed wherever the suite runs.
+        ini = (ROOT / "pytest.ini").read_text()
+        assert re.search(r"^timeout\s*=\s*\d+\s*$", ini, re.MULTILINE)
+        assert "pytest-timeout" in (ROOT / "requirements-dev.txt").read_text()
+        ci = (ROOT / ".github" / "workflows" / "ci.yml").read_text()
+        assert "requirements-dev.txt" in ci
 
     def test_docs_do_not_link_to_files_that_do_not_exist(self):
         import re

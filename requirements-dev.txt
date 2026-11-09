@@ -1,0 +1,2 @@
+# Test tooling (dev/CI only; not a runtime dependency)
+pytest-timeout>=2.3
