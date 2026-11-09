@@ -1,14 +1,30 @@
 """Test data pipeline."""
 
+import dataclasses
+
 import numpy as np
 import pandas as pd
 import pytest
+import scipy.stats
 import torch
 
 from core.config import PrivacyConfig
 from core.privacy import BudgetExhausted
 from data.loader import TransactionDataset, create_dataloader
 from data.pipeline import TransactionPipeline
+from data.source.anomalies import (
+    ANOMALY_INJECTORS,
+    ANOMALY_TYPES,
+    inject_benign_spike,
+)
+from data.source.dynamics import (
+    DEFAULT_PARAMS,
+    ar1_log_volume,
+    congestion_fee,
+    garch_returns,
+    regime_path,
+    tx_counts,
+)
 from data.source.synthetic import SyntheticGenerator
 
 
@@ -377,6 +393,150 @@ class TestDataLoader:
         for a, b in zip(serial, workers, strict=True):
             assert a.keys() == b.keys()
             assert all(torch.equal(a[k], b[k]) for k in a)
+
+
+class TestNormalDynamics:
+    """Normal-process dynamics the synthetic generator is built from."""
+
+    def test_returns_have_fat_tails_and_volatility_clustering(self):
+        rng = np.random.default_rng(0)
+        r = garch_returns(20_000, DEFAULT_PARAMS, rng)
+        assert scipy.stats.kurtosis(r) > 1.0
+        assert np.corrcoef(np.abs(r[:-1]), np.abs(r[1:]))[0, 1] > 0.1
+
+    def test_log_volume_is_autocorrelated_and_never_floor_clipped(self):
+        rng = np.random.default_rng(0)
+        x = ar1_log_volume(20_000, DEFAULT_PARAMS, rng)
+        assert abs(np.corrcoef(x[:-1], x[1:])[0, 1] - DEFAULT_PARAMS.ar1_phi) < 0.05
+        assert (x == x.min()).sum() == 1  # no pinned floor (DGNTY-11)
+
+    def test_tx_counts_track_volume_and_are_overdispersed(self):
+        rng = np.random.default_rng(0)
+        vol = np.exp(4.6 + ar1_log_volume(20_000, DEFAULT_PARAMS, rng))
+        tx = tx_counts(vol, DEFAULT_PARAMS, rng)
+        assert np.corrcoef(tx, vol)[0, 1] > 0.5 and tx.var() > tx.mean()
+
+    def test_fee_rises_with_backlog_and_keeps_a_nonzero_spread(self):
+        rng = np.random.default_rng(0)
+        busy = np.r_[np.full(200, 50), np.full(200, 80)]  # cap = 1.1 * 65 = 71.5
+        fee = congestion_fee(busy, DEFAULT_PARAMS, rng)
+        assert fee[200:].mean() > fee[:200].mean()
+        calm = congestion_fee(np.full(400, 10), DEFAULT_PARAMS, rng)
+        q25, q75 = np.percentile(calm, [25, 75])
+        assert q75 > q25  # DGNTY-17: no degenerate IQR
+
+    def test_regime_switches_follow_the_switch_probability(self):
+        rng = np.random.default_rng(0)
+        p0 = dataclasses.replace(DEFAULT_PARAMS, regime_switch_prob=0.0)
+        p1 = dataclasses.replace(DEFAULT_PARAMS, regime_switch_prob=1.0)
+        assert (regime_path(100, p0, rng) == 1).all()
+        assert (np.diff(regime_path(100, p1, rng)) != 0).all()
+
+    def test_dynamics_never_touch_the_global_numpy_rng(self):
+        rng = np.random.default_rng(0)
+        np.random.seed(123)
+        np.random.rand(7)  # distinct from the autouse seed 42
+        before = np.random.get_state()
+        garch_returns(100, DEFAULT_PARAMS, rng)
+        tx_counts(np.ones(100), DEFAULT_PARAMS, rng)
+        after = np.random.get_state()
+        assert after[0] == before[0] and (after[1] == before[1]).all()
+        assert after[2:] == before[2:]  # pos, has_gauss, cached_gaussian
+
+
+def _block() -> pd.DataFrame:
+    """A 160-row normal block built from the M2.3 dynamics."""
+    rng = np.random.default_rng(0)
+    n = 160
+    volume = np.exp(
+        DEFAULT_PARAMS.log_volume_mean + ar1_log_volume(n, DEFAULT_PARAMS, rng)
+    )
+    tx = tx_counts(volume, DEFAULT_PARAMS, rng)
+    fee = congestion_fee(tx, DEFAULT_PARAMS, rng)
+    r = garch_returns(n - 1, DEFAULT_PARAMS, rng)
+    price = np.exp(DEFAULT_PARAMS.price_level_mean + np.r_[0.0, np.cumsum(r)])
+    return pd.DataFrame(
+        {"volume": volume, "price": price, "fee_rate": fee, "tx_count": tx}
+    )
+
+
+class TestAnomalyInjectors:
+    """The six typologies and benign spikes the generator injects."""
+
+    def test_every_typology_has_an_injector(self):
+        assert set(ANOMALY_INJECTORS) == set(ANOMALY_TYPES)
+        assert len(ANOMALY_TYPES) == 6
+
+    @pytest.mark.parametrize("kind", ANOMALY_TYPES)
+    def test_zero_severity_is_invisible(self, kind):
+        b = _block()
+        out = ANOMALY_INJECTORS[kind](b, 40, 20, 0.0, np.random.default_rng(1))
+        pd.testing.assert_frame_equal(out, b)
+
+    @pytest.mark.parametrize("kind", ANOMALY_TYPES)
+    def test_effects_stay_inside_the_span(self, kind):
+        b = _block()
+        before = b.copy()
+        out = ANOMALY_INJECTORS[kind](b, 40, 20, 1.0, np.random.default_rng(1))
+        outside = np.r_[0:40, 60:160]
+        for col in ("volume", "fee_rate", "tx_count"):
+            np.testing.assert_allclose(
+                out[col].to_numpy()[outside], b[col].to_numpy()[outside]
+            )
+        r_in, r_out = (np.diff(np.log(f["price"].to_numpy())) for f in (b, out))
+        ret_outside = np.r_[0:39, 59:159]  # return j is the move into row j+1
+        np.testing.assert_allclose(r_out[ret_outside], r_in[ret_outside])
+        assert b is not out
+        pd.testing.assert_frame_equal(b, before)
+        assert out["tx_count"].dtype == np.int64
+
+    def test_typologies_have_their_signature_at_full_severity(self):
+        b = _block()
+        inject = {
+            k: ANOMALY_INJECTORS[k](b, 40, 20, 1.0, np.random.default_rng(1))
+            for k in ANOMALY_TYPES
+        }
+        span = slice(40, 60)
+        r_in = np.diff(np.log(b["price"].to_numpy()))
+
+        def r_of(f):
+            return np.diff(np.log(f["price"].to_numpy()))
+
+        # compare against the input's same span (the counterfactual): the block's
+        # own congestion can move span levels far from rows 0..39.
+        w = inject["wash_trading"]
+        assert (
+            w["volume"].to_numpy()[span].mean()
+            >= 2 * b["volume"].to_numpy()[span].mean()
+        )
+        assert np.abs(r_of(w)[39:59]).mean() <= 0.05 * np.abs(r_in[39:59]).mean()
+
+        p = inject["pump_and_dump"]
+        assert p["price"].to_numpy()[span].max() > b["price"].to_numpy()[40] * 1.05
+
+        fs = inject["fee_spike"]
+        assert (
+            fs["fee_rate"].to_numpy()[span].mean()
+            >= 4 * b["fee_rate"].to_numpy()[span].mean()
+        )
+
+        fe = inject["fee_evasion"]
+        assert (
+            fe["fee_rate"].to_numpy()[span].mean()
+            <= 0.3 * b["fee_rate"].to_numpy()[span].mean()
+        )
+
+        fc = inject["flash_crash"]
+        assert r_of(fc)[39] <= r_in[39] - 0.09
+
+        lay = inject["layering"]
+        med = np.median(b["volume"].to_numpy())
+        assert (lay["volume"].to_numpy()[40::4][:5] > med + 2 * med).all()
+
+    def test_benign_spike_raises_volume_somewhere(self):
+        b = _block()
+        out = inject_benign_spike(b, np.random.default_rng(3))
+        assert (out["volume"] > b["volume"] * 1.9).any()
 
 
 if __name__ == "__main__":
