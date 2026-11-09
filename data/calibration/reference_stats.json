@@ -1,0 +1,52 @@
+{
+  "abs_ret_lag1_acf": {
+    "max": 0.21578604302834883,
+    "min": 0.11685331001853469,
+    "sources": [
+      "bitstamp BTC/USD 1h 2023-11-01..2024-11-01 chunk_len=160 value=0.207542 fetched=2026-11-09",
+      "bitstamp BTC/USD 1h 2024-11-01..2025-11-01 chunk_len=160 value=0.181429 fetched=2026-11-09",
+      "bitstamp ETH/USD 1h 2023-11-01..2024-11-01 chunk_len=160 value=0.149539 fetched=2026-11-09",
+      "bitstamp ETH/USD 1h 2024-11-01..2025-11-01 chunk_len=160 value=0.125098 fetched=2026-11-09"
+    ]
+  },
+  "log_volume_lag1_acf": {
+    "max": 0.5820695682114465,
+    "min": 0.4930488983606343,
+    "sources": [
+      "bitstamp BTC/USD 1h 2023-11-01..2024-11-01 chunk_len=160 value=0.500467 fetched=2026-11-09",
+      "bitstamp BTC/USD 1h 2024-11-01..2025-11-01 chunk_len=160 value=0.548587 fetched=2026-11-09",
+      "bitstamp ETH/USD 1h 2023-11-01..2024-11-01 chunk_len=160 value=0.522844 fetched=2026-11-09",
+      "bitstamp ETH/USD 1h 2024-11-01..2025-11-01 chunk_len=160 value=0.574651 fetched=2026-11-09"
+    ]
+  },
+  "log_volume_skew": {
+    "max": 0.3766854284844062,
+    "min": -0.0837317325487602,
+    "sources": [
+      "bitstamp BTC/USD 1h 2023-11-01..2024-11-01 chunk_len=160 value=-0.0446788 fetched=2026-11-09",
+      "bitstamp BTC/USD 1h 2024-11-01..2025-11-01 chunk_len=160 value=-0.0453636 fetched=2026-11-09",
+      "bitstamp ETH/USD 1h 2023-11-01..2024-11-01 chunk_len=160 value=0.338317 fetched=2026-11-09",
+      "bitstamp ETH/USD 1h 2024-11-01..2025-11-01 chunk_len=160 value=0.103525 fetched=2026-11-09"
+    ]
+  },
+  "ret_excess_kurtosis": {
+    "max": 4.267223591127244,
+    "min": 3.224122383737546,
+    "sources": [
+      "bitstamp BTC/USD 1h 2023-11-01..2024-11-01 chunk_len=160 value=4.1803 fetched=2026-11-09",
+      "bitstamp BTC/USD 1h 2024-11-01..2025-11-01 chunk_len=160 value=3.31105 fetched=2026-11-09",
+      "bitstamp ETH/USD 1h 2023-11-01..2024-11-01 chunk_len=160 value=4.05353 fetched=2026-11-09",
+      "bitstamp ETH/USD 1h 2024-11-01..2025-11-01 chunk_len=160 value=3.81521 fetched=2026-11-09"
+    ]
+  },
+  "volume_cv": {
+    "max": 1.609680716800733,
+    "min": 1.0140891312307923,
+    "sources": [
+      "bitstamp BTC/USD 1h 2023-11-01..2024-11-01 chunk_len=160 value=1.10546 fetched=2026-11-09",
+      "bitstamp BTC/USD 1h 2024-11-01..2025-11-01 chunk_len=160 value=1.06372 fetched=2026-11-09",
+      "bitstamp ETH/USD 1h 2023-11-01..2024-11-01 chunk_len=160 value=1.56005 fetched=2026-11-09",
+      "bitstamp ETH/USD 1h 2024-11-01..2025-11-01 chunk_len=160 value=1.2016 fetched=2026-11-09"
+    ]
+  }
+}
