@@ -15,8 +15,13 @@ from core.config import DignityConfig
 from data.loader import create_dataloader
 from data.pipeline import TransactionPipeline
 from data.source.synthetic import SyntheticGenerator
-from models.dignity import Dignity
-from train.engine import load_checkpoint, predict, save_checkpoint, train_epoch
+from train.checkpoint import (
+    build_model_from_meta,
+    load_checkpoint,
+    make_meta,
+    save_checkpoint,
+)
+from train.engine import predict, train_epoch
 from train.losses import risk_loss
 
 
@@ -106,13 +111,13 @@ def main(argv: list[str] | None = None) -> None:
 
     # Create model
     print("\nInitializing model...")
-    model = Dignity(
-        task=config.model.task,
-        input_size=len(pipeline.available_features),
-        hidden_size=config.model.hidden_size,
-        n_layers=config.model.n_layers,
-        dropout=config.model.dropout,
-    ).to(device)
+    meta = make_meta(
+        config,
+        pipeline.available_features,
+        pipeline.scaler.center_,
+        pipeline.scaler.scale_,
+    )
+    model = build_model_from_meta(meta).to(device)
 
     print(model.summary())
 
@@ -131,11 +136,18 @@ def main(argv: list[str] | None = None) -> None:
 
     # Training loop
     print(f"\nStarting training for {config.train.epochs} epochs...")
-    best_val_loss = float("inf")
+    best_metric = float("inf")
 
     start_epoch = 1
     if args.resume:
-        start_epoch = load_checkpoint(model, optimizer, args.resume, device) + 1
+        ck = load_checkpoint(args.resume, map_location=device)
+        model.load_state_dict(ck["model_state"])
+        optimizer.load_state_dict(ck["optimizer_state"])
+        # a CPU (disabled) run saves {}, which an enabled scaler refuses to load
+        if ck["grad_scaler_state"]:
+            grad_scaler.load_state_dict(ck["grad_scaler_state"])
+        start_epoch = ck["epoch"] + 1
+        best_metric = ck["best_metric"]
 
     for epoch in range(start_epoch, config.train.epochs + 1):
         print(f"\n{'=' * 60}")
@@ -164,32 +176,41 @@ def main(argv: list[str] | None = None) -> None:
         print(f"\nTrain Loss: {train_metrics['loss']:.4f}")
         print(f"Val Loss: {val_loss:.4f}")
 
-        # Save checkpoint
+        # Save best model first, so an epoch checkpoint carries the best so far
+        metrics = {
+            "train": {k: float(v) for k, v in train_metrics.items()},
+            "val": {"loss": float(val_loss)},
+        }
+        if val_loss < best_metric:
+            best_metric = float(val_loss)
+            best_path = checkpoint_dir / f"dignity_{config.model.task}_best.pt"
+            save_checkpoint(
+                best_path,
+                model,
+                optimizer,
+                grad_scaler,
+                meta,
+                epoch,
+                metrics,
+                best_metric,
+            )
+            print(f"Best model saved (val_loss: {best_metric:.4f})")
+
         if epoch % config.train.save_interval == 0:
             checkpoint_path = (
                 checkpoint_dir / f"dignity_{config.model.task}_epoch{epoch}.pt"
             )
             save_checkpoint(
-                model=model,
-                optimizer=optimizer,
-                epoch=epoch,
-                metrics={"train": train_metrics, "val": {"loss": val_loss}},
-                path=str(checkpoint_path),
+                checkpoint_path,
+                model,
+                optimizer,
+                grad_scaler,
+                meta,
+                epoch,
+                metrics,
+                best_metric,
             )
             print(f"Checkpoint saved to {checkpoint_path}")
-
-        # Save best model
-        if val_loss < best_val_loss:
-            best_val_loss = val_loss
-            best_path = checkpoint_dir / f"dignity_{config.model.task}_best.pt"
-            save_checkpoint(
-                model=model,
-                optimizer=optimizer,
-                epoch=epoch,
-                metrics={"train": train_metrics, "val": {"loss": val_loss}},
-                path=str(best_path),
-            )
-            print(f"Best model saved (val_loss: {best_val_loss:.4f})")
 
     print("\nTraining complete!")
 

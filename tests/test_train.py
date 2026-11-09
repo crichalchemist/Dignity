@@ -9,6 +9,7 @@ from torch.amp import GradScaler
 
 from data.loader import create_dataloader
 from models.dignity import Dignity
+from train.checkpoint import load_checkpoint
 from train.engine import predict, train_epoch
 from train.losses import risk_loss
 
@@ -151,3 +152,21 @@ class TestTrainCli:
         monkeypatch.setattr(train.cli, "GradScaler", spy)
         train.cli.main(["--config", str(tiny_train_config(train={"epochs": 2}))])
         assert len(made) == 1 and made[0].is_enabled() is False
+
+    def test_resume_does_not_overwrite_better_checkpoint(
+        self, tiny_train_config, tmp_path
+    ):
+        import train.cli
+
+        runs = tmp_path / "runs"
+        train.cli.main(["--config", str(tiny_train_config(name="e1"))])
+        for name in ("dignity_risk_epoch1.pt", "dignity_risk_best.pt"):
+            raw = torch.load(runs / name, weights_only=True)
+            raw["best_metric"] = 1e-6  # unbeatable: BCE on real data is far above it
+            torch.save(raw, runs / name)
+        cfg2 = tiny_train_config(name="e2", train={"epochs": 2})
+        train.cli.main(
+            ["--config", str(cfg2), "--resume", str(runs / "dignity_risk_epoch1.pt")]
+        )
+        assert load_checkpoint(runs / "dignity_risk_best.pt")["epoch"] == 1
+        assert load_checkpoint(runs / "dignity_risk_epoch2.pt")["best_metric"] == 1e-6
