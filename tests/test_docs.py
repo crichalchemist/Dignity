@@ -28,6 +28,10 @@ REMOVED = (
     "generate_dataset(",
     "volume forecast",
     "price forecast",
+    "A3C",
+    "value estimate",
+    "policy learning (RL)",
+    "RL policy",
 )
 
 

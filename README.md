@@ -15,7 +15,7 @@ Dignity Core implements privacy-first sequence modeling:
 - **Signal Processing**: Volatility, entropy, momentum, and regime detection utilities
 - **Modular Architecture**: Clean separation between data pipeline, model components, and training infrastructure
 - **Deployable**: ONNX export with verification and benchmarking for production inference
-- **Task-Agnostic**: Configurable for risk scoring, forecasting, or policy learning (RL)
+- **Task-Agnostic**: Configurable for risk scoring, early warning, or triage
 - **Lightweight**: Focused, production-ready codebase
 
 ## Key Features
@@ -24,7 +24,7 @@ Dignity Core implements privacy-first sequence modeling:
 - ✅ **Signal Processing**: Volatility, entropy, momentum, directional change, and regime detection
 - ✅ **Modular Design**: Core utilities, data pipeline, model components cleanly separated
 - ✅ **Flexible Architecture**: CNN1D + LSTM + Attention backbone with task-specific heads
-- ✅ **Multi-Task Ready**: Risk scoring, forecasting, or policy learning (RL) via configurable heads
+- ✅ **Multi-Task Ready**: Risk scoring, early warning, or triage via configurable heads
 - ✅ **Production Export**: ONNX conversion with verification and inference benchmarking
 - ✅ **Synthetic Data**: Built-in generator for testing and prototyping
 - ✅ **Training Infrastructure**: AMP support, gradient clipping, checkpointing, CLI interface
@@ -181,7 +181,7 @@ The core model implements a modular hybrid architecture:
 **Task Heads** (`models/head/`):
 - **RiskHead**: Binary risk scoring (0-1 probability)
 - **ForecastHead**: early warning, P(new anomaly within h rows) for h = 1…H
-- **PolicyHead**: RL policy outputs (actions + value estimate)
+- **PolicyHead**: triage logits over allow / review / block
 
 **Main Model** (`models/dignity.py`):
 - Composable: `Dignity(task='risk')` assembles backbone + appropriate head
@@ -240,7 +240,7 @@ Dignity/
 │   └── head/
 │       ├── risk.py         # Binary risk scoring head
 │       ├── forecast.py     # Early-warning head
-│       └── policy.py       # RL policy head (A3C/PPO)
+│       └── policy.py       # Triage head (allow / review / block)
 │
 ├── train/                    # Training infrastructure (2 modules)
 │   ├── engine.py            # Training/validation loops with AMP

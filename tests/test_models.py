@@ -91,20 +91,16 @@ class TestTaskHeads:
         assert torch.all((p >= 0) & (p <= 1))
         assert torch.all(p[:, 1:] >= p[:, :-1])
 
-    def test_policy_head(self):
-        """Test policy head."""
+    def test_policy_head_scores_allow_review_block_and_nothing_else(self):
         head = PolicyHead(input_size=256, n_actions=3)
-        context = torch.randn(4, 256)
+        logits = head(torch.randn(4, 256))
+        assert isinstance(logits, torch.Tensor) and logits.shape == (4, 3)
+        assert not hasattr(head, "value") and not hasattr(head, "sample_action")
+        assert ACTIONS == ("allow", "review", "block")
 
-        logits, value = head(context)
-
-        assert logits.shape == (4, 3)  # [B, actions]
-        assert value.shape == (4, 1)  # [B, 1]
-
-        # Test action sampling
-        action, log_prob, value = head.sample_action(context)
-        assert action.shape == (4,)
-        assert log_prob.shape == (4,)
+    def test_policy_head_rejects_an_action_count_the_cost_table_cannot_price(self):
+        with pytest.raises(ValueError, match="ACTIONS"):
+            PolicyHead(input_size=256, n_actions=4)
 
 
 class TestDignityModel:
@@ -119,6 +115,12 @@ class TestDignityModel:
 
         assert predictions.shape == (4, 1)
         assert attn.shape == (4, 100)
+
+    def test_policy_model_returns_logits_and_attention(self):
+        out, attn = Dignity(task="policy", input_size=9, hidden_size=64, n_actions=3)(
+            torch.randn(2, 50, 9)
+        )
+        assert out.shape == (2, 3) and attn.shape == (2, 50)
 
     def test_forecast_model_takes_horizon_not_volume_price_shape(self):
         model = Dignity(
