@@ -29,3 +29,9 @@ class TestCiWorkflow:
         # Deselecting slow tests is allowed on pull requests only.
         if "not slow" in pytest_runs[0]:
             assert "github.event_name == 'pull_request'" in pytest_runs[0]
+
+    def test_ci_installs_the_chart_dependency_without_making_it_a_runtime_one(self):
+        runs = " ".join(s.get("run", "") for s in _workflow()["jobs"]["test"]["steps"])
+        assert "requirements-dev.txt" in runs
+        assert "matplotlib" in (ROOT / "requirements-dev.txt").read_text()
+        assert "matplotlib" not in (ROOT / "requirements.txt").read_text()
