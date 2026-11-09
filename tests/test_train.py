@@ -17,7 +17,13 @@ from models.dignity import Dignity
 from train.checkpoint import load_checkpoint
 from train.cli import main
 from train.engine import predict, train_epoch
-from train.loop import ChanceGuardWarning, FitResult, fit, resolve_pos_weight
+from train.loop import (
+    ChanceGuardWarning,
+    FitResult,
+    fit,
+    prepare_data,
+    resolve_pos_weight,
+)
 from train.losses import risk_loss
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -219,6 +225,14 @@ class TestFit:
         assert r.best_metric == 0.95
         assert load_checkpoint(r.best_path)["epoch"] == 3
 
+    def test_a_run_that_never_selects_a_best_checkpoint_fails_loudly(
+        self, tiny_split, tiny_fit_config, tmp_path, monkeypatch
+    ):
+        nan = float("nan")
+        _script_val_metrics(monkeypatch, [nan] * 3, [0.9, 0.6, 0.95])
+        with pytest.raises(RuntimeError, match="pr_auc"):
+            fit(tiny_fit_config, tiny_split, seed=0, run_dir=str(tmp_path))
+
     def test_a_run_leaves_a_self_describing_record_of_every_epoch(
         self, tiny_split, tiny_fit_config, tmp_path
     ):
@@ -380,3 +394,23 @@ class TestNotebook:
                         if not hasattr(mod, a.name)
                     ]
         assert missing == []
+
+
+class TestPrepareData:
+    def test_every_split_is_windowed_alike_and_blocks_never_straddle_splits(
+        self, tiny_train_config
+    ):
+        from core.config import DignityConfig
+
+        config = DignityConfig.from_yaml(tiny_train_config())
+        _, split = prepare_data(config)
+        sets = (split.train, split.val, split.test)
+        assert {w.X.ndim for w in sets} == {3}
+        assert len({w.X.shape[1] for w in sets}) == 1
+        assert {w.X.shape[2] for w in sets} == {len(split.feature_names)}
+        train_blocks = set(split.train.block_index.tolist())
+        assert train_blocks.isdisjoint(split.val.block_index.tolist())
+        assert train_blocks.isdisjoint(split.test.block_index.tolist())
+        assert set(split.val.block_index.tolist()).isdisjoint(
+            split.test.block_index.tolist()
+        )

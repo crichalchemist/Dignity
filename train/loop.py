@@ -62,10 +62,10 @@ def prepare_data(config: DignityConfig) -> tuple[pd.DataFrame, SplitData]:
     )
     split_data = pipeline.process_blocks(
         df,
-        config.data.split,
-        config.model.horizon,
-        config.data.label_overlap,
-        np.random.default_rng(config.data.synthetic.seed),
+        split=config.data.split,
+        horizon=config.model.horizon,
+        overlap=config.data.label_overlap,
+        rng=np.random.default_rng(config.data.synthetic.seed),
     )
     return df, split_data
 
@@ -217,8 +217,14 @@ def fit(
         ]
     history_path.write_text(json.dumps(previous + history, indent=2))
 
+    best_path = out / "best.pt"
+    if not best_path.exists():
+        raise RuntimeError(
+            f"no best checkpoint was written: validation {config.train.select_metric} "
+            f"never improved (NaN or no epochs run) in run_dir {out}"
+        )
     return FitResult(
-        best_path=str(out / "best.pt"),
+        best_path=str(best_path),
         history=history,
         best_metric=float(best_metric),
         meta=meta,
