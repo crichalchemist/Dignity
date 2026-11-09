@@ -1,5 +1,7 @@
 """Tests for the training engine."""
 
+import ast
+import importlib
 import json
 import math
 import warnings
@@ -338,3 +340,43 @@ class TestPosWeight:
     def test_pos_weight_refuses_a_train_split_without_positives(self):
         with pytest.raises(ValueError, match="no positive"):
             resolve_pos_weight(None, np.zeros(4))
+
+
+class TestNotebook:
+    def test_notebook_trains_through_shared_fit_and_keeps_colab_badge(self):
+        # The notebook once duplicated the CLI loop and drifted from it (spec 5.3).
+        nb = json.loads((ROOT / "notebooks/train_risk.ipynb").read_text())
+        code = "\n".join(
+            "".join(c["source"]) for c in nb["cells"] if c["cell_type"] == "code"
+        )
+        md = "\n".join(
+            "".join(c["source"]) for c in nb["cells"] if c["cell_type"] == "markdown"
+        )
+        assert "colab.research.google.com/assets/colab-badge.svg" in md
+        assert "from train.loop import fit" in code
+        assert "train_epoch(" not in code and "validate_epoch(" not in code
+
+    def test_every_notebook_import_resolves(self):
+        # A reader who opens the Colab badge runs these imports first; a renamed or
+        # deleted function must fail here, not in their browser.
+        nb = json.loads((ROOT / "notebooks/train_risk.ipynb").read_text())
+        roots = {"core", "data", "models", "train", "eval", "export"}
+        missing = []
+        for cell in (c for c in nb["cells"] if c["cell_type"] == "code"):
+            src = "\n".join(
+                line
+                for line in "".join(cell["source"]).splitlines()
+                if not line.lstrip().startswith(("!", "%"))
+            )
+            for node in ast.walk(ast.parse(src)):
+                if (
+                    isinstance(node, ast.ImportFrom)
+                    and node.module.split(".")[0] in roots
+                ):
+                    mod = importlib.import_module(node.module)
+                    missing += [
+                        f"{node.module}.{a.name}"
+                        for a in node.names
+                        if not hasattr(mod, a.name)
+                    ]
+        assert missing == []
