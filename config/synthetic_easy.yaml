@@ -29,11 +29,11 @@ data:
     - volume_volatility
     - regime
   synthetic:
-    n_blocks: 200
+    n_blocks: 1000
     block_len: 160              # >= seq_len + horizon + 1
     contamination: 0.5
     anomalies_per_block: [1, 1]
-    duration_range: [30, 60]
+    duration_range: [60, 100]
     severity_range: [0.9, 1.0]
     benign_spike_rate: 0.0
     label_noise: 0.0
