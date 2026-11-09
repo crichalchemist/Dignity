@@ -21,8 +21,21 @@ class TestSignalProcessor:
         vol = SignalProcessor.volatility(values, window=3)
 
         assert len(vol) == len(values)
-        assert vol[0] == vol[1] == vol[2]  # First values filled
+        assert vol[0] == 0.0
         assert vol[-1] > 0  # Should have volatility
+
+    def test_volatility_never_reads_the_future(self):
+        v = np.arange(50, dtype=float)
+        base = SignalProcessor.volatility(v, window=20)
+        for t in (0, 5, 19, 20, 35):
+            w = v.copy()
+            w[t + 1 :] += 1000.0 * np.random.default_rng(t).standard_normal(49 - t)
+            assert np.array_equal(
+                SignalProcessor.volatility(w, window=20)[: t + 1], base[: t + 1]
+            )
+        assert base[0] == 0.0
+        assert base[10] == pytest.approx(np.std(v[0:10]))  # expanding warm-up
+        assert base[30] == pytest.approx(np.std(v[10:30]))  # causal window unchanged
 
     def test_entropy(self):
         """Test entropy calculation."""
