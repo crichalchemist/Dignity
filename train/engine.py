@@ -86,9 +86,10 @@ def predict(
     """
     Score every window in ``loader``, in loader order.
 
-    Returns ``{"score": float32 [N]}`` for the risk task.
+    Returns ``{"score": float32 [N]}`` for the risk task and
+    ``{"score": float32 [N, H]}`` (one onset probability per horizon) for forecast.
     """
-    if model.task != "risk":
+    if model.task not in ("risk", "forecast"):
         raise NotImplementedError(
             f"predict for task={model.task!r} arrives with its head in M4"
         )
@@ -98,6 +99,8 @@ def predict(
     with torch.no_grad():
         for batch in tqdm(loader, desc="Predicting"):
             outputs, _ = model(batch["x"].to(device))
-            scores.append(outputs.reshape(-1).float().cpu())
+            if model.task == "risk":
+                outputs = outputs.reshape(-1)
+            scores.append(outputs.float().cpu())
 
     return {"score": torch.cat(scores).numpy().astype(np.float32)}

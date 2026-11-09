@@ -99,7 +99,7 @@ models/dignity.py Dignity           →  DignityBackbone + one head
 train/engine.py                     →  train_epoch / predict
 train/loop.py fit                  →  shared loop (cli, notebook, eval.run); best.pt on val PR-AUC
 train/checkpoint.py                 →  self-describing checkpoints (FORMAT_VERSION 2) / build_model_from_meta
-train/losses.py                     →  risk_loss
+train/losses.py                     →  risk_loss, forecast_loss (masked per-horizon BCE)
 eval/{metrics,baselines,plots,run}.py → risk.json + charts; CIs bootstrap blocks, not windows
 export/to_onnx.py                   →  export + verify + benchmark
 ```
@@ -109,7 +109,7 @@ export/to_onnx.py                   →  export + verify + benchmark
 `ForecastHead`, or `PolicyHead`. Backbone `forward` returns `(context [B,H], attn_weights [B,T])`;
 `Dignity.forward` returns `(predictions, attn_weights)`. **Every caller must unpack the tuple** —
 this is the single most common source of shape bugs, and `train/losses.py::risk_loss` reshapes predictions
-and labels to `[B]`.
+and labels to `[B]`; `forecast_loss` keeps `[B, H]` and masks windows with an active anomaly.
 
 Adding a task = new head module in `models/head/` + a branch in `Dignity.__init__` + a loss in
 `train/losses.py` and its branch in `train/loop.py::fit`. Nothing else changes.

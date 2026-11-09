@@ -24,7 +24,7 @@ from train.loop import (
     prepare_data,
     resolve_pos_weight,
 )
-from train.losses import risk_loss
+from train.losses import forecast_loss, risk_loss
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -104,6 +104,29 @@ class TestTrainEpoch:
         )
         assert CountingScaler.steps == 2
 
+    def test_forecast_trains_one_cpu_epoch_with_masked_targets(self):
+        X = np.random.randn(8, 20, 3).astype("float32")
+        targets = {
+            "y": (np.random.rand(8, 4) > 0.5).astype("float32"),
+            "mask": np.array([True, False] * 4),
+        }
+        loader = create_dataloader(X, targets, batch_size=4, shuffle=False)
+        model = Dignity(
+            task="forecast", input_size=3, hidden_size=16, n_layers=1, horizon=4
+        )
+        opt = torch.optim.AdamW(model.parameters(), lr=1e-3)
+        m = train_epoch(
+            model,
+            loader,
+            opt,
+            forecast_loss(None),
+            torch.device("cpu"),
+            GradScaler("cuda", enabled=False),
+            use_amp=False,
+            grad_clip=1.0,
+        )
+        assert math.isfinite(m["loss"])
+
 
 class TestPredict:
     def test_scores_every_unlabelled_window_even_with_a_two_row_tail(self):
@@ -114,6 +137,38 @@ class TestPredict:
         model = Dignity(task="risk", input_size=3, hidden_size=16, n_layers=1)
         score = predict(model, loader, torch.device("cpu"))["score"]
         assert score.shape == (66,) and ((score >= 0) & (score <= 1)).all()
+
+    def test_forecast_predictions_give_one_score_per_horizon(self):
+        loader = create_dataloader(
+            np.random.randn(8, 20, 3), None, batch_size=4, shuffle=False
+        )
+        model = Dignity(
+            task="forecast", input_size=3, hidden_size=16, n_layers=1, horizon=4
+        )
+        score = predict(model, loader, torch.device("cpu"))["score"]
+        assert score.shape == (8, 4) and score.dtype == np.float32
+
+
+class TestForecastLoss:
+    def test_windows_with_an_active_anomaly_do_not_train_the_warning(self):
+        p = torch.tensor([[0.5, 0.5], [0.01, 0.01]])
+        batch = {
+            "y": torch.tensor([[1.0, 0.0], [1.0, 1.0]]),
+            "mask": torch.tensor([True, False]),
+        }
+        assert forecast_loss(None)(p, batch).item() == pytest.approx(math.log(2))
+
+    def test_pos_weight_scales_only_positive_terms(self):
+        p = torch.tensor([[0.5, 0.5]])
+        batch = {"y": torch.tensor([[1.0, 0.0]]), "mask": torch.tensor([True])}
+        assert forecast_loss(3.0)(p, batch).item() == pytest.approx(2 * math.log(2))
+
+    def test_batch_of_only_active_anomaly_windows_gives_zero_not_nan(self):
+        p = torch.full((2, 3), 0.3, requires_grad=True)
+        batch = {"y": torch.ones(2, 3), "mask": torch.tensor([False, False])}
+        loss = forecast_loss(None)(p, batch)
+        assert loss.item() == 0.0
+        loss.backward()  # still part of the graph
 
 
 class TestRiskLoss:
