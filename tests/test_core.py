@@ -7,7 +7,14 @@ import pandas as pd
 import pytest
 import yaml
 
-from core.config import DataConfig, DignityConfig, PrivacyConfig, SyntheticConfig
+from core.config import (
+    DataConfig,
+    DignityConfig,
+    EvalConfig,
+    PrivacyConfig,
+    SyntheticConfig,
+    TrainConfig,
+)
 from core.signals import SignalProcessor
 from data.source.anomalies import ANOMALY_TYPES
 from data.source.synthetic import RAW_COLUMNS, SyntheticGenerator
@@ -277,3 +284,76 @@ class TestSyntheticConfig:
         cfg = DignityConfig()
         cfg.to_yaml(str(tmp_path / "c.yaml"))
         assert DignityConfig.from_yaml(str(tmp_path / "c.yaml")) == cfg
+
+
+class TestEvalConfig:
+    def test_eval_seeds_default_to_frozen_tuning_and_evaluation_values(self):
+        # The tuning and evaluation seeds must differ, or the generator gets tuned
+        # against the numbers it is graded on (spec §2 anti-goal).
+        c = DignityConfig()
+        assert (c.eval.tuning_seed, c.eval.eval_seed) == (1000, 2026)
+        assert c.eval.n_train_seeds == 3 and c.eval.n_bootstrap == 1000
+        assert c.eval.out_dir == "results/v1.0" and c.eval.img_dir == "docs/img"
+        assert c.train.select_metric == "pr_auc" and c.train.pos_weight is None
+        assert (
+            c.train.chance_guard_auroc,
+            c.train.guard_epochs,
+            c.train.patience,
+        ) == (0.55, 5, 10)
+
+    def test_eval_block_in_yaml_overrides_defaults(self, tmp_path):
+        p = tmp_path / "c.yaml"
+        p.write_text("eval:\n  tuning_seed: 7\n  n_bootstrap: 50\n")
+        c = DignityConfig.from_yaml(str(p))
+        assert c.eval.tuning_seed == 7 and c.eval.n_bootstrap == 50
+
+    def test_base_yaml_states_every_eval_and_selection_default(self):
+        c = DignityConfig.from_yaml("config/base.yaml")
+        assert c.eval == EvalConfig()
+        assert c.train.patience == 10 and c.train.chance_guard_auroc == 0.55
+
+    def test_base_yaml_spells_out_eval_block_and_selection_keys_raw(self):
+        # The dataclass fills defaults, so a key missing from base.yaml would pass
+        # the test above; read the file raw so every key must be written down.
+        raw = yaml.safe_load(Path("config/base.yaml").read_text())
+        assert set(raw["eval"]) == {
+            "tuning_seed",
+            "eval_seed",
+            "n_train_seeds",
+            "n_bootstrap",
+            "epsilons",
+            "out_dir",
+            "img_dir",
+        }
+        for key in (
+            "select_metric",
+            "pos_weight",
+            "chance_guard_auroc",
+            "guard_epochs",
+            "patience",
+        ):
+            assert key in raw["train"], key
+
+    def test_eval_block_survives_a_yaml_round_trip(self, tmp_path):
+        # to_yaml must write eval:, or a saved run config silently reverts the
+        # seeds and output dirs to defaults on reload.
+        cfg = DignityConfig(
+            eval=EvalConfig(tuning_seed=7, n_bootstrap=50, epsilons=[0.5, 2.0]),
+            train=TrainConfig(select_metric="auroc", patience=None),
+        )
+        path = str(tmp_path / "c.yaml")
+        cfg.to_yaml(path)
+        assert "eval" in yaml.safe_load(Path(path).read_text())
+        back = DignityConfig.from_yaml(path)
+        assert back == cfg
+        assert back.eval.tuning_seed == 7 and back.eval.epsilons == [0.5, 2.0]
+
+    def test_unknown_select_metric_is_rejected_before_it_picks_a_bad_checkpoint(
+        self,
+    ):
+        # "brier" is lower-is-better; under strict > selection it would keep the
+        # worst epoch, so only higher-is-better metrics are allowed.
+        with pytest.raises(ValueError, match="pr_auc"):
+            TrainConfig(select_metric="brier")
+        for ok in ("pr_auc", "auroc", "recall_at_1pct_fpr"):
+            assert TrainConfig(select_metric=ok).select_metric == ok
