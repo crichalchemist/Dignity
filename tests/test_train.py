@@ -13,9 +13,10 @@ import torch
 import yaml
 from torch.amp import GradScaler
 
-from core.config import DignityConfig
+from core.config import DignityConfig, PolicyConfig
 from data.loader import create_dataloader
 from models.dignity import Dignity
+from models.head.policy import cost_matrix
 from train.checkpoint import build_model_from_meta, load_checkpoint
 from train.cli import main
 from train.engine import predict, train_epoch
@@ -26,7 +27,7 @@ from train.loop import (
     prepare_data,
     resolve_pos_weight,
 )
-from train.losses import forecast_loss, risk_loss
+from train.losses import expected_cost_loss, forecast_loss, risk_loss
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -129,6 +130,24 @@ class TestTrainEpoch:
         )
         assert math.isfinite(m["loss"])
 
+    def test_policy_trains_one_cpu_epoch_on_expected_cost(self):
+        X = np.random.randn(8, 20, 3).astype("float32")
+        targets = {"y": (np.random.rand(8) > 0.5).astype("int64")}
+        loader = create_dataloader(X, targets, batch_size=4, shuffle=False)
+        model = Dignity(task="policy", input_size=3, hidden_size=16, n_layers=1)
+        opt = torch.optim.AdamW(model.parameters(), lr=1e-3)
+        m = train_epoch(
+            model,
+            loader,
+            opt,
+            expected_cost_loss(torch.from_numpy(cost_matrix(PolicyConfig().costs))),
+            torch.device("cpu"),
+            GradScaler("cuda", enabled=False),
+            use_amp=False,
+            grad_clip=1.0,
+        )
+        assert math.isfinite(m["loss"])
+
 
 class TestPredict:
     def test_scores_every_unlabelled_window_even_with_a_two_row_tail(self):
@@ -149,6 +168,29 @@ class TestPredict:
         )
         score = predict(model, loader, torch.device("cpu"))["score"]
         assert score.shape == (8, 4) and score.dtype == np.float32
+
+    def test_policy_predictions_are_probabilities_over_three_actions(self):
+        loader = create_dataloader(
+            np.random.randn(8, 20, 3), None, batch_size=4, shuffle=False
+        )
+        model = Dignity(task="policy", input_size=3, hidden_size=16, n_layers=1)
+        probs = predict(model, loader, torch.device("cpu"))["probs"]
+        assert probs.shape == (8, 3)
+        assert np.allclose(probs.sum(1), 1, atol=1e-5)
+
+
+class TestExpectedCostLoss:
+    def test_undecided_policy_pays_the_average_cost_of_each_state(self):
+        C = torch.from_numpy(cost_matrix(PolicyConfig().costs))
+        loss = expected_cost_loss(C)
+        z = torch.zeros(1, 3)
+        assert loss(z, {"y": torch.tensor([1])}).item() == pytest.approx(11.5 / 3)
+        assert loss(z, {"y": torch.tensor([0])}).item() == pytest.approx(4.0 / 3)
+
+    def test_confident_cheapest_actions_cost_what_the_table_says(self):
+        loss = expected_cost_loss(torch.from_numpy(cost_matrix(PolicyConfig().costs)))
+        z = torch.tensor([[50.0, 0.0, 0.0], [0.0, 0.0, 50.0]])  # allow, block
+        assert loss(z, {"y": torch.tensor([0, 1])}).item() == pytest.approx(0.25)
 
 
 class TestForecastLoss:

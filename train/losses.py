@@ -49,3 +49,20 @@ def forecast_loss(
         return F.binary_cross_entropy(outputs[m].float(), y, weight=w)
 
     return loss_fn
+
+
+def expected_cost_loss(
+    cost_matrix: Tensor,
+) -> Callable[[Tensor, dict[str, Tensor]], Tensor]:
+    """Return the mean expected triage cost under the policy's softmax.
+
+    ``cost_matrix`` is ``[3, 2]``: rows are actions (allow, review, block), columns
+    the true state (0 normal, 1 anomaly). The softmax runs in float32.
+    """
+
+    def loss_fn(outputs: Tensor, batch: dict[str, Tensor]) -> Tensor:
+        p = F.softmax(outputs.float(), dim=-1)
+        costs = cost_matrix.to(p)[:, batch["y"]].T
+        return (p * costs).sum(-1).mean()
+
+    return loss_fn
