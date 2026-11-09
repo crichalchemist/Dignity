@@ -31,7 +31,7 @@ conda-forge's current pytorch (2.6) also satisfies it if you prefer a conda env.
 
 **On the macOS boot** the Linux `.venv/` is unusable. Use the existing conda env instead,
 prefixing every command with `conda run -n dignity-model` (torch 2.10, Python 3.11). Verified
-2026-11-08: 95 passed, 1 skipped (CUDA), and `pre-commit run --all-files` is clean.
+2026-11-08: 100 passed, 1 skipped (CUDA), and `pre-commit run --all-files` is clean.
 
 Verify before claiming any test/train result actually ran.
 
@@ -43,8 +43,8 @@ format that export no longer supports (DGNTY-3, DGNTY-35). No shipped config wri
 ## Commands
 
 ```bash
-# Tests (96 collected: test_core 21, test_data 23, test_models 11, test_privacy 34,
-# test_operator 4, test_docs 1, test_train 2 — one skips without CUDA)
+# Tests (101 collected: test_core 23, test_data 23, test_models 11, test_privacy 34,
+# test_operator 4, test_docs 4, test_train 2 — one skips without CUDA)
 pytest tests/ -v
 pytest tests/test_models.py -v                       # one file
 pytest tests/test_models.py::TestDignityModel::test_risk_model -v   # one test
@@ -149,11 +149,9 @@ a mechanism, it needs a test in `tests/test_privacy.py` or CI's 100% gate on tha
     `len(config.data.features)`, so `load_state_dict` raises a size mismatch.
 - `train_epoch` evaluates `y.dim()` before handling `y is None`, so label-free batches crash
   in training. `validate_epoch` guards it correctly.
-- **`docs/` and `README.md` drift from the code easily.** The known drift (free-function
-  signal helpers, `export_dignity_to_onnx`, a `--epochs` flag, `generate_dataset(seq_length=)`)
-  was fixed on 2026-09-04, but `tests/test_docs.py` only guards against removed privacy claims,
-  not against stale examples. Trust the source, and when you touch a documented symbol, fix the
-  doc in the same change.
+- **`docs/` and `README.md` drift from the code easily.** `tests/test_docs.py` guards removed
+  claims and links to missing files, not stale examples. Trust the source, and when you touch a
+  documented symbol, fix the doc in the same change.
 
 ## Conventions
 
@@ -170,8 +168,10 @@ a mechanism, it needs a test in `tests/test_privacy.py` or CI's 100% gate on tha
   `file::Class::test_name`. They use root-level fixtures in `tests/conftest.py` (`device`,
   `sample_sequence` `[4,100,9]`, `sample_labels`) and an autouse seed reset. Reuse them rather
   than re-seeding locally.
-- Branches: `main` is the public, protected branch (CI `lint` and `test` checks required);
-  `dev` is the integration branch. Branch feature work from `dev` and open PRs against `dev`;
-  `dev` → `main` is the release step. CI runs on pushes to both and on every PR.
+- Branches: both `main` and `dev` are protected (required checks `lint`, `test (3.10)`,
+  `test (3.12)`; no deletion, no force-push); `dev` is the integration branch. Branch feature
+  work from `dev` and open PRs against `dev`; `dev` → `main` is the release step. CI runs on
+  pushes to both and on every PR. PR titles carry `DGNTY-n`; merged branches are deleted
+  automatically.
 - `.env` holds API keys (COGNEE, FRED, TWELVEDATA) and is gitignored. `.internal/` is gitignored
   local design notes — read it for background, never cite it as public documentation.
