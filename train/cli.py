@@ -29,9 +29,9 @@ def main(argv: list[str] | None = None) -> int:
     print(config)
 
     task = config.model.task
-    if task != "risk":
+    if task == "policy":
         raise NotImplementedError(
-            f"task={task!r} does not train end to end until M4 (DGNTY-1, DGNTY-2)"
+            f"task={task!r} does not train end to end until M4 (DGNTY-2)"
         )
 
     print("\nGenerating synthetic data...")

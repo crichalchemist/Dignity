@@ -156,8 +156,8 @@ a mechanism, it needs a test in `tests/test_privacy.py` or CI's 100% gate on tha
 
 - **Only `task: risk` trains end to end.** This contradicts "Adding a task ... Nothing else
   changes" above. The engine also needs work:
-  - `train/cli.py` raises `NotImplementedError` for `forecast` and `policy` until M4.
-  - `train/loop.py::fit` never passes head kwargs (`pred_len`, `n_actions`) from config.
+  - `train/cli.py` raises `NotImplementedError` for `policy` until M4.
+  - `policy` head kwargs (`n_actions`) arrive in PR 2; `forecast` passes `horizon`.
 - **`docs/` and `README.md` drift from the code easily.** `tests/test_docs.py` guards removed
   claims and links to missing files, not stale examples. Trust the source, and when you touch a
   documented symbol, fix the doc in the same change.

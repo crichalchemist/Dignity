@@ -258,6 +258,18 @@ class TestSyntheticConfig:
         for ws in (d.train, d.val, d.test):
             assert set(np.unique(ws.y_risk)) == {0, 1}
 
+    def test_smoke_preset_scores_onsets_at_every_horizon_in_every_split(self):
+        # block_len must leave enough scorable rows (seq_len .. L-H) for each
+        # split to hold forecast positives; otherwise every smoke forecast run
+        # has no val metric and fit() refuses to select a checkpoint.
+        cfg = DignityConfig.from_yaml(str(ROOT / "config/smoke.yaml"))
+        _, d = prepare_data(cfg)
+        last = cfg.model.horizon - 1
+        for ws in (d.train, d.val, d.test):
+            assert ws.y_forecast[ws.forecast_mask, last].any()
+        for ws in (d.val, d.test):
+            assert (ws.y_forecast[:, 0] == 1).any()
+
     def test_synthetic_block_loads_with_tuple_ranges(self, tmp_path):
         cfg = DignityConfig.from_yaml(
             _write(tmp_path, data={"synthetic": {"duration_range": [5, 9]}})
