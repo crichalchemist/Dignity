@@ -24,6 +24,7 @@ class WindowSet:
     forecast_mask: np.ndarray  # bool [N]
     block_index: np.ndarray  # int64 [N], block_id of each window
     onset_offset: np.ndarray  # int64 [N], row of first anomalous row, -1 if none
+    end_row: np.ndarray  # int64 [N], row-in-block of each window's last row
     anomaly_type: np.ndarray  # object [N], dominant type in window or "none"
 
 
@@ -281,18 +282,18 @@ class TransactionPipeline:
             y_fc, mask = forecast_labels(aid, flags, starts, self.seq_len, horizon)
             onset, dominant = window_meta(flags, types, starts, self.seq_len)
             parts.append(
-                (
-                    x.transpose(0, 2, 1).astype(np.float32),
-                    risk_labels(flags, starts, self.seq_len, overlap),
-                    y_fc,
-                    mask,
-                    np.full(len(starts), block_id, dtype=np.int64),
-                    onset,
-                    dominant,
-                )
+                {
+                    "X": x.transpose(0, 2, 1).astype(np.float32),
+                    "y_risk": risk_labels(flags, starts, self.seq_len, overlap),
+                    "y_forecast": y_fc,
+                    "forecast_mask": mask,
+                    "block_index": np.full(len(starts), block_id, dtype=np.int64),
+                    "onset_offset": onset,
+                    "end_row": (starts + self.seq_len - 1).astype(np.int64),
+                    "anomaly_type": dominant,
+                }
             )
-        cols = [np.concatenate(c) for c in zip(*parts, strict=True)]
-        return WindowSet(*cols)
+        return WindowSet(**{k: np.concatenate([p[k] for p in parts]) for k in parts[0]})
 
     def _fit_on(self, df: pd.DataFrame) -> None:
         """Fit the scaler. ``df`` must already have had privacy applied."""

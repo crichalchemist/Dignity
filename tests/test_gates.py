@@ -22,6 +22,7 @@ def _windowset(**fields) -> WindowSet:
         "forecast_mask": np.zeros(n, dtype=bool),
         "block_index": np.arange(n, dtype=np.int64),
         "onset_offset": np.full(n, -1, dtype=np.int64),
+        "end_row": np.arange(n, dtype=np.int64),
         "anomaly_type": np.full(n, "none", dtype=object),
     }
     return WindowSet(**{**defaults, **fields})
