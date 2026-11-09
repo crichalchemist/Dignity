@@ -346,7 +346,7 @@ def run_forecast(
     runs = _train_seeds(forecast_config, data, seed_name)
     _, risk_val, risk_test = risk
 
-    model_sides, baseline_sides = [], []
+    model_sides = []
     for k, (_, result) in enumerate(runs):
         boot = n_boot if k == 0 else 0  # CIs only for the headline seed
         val_score = _predict(forecast_config, result, data.val.X)["score"]
@@ -354,16 +354,15 @@ def run_forecast(
         model_sides.append(
             _early_warning(data.val, data.test, val_score, test_score, boot, seed)
         )
-        baseline_sides.append(
-            _early_warning(
-                data.val,
-                data.test,
-                risk_score_forecast(risk_val[k], horizon),
-                risk_score_forecast(risk_test[k], horizon),
-                boot,
-                seed,
-            )
-        )
+    # the baseline is reported for the headline (first) seed only
+    baseline_side = _early_warning(
+        data.val,
+        data.test,
+        risk_score_forecast(risk_val[0], horizon),
+        risk_score_forecast(risk_test[0], horizon),
+        n_boot,
+        seed,
+    )
 
     metrics = model_sides[0]  # headline model: first training seed
     metrics["seed_spread"] = {
@@ -371,7 +370,7 @@ def run_forecast(
         "mean_pr_auc": _spread([_mean_pr_auc(m) for m in model_sides]),
         "lead_time_median": _spread([m["lead_time"]["median"] for m in model_sides]),
     }
-    baselines = {"risk_score_forecast": baseline_sides[0]}
+    baselines = {"risk_score_forecast": baseline_side}
 
     img_dir = Path(config.eval.img_dir)
     img_dir.mkdir(parents=True, exist_ok=True)

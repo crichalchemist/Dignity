@@ -433,6 +433,28 @@ def _script_forecast_val_metrics(monkeypatch, pr_auc, auroc):
     monkeypatch.setattr("train.loop.risk_metrics", scripted)
 
 
+def _script_forecast_columns(monkeypatch, pr_auc, auroc):
+    """Per-column scripted val metrics, same values every epoch.
+
+    risk_metrics is called once per scorable horizon, in column order, so call k of
+    an epoch gets pr_auc[k] / auroc[k]. Returns the class counts it was called with.
+    """
+    seen = []
+
+    def scripted(y, score, block_index, n_boot, seed, anomaly_type=None):
+        k = len(seen) % len(auroc)
+        seen.append(len(np.unique(y)))
+        return {
+            "auroc": {"value": auroc[k]},
+            "pr_auc": {"value": pr_auc[k]},
+            "recall_at_1pct_fpr": {"value": 0.5},
+            "brier": {"value": 0.25},
+        }
+
+    monkeypatch.setattr("train.loop.risk_metrics", scripted)
+    return seen
+
+
 @pytest.fixture
 def forecast_fit_config(tiny_fit_config):
     tiny_fit_config.model.task = "forecast"
@@ -488,20 +510,18 @@ class TestFitForecast:
     def test_forecast_val_skips_horizons_without_both_classes(
         self, tiny_split, forecast_fit_config, tmp_path, monkeypatch
     ):
-        seen = []
-
-        def spy(y, score, block_index, n_boot, seed, anomaly_type=None):
-            seen.append(len(np.unique(y)))
-            return {
-                k: {"value": 0.5} for k in ("auroc", "pr_auc", "recall_at_1pct_fpr")
-            }
-
-        monkeypatch.setattr("train.loop.risk_metrics", spy)
-        # horizon 0 has no positive among masked val rows
+        # horizon 0 has no positive among masked val rows; the 9 scorable columns
+        # get distinct scripted values so only a mean over them gives 0.45 / 0.7
+        pr = [0.05 + 0.1 * k for k in range(9)]
+        au = [0.9 - 0.05 * k for k in range(9)]
+        seen = _script_forecast_columns(monkeypatch, pr, au)
         tiny_split.val.y_forecast[:, 0] = 0
-        fit(forecast_fit_config, tiny_split, seed=0, run_dir=str(tmp_path))
+        r = fit(forecast_fit_config, tiny_split, seed=0, run_dir=str(tmp_path))
         assert seen and set(seen) == {2}
         assert len(seen) == 3 * 9  # 3 epochs, 9 scorable horizons
+        for row in r.history:
+            assert row["val_pr_auc"] == pytest.approx(0.45)
+            assert row["val_auroc"] == pytest.approx(0.7)
 
     def test_forecast_val_with_no_positive_in_any_horizon_fails_loudly(
         self, tiny_split, forecast_fit_config, tmp_path
@@ -510,14 +530,38 @@ class TestFitForecast:
         with pytest.raises(RuntimeError, match="no best checkpoint"):
             fit(forecast_fit_config, tiny_split, seed=0, run_dir=str(tmp_path))
 
-    def test_forecast_chance_guard_reads_the_last_horizon_auroc(
-        self, tiny_split, forecast_fit_config, tmp_path
+    def test_forecast_chance_guard_fires_when_only_the_last_horizon_is_below(
+        self, tiny_split, forecast_fit_config, tmp_path, monkeypatch
     ):
-        forecast_fit_config.train.chance_guard_auroc = 1.01
+        # mean AUROC 0.82 and column 0 are fine; only column H-1 is under 0.5
+        _script_forecast_columns(monkeypatch, [0.5] * 10, [0.9] * 9 + [0.1])
+        forecast_fit_config.train.chance_guard_auroc = 0.5
         forecast_fit_config.train.guard_epochs = 1
         with pytest.warns(ChanceGuardWarning, match="chance guard") as rec:
             fit(forecast_fit_config, tiny_split, seed=0, run_dir=str(tmp_path))
         assert sum(w.category is ChanceGuardWarning for w in rec) == 1
+
+    def test_forecast_chance_guard_ignores_a_weak_first_horizon(
+        self, tiny_split, forecast_fit_config, tmp_path, monkeypatch
+    ):
+        _script_forecast_columns(monkeypatch, [0.5] * 10, [0.1] + [0.9] * 9)
+        forecast_fit_config.train.chance_guard_auroc = 0.5
+        forecast_fit_config.train.guard_epochs = 1
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", ChanceGuardWarning)
+            fit(forecast_fit_config, tiny_split, seed=0, run_dir=str(tmp_path))
+
+    def test_forecast_chance_guard_is_skipped_when_the_last_horizon_is_one_class(
+        self, tiny_split, forecast_fit_config, tmp_path, monkeypatch
+    ):
+        # every scorable column is below the guard, but column H-1 cannot be scored
+        _script_forecast_columns(monkeypatch, [0.5] * 9, [0.1] * 9)
+        tiny_split.val.y_forecast[:, 9] = 0
+        forecast_fit_config.train.chance_guard_auroc = 0.5
+        forecast_fit_config.train.guard_epochs = 1
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", ChanceGuardWarning)
+            fit(forecast_fit_config, tiny_split, seed=0, run_dir=str(tmp_path))
 
     def test_forecast_config_trains_through_the_cli(self, monkeypatch, tmp_path):
         monkeypatch.chdir(tmp_path)

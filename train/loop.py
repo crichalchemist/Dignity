@@ -84,8 +84,8 @@ def _task_loss(config: DignityConfig, train_ws: WindowSet):
     if task == "risk":
         return risk_loss(resolve_pos_weight(config.train.pos_weight, train_ws.y_risk))
     if task == "forecast":
-        positives = train_ws.y_forecast[train_ws.forecast_mask].ravel()
-        return forecast_loss(resolve_pos_weight(config.train.pos_weight, positives))
+        labels = train_ws.y_forecast[train_ws.forecast_mask].ravel()
+        return forecast_loss(resolve_pos_weight(config.train.pos_weight, labels))
     raise NotImplementedError(f"task={task!r} does not train end to end yet")
 
 
@@ -135,7 +135,10 @@ def fit(
     run_dir: str,
     resume_from: str | None = None,
 ) -> FitResult:
-    """Train a risk or forecast model; write best.pt, last.pt and history.json to run_dir."""
+    """Train a risk or forecast model.
+
+    Writes best.pt, last.pt and history.json to run_dir.
+    """
     torch.manual_seed(seed)
     device = torch.device(config.device if torch.cuda.is_available() else "cpu")
     use_amp = config.train.use_amp and device.type == "cuda"
