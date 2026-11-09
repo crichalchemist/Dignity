@@ -257,9 +257,10 @@ Dignity/
 │   └── test_models.py       # Model components (11 tests)
 │
 └── docs/                     # Documentation
-    ├── plans/               # Refactoring plans and summaries
-    ├── guides/              # User guides
-    └── api/                 # API reference
+    ├── ARCHITECTURE.md      # Models, backbones, and heads
+    ├── PRIVACY.md           # Privacy stage and its guarantees
+    ├── THREAT-MODEL.md      # Threat model and the tests that back it
+    └── README.md            # Docs index
 ```
 
 **Package Stats:**

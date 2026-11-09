@@ -405,10 +405,3 @@ model = nn.DataParallel(model)
 # Or with DistributedDataParallel
 model = nn.parallel.DistributedDataParallel(model)
 ```
-
-## Next Steps
-
-- **[Configuration Guide](CONFIGURATION.md)** - Configure architecture parameters
-- **[Training Guide](TRAINING.md)** - Train and evaluate models
-- **[API Reference](API_REFERENCE.md)** - Detailed API documentation
-- **[Deployment Guide](DEPLOYMENT.md)** - Export and deploy models
