@@ -23,7 +23,7 @@ If it is missing or points at a macOS path (the other boot rebuilt it), recreate
 /usr/bin/python3.12 -m venv --without-pip .venv && source .venv/bin/activate
 python -m ensurepip --upgrade
 pip install torch --index-url https://download.pytorch.org/whl/cpu
-pip install -r requirements.txt && pip install -e . --no-deps
+pip install -r requirements.txt -r requirements-dev.txt && pip install -e . --no-deps
 ```
 
 `torch>=2.5` is required (`torch.onnx.export(..., dynamo=False)` in `export/to_onnx.py`);
@@ -32,6 +32,8 @@ conda-forge's current pytorch (2.6) also satisfies it if you prefer a conda env.
 **On the macOS boot** the Linux `.venv/` is unusable. Use the existing conda env instead,
 prefixing every command with `conda run -n dignity-model` (torch 2.10, Python 3.11). Verified
 2026-11-08: 100 passed, 1 skipped (CUDA), and `pre-commit run --all-files` is clean.
+`requirements-dev.txt` must also be installed into that env:
+`conda run -n dignity-model pip install -r requirements-dev.txt`.
 
 Verify before claiming any test/train result actually ran.
 
@@ -45,6 +47,7 @@ format that export no longer supports (DGNTY-3, DGNTY-35). No shipped config wri
 ```bash
 # Tests (101 collected: test_core 23, test_data 23, test_models 11, test_privacy 34,
 # test_operator 4, test_docs 4, test_train 2 — one skips without CUDA)
+# every test is limited to 300 s (pytest.ini; pytest-timeout)
 pytest tests/ -v
 pytest tests/test_models.py -v                       # one file
 pytest tests/test_models.py::TestDignityModel::test_risk_model -v   # one test
