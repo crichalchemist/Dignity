@@ -72,7 +72,7 @@ python -m train.cli --config config/colab.yaml
 # and formats .ipynb files too, so it must stay `ruff check`/`ruff format` clean.
 
 # ONNX export
-dignity-export --checkpoint runs/risk/dignity_risk_best.pt --output dignity_risk.onnx --benchmark  # or python -m export.to_onnx
+dignity-export --checkpoint runs/risk/best.pt --output dignity_risk.onnx --benchmark  # or python -m export.to_onnx
 ```
 
 `pytest.ini` sets `pythonpath = . run`. Imports across the package are **absolute from the repo
@@ -95,6 +95,7 @@ data/labels.py                      →  risk/forecast labels from the event rec
 data/loader.py                      →  TransactionDataset (dict batches) / create_dataloader
 models/dignity.py Dignity           →  DignityBackbone + one head
 train/engine.py                     →  train_epoch / predict
+train/loop.py fit                  →  shared loop (cli, notebook, eval.run); best.pt on val PR-AUC
 train/checkpoint.py                 →  self-describing checkpoints (FORMAT_VERSION 2) / build_model_from_meta
 train/losses.py                     →  risk_loss
 export/to_onnx.py                   →  export + verify + benchmark
@@ -108,7 +109,7 @@ this is the single most common source of shape bugs, and `train/losses.py::risk_
 and labels to `[B]`.
 
 Adding a task = new head module in `models/head/` + a branch in `Dignity.__init__` + a loss in
-`train/losses.py` and its branch in `train/cli.py`. Nothing else changes.
+`train/losses.py` and its branch in `train/loop.py::fit`. Nothing else changes.
 
 `core/signals.SignalProcessor` is an **all-static utility class**. `core/privacy.PrivacyManager`
 is **instance-based**: it is bound to a `PrivacyBudget` (ε ledger), an optional HMAC key, and
@@ -122,7 +123,7 @@ a mechanism, it needs a test in `tests/test_privacy.py` or CI's 100% gate on tha
   `[f for f in self.features if f in df.columns]` and stores it as `self.available_features`.
   `compute_signals` only ever derives `volume_volatility`, `volatility`, `momentum`, and
   `directional_change`. So `base.yaml`'s 9-feature list resolves to **7** against synthetic data
-  (`price_change` and `regime` are never produced), and `train/cli.py` sizes the model from
+  (`price_change` and `regime` are never produced), and `train/loop.py::fit` sizes the model from
   `SplitData.feature_names` (the pipeline's `available_features`) — **`model.input_size`
   in YAML is ignored**.
   If a model's input width is unexpected, check `available_features` first.
@@ -133,7 +134,7 @@ a mechanism, it needs a test in `tests/test_privacy.py` or CI's 100% gate on tha
   per-row event record, never from a single row. Risk = overlap rule: a window is positive when its
   anomalous fraction exceeds `data.label_overlap`, never "label of the last row". `create_sequences`
   rejects 2-D targets; forecast targets come from `data.labels.forecast_labels`.
-  `train/cli.py` uses `TransactionPipeline.process_blocks`: shuffle and split blocks 70/15/15,
+  `train/loop.py::prepare_data` uses `TransactionPipeline.process_blocks`: shuffle and split blocks 70/15/15,
   fit the scaler on train blocks only, and compute signals and windows inside each block. Do not
   go back to `process()` + a positional slice — that trained on 100% normal and validated on 100%
   anomalous rows (val loss ≈ 42 in the January checkpoints).
@@ -153,7 +154,7 @@ a mechanism, it needs a test in `tests/test_privacy.py` or CI's 100% gate on tha
 - **Only `task: risk` trains end to end.** This contradicts "Adding a task ... Nothing else
   changes" above. The engine also needs work:
   - `train/cli.py` raises `NotImplementedError` for `forecast` and `policy` until M4.
-  - `train/cli.py` never passes head kwargs (`pred_len`, `n_actions`) from config.
+  - `train/loop.py::fit` never passes head kwargs (`pred_len`, `n_actions`) from config.
 - **`docs/` and `README.md` drift from the code easily.** `tests/test_docs.py` guards removed
   claims and links to missing files, not stale examples. Trust the source, and when you touch a
   documented symbol, fix the doc in the same change.

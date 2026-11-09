@@ -3,6 +3,7 @@
 import json
 import math
 import warnings
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -12,9 +13,12 @@ from torch.amp import GradScaler
 from data.loader import create_dataloader
 from models.dignity import Dignity
 from train.checkpoint import load_checkpoint
+from train.cli import main
 from train.engine import predict, train_epoch
-from train.loop import ChanceGuardWarning, fit, resolve_pos_weight
+from train.loop import ChanceGuardWarning, FitResult, fit, resolve_pos_weight
 from train.losses import risk_loss
+
+ROOT = Path(__file__).resolve().parents[1]
 
 
 class TestTrainEpoch:
@@ -121,16 +125,16 @@ class TestTrainCli:
     def test_cpu_run_forwards_loader_knobs_and_never_enables_amp(
         self, tiny_train_config, monkeypatch, recwarn, tmp_path
     ):
-        import train.cli
+        import train.loop
 
-        calls, real = [], train.cli.create_dataloader
+        calls, real = [], train.loop.create_dataloader
 
         def spy(*a, **k):
             calls.append(k)
             return real(*a, **{**k, "num_workers": 0})  # no worker processes in tests
 
-        monkeypatch.setattr(train.cli, "create_dataloader", spy)
-        train.cli.main(["--config", str(tiny_train_config(data={"num_workers": 3}))])
+        monkeypatch.setattr(train.loop, "create_dataloader", spy)
+        main(["--config", str(tiny_train_config(data={"num_workers": 3}))])
         assert [c["num_workers"] for c in calls] == [3, 3]
         assert all(c["pin_memory"] is False for c in calls)
         assert not [
@@ -138,41 +142,45 @@ class TestTrainCli:
             for w in recwarn
             if "GradScaler" in str(w.message) or "autocast" in str(w.message)
         ]
-        assert (tmp_path / "runs" / "dignity_risk_best.pt").exists()
+        assert (tmp_path / "runs" / "best.pt").exists()
 
     def test_one_grad_scaler_per_run_and_disabled_on_cpu(
         self, tiny_train_config, monkeypatch
     ):
-        import train.cli
+        import train.loop
 
-        made, real = [], train.cli.GradScaler
+        made, real = [], train.loop.GradScaler
 
         def spy(*a, **k):
             s = real(*a, **k)
             made.append(s)
             return s
 
-        monkeypatch.setattr(train.cli, "GradScaler", spy)
-        train.cli.main(["--config", str(tiny_train_config(train={"epochs": 2}))])
+        monkeypatch.setattr(train.loop, "GradScaler", spy)
+        main(["--config", str(tiny_train_config(train={"epochs": 2}))])
         assert len(made) == 1 and made[0].is_enabled() is False
 
-    def test_resume_does_not_overwrite_better_checkpoint(
-        self, tiny_train_config, tmp_path
-    ):
+    def test_cli_forwards_resume_to_fit(self, tiny_train_config, monkeypatch):
         import train.cli
 
-        runs = tmp_path / "runs"
-        train.cli.main(["--config", str(tiny_train_config(name="e1"))])
-        for name in ("dignity_risk_epoch1.pt", "dignity_risk_best.pt"):
-            raw = torch.load(runs / name, weights_only=True)
-            raw["best_metric"] = 1e-6  # unbeatable: BCE on real data is far above it
-            torch.save(raw, runs / name)
-        cfg2 = tiny_train_config(name="e2", train={"epochs": 2})
-        train.cli.main(
-            ["--config", str(cfg2), "--resume", str(runs / "dignity_risk_epoch1.pt")]
-        )
-        assert load_checkpoint(runs / "dignity_risk_best.pt")["epoch"] == 1
-        assert load_checkpoint(runs / "dignity_risk_epoch2.pt")["best_metric"] == 1e-6
+        seen = {}
+
+        def fake_fit(config, data, seed, run_dir, resume_from=None):
+            seen["resume_from"] = resume_from
+            return FitResult("x", [], 0.0, None)
+
+        monkeypatch.setattr(train.cli, "fit", fake_fit)
+        cfg = str(tiny_train_config())
+        assert main(["--config", cfg, "--resume", "x.pt"]) == 0
+        assert seen["resume_from"] == "x.pt"
+
+    def test_cli_trains_tiny_config_and_writes_a_loadable_best_checkpoint(
+        self, monkeypatch, tmp_path
+    ):
+        monkeypatch.chdir(tmp_path)  # smoke.yaml paths are relative
+        assert main(["--config", str(ROOT / "config/smoke.yaml")]) == 0
+        ckpt = load_checkpoint(str(tmp_path / "runs/smoke/train/best.pt"))
+        assert ckpt["meta"].task == "risk" and ckpt["epoch"] == 1
 
 
 def _script_val_metrics(monkeypatch, pr_auc, auroc):

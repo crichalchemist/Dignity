@@ -117,7 +117,7 @@ class TestExportCli:
         import train.cli
 
         train.cli.main(["--config", str(tiny_train_config())])
-        best = tmp_path / "runs" / "dignity_risk_best.pt"
+        best = tmp_path / "runs" / "best.pt"
         meta = load_checkpoint(best)["meta"]
         assert meta.feature_names == FEATURES
         out = tmp_path / "risk.onnx"

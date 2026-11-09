@@ -115,7 +115,7 @@ loss curves, validation scores, attention plots and ONNX export shown step by st
 ```bash
 # Export trained model to ONNX
 python -m export.to_onnx \
-    --checkpoint runs/risk/dignity_risk_best.pt \
+    --checkpoint runs/risk/best.pt \
     --output dignity_risk.onnx \
     --benchmark
 ```
@@ -157,7 +157,7 @@ Model Architecture (models/)
 ├── Task Heads: Risk | Forecast | Policy
 └── ~350K parameters (default config)
                     ↓
-Training (train/engine.py + train/cli.py)
+Training (train/engine.py + train/loop.py)
 ├── Mixed precision (AMP)
 ├── Gradient clipping
 ├── Checkpointing

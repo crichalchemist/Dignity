@@ -18,6 +18,9 @@ from core.config import (
 from core.signals import SignalProcessor
 from data.source.anomalies import ANOMALY_TYPES
 from data.source.synthetic import RAW_COLUMNS, SyntheticGenerator
+from train.loop import prepare_data
+
+ROOT = Path(__file__).resolve().parents[1]
 
 
 class TestSignalProcessor:
@@ -248,6 +251,13 @@ def _write(tmp_path, **sections):
 
 
 class TestSyntheticConfig:
+    def test_smoke_preset_val_and_test_each_hold_both_classes(self):
+        # risk_metrics raises on a single-class split (M3.2); CI must never hit that.
+        cfg = DignityConfig.from_yaml(str(ROOT / "config/smoke.yaml"))
+        _, d = prepare_data(cfg)
+        for ws in (d.train, d.val, d.test):
+            assert set(np.unique(ws.y_risk)) == {0, 1}
+
     def test_synthetic_block_loads_with_tuple_ranges(self, tmp_path):
         cfg = DignityConfig.from_yaml(
             _write(tmp_path, data={"synthetic": {"duration_range": [5, 9]}})
