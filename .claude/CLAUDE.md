@@ -45,9 +45,9 @@ format that export no longer supports (DGNTY-3, DGNTY-35). No shipped config wri
 ## Commands
 
 ```bash
-# Tests (237 collected: test_core 41, test_data 68, test_models 14, test_privacy 34,
+# Tests (248 collected: test_core 41, test_data 68, test_models 14, test_privacy 34,
 # test_operator 4, test_docs 4, test_train 27, test_checkpoint 3, test_export 7,
-# test_calibration 3, test_labels 7, test_gates 11, test_ci 2, test_eval 12 — one skips without CUDA)
+# test_calibration 3, test_labels 7, test_gates 11, test_ci 3, test_eval 22 — one skips without CUDA)
 # every test is limited to 300 s (pytest.ini; pytest-timeout)
 pytest tests/ -v
 pytest tests/test_models.py -v                       # one file
@@ -63,6 +63,8 @@ pre-commit run --all-files
 pytest tests/ --cov --cov-fail-under=100
 
 python -m eval.gates --seed 1000   # data gate; tuning seed only, refuses 2026
+python -m eval.run --smoke --seed tuning  # CI-sized end-to-end evaluation; outputs under runs/smoke/
+python -m eval.run --config config/synthetic_hard.yaml --seed tuning  # full run on a Colab GPU; see docs/RESULTS.md
 
 # Train
 # checkpoints land in ./runs/<task>/ (gitignored); never in checkpoints/
@@ -98,6 +100,7 @@ train/engine.py                     →  train_epoch / predict
 train/loop.py fit                  →  shared loop (cli, notebook, eval.run); best.pt on val PR-AUC
 train/checkpoint.py                 →  self-describing checkpoints (FORMAT_VERSION 2) / build_model_from_meta
 train/losses.py                     →  risk_loss
+eval/{metrics,baselines,plots,run}.py → risk.json + charts; CIs bootstrap blocks, not windows
 export/to_onnx.py                   →  export + verify + benchmark
 ```
 

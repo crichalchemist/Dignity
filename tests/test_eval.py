@@ -1,4 +1,5 @@
 import json
+import time
 
 import numpy as np
 import pandas as pd
@@ -8,6 +9,7 @@ import eval.metrics as metrics_module
 from eval.baselines import block_tree
 from eval.metrics import bootstrap_ci, model_gate, risk_metrics, threshold_at_fpr
 from eval.plots import plot_per_type_recall, plot_pr_curves
+from eval.run import config_hash, main
 
 Y = np.array([0, 0, 0, 0, 1, 1, 1, 1])
 S = np.array([0.1, 0.2, 0.3, 0.4, 0.9, 0.8, 0.35, 0.05])
@@ -171,3 +173,67 @@ class TestPlots:
     def test_per_type_chart_accepts_no_types(self, tmp_path):
         plot_per_type_recall({}, str(tmp_path / "t.png"))
         assert (tmp_path / "t.png").stat().st_size > 0
+
+
+class TestEvalRunSmoke:
+    def test_smoke_evaluation_writes_results_schema_and_charts_within_a_minute(
+        self, monkeypatch, tmp_path, capsys
+    ):
+        monkeypatch.chdir(tmp_path)  # all smoke outputs land in tmp_path
+        t0 = time.perf_counter()
+        assert main(["--smoke", "--seed", "tuning"]) == 0
+        assert time.perf_counter() - t0 < 60
+        printed = capsys.readouterr().out
+        assert "majority" in printed and "window_logistic" in printed  # spec 5.3
+        out = json.loads((tmp_path / "runs/smoke/results/risk.json").read_text())
+        assert set(out) == {"config_hash", "seed", "git_sha", "metrics", "baselines"}
+        assert out["seed"] == 1000
+        assert {
+            "auroc",
+            "pr_auc",
+            "recall_at_1pct_fpr",
+            "brier",
+            "prevalence",
+            "per_type",
+            "block_level",
+            "seed_spread",
+            "model_gate",
+        } <= set(out["metrics"])
+        assert set(out["baselines"]) == {"majority", "window_logistic", "block_tree"}
+        assert isinstance(out["metrics"]["model_gate"]["passed"], bool)
+        for png in ("risk_pr_curve.png", "risk_per_type_recall.png"):
+            assert (tmp_path / "runs/smoke/img" / png).stat().st_size > 0
+
+    @pytest.mark.parametrize("task", ["forecast", "policy"])
+    def test_unbuilt_tasks_are_refused_not_silently_skipped(self, task, capsys):
+        with pytest.raises(SystemExit) as exc:
+            main(["--smoke", "--seed", "tuning", "--tasks", task])
+        assert exc.value.code == 2
+        assert "not implemented until M4" in capsys.readouterr().err
+
+    def test_smoke_preset_cannot_be_combined_with_the_evaluation_seed(
+        self, monkeypatch
+    ):
+        # run_risk is booby-trapped so the refusal must happen before any work
+        def boom(*args, **kwargs):
+            raise AssertionError("run_risk reached")
+
+        monkeypatch.setattr("eval.run.run_risk", boom)
+        with pytest.raises(SystemExit) as exc:
+            main(["--smoke", "--seed", "eval"])
+        assert exc.value.code == 2
+
+    def test_config_and_smoke_are_mutually_exclusive(self):
+        with pytest.raises(SystemExit) as exc:
+            main(["--smoke", "--config", "config/smoke.yaml", "--seed", "tuning"])
+        assert exc.value.code == 2
+
+    def test_one_hash_identifies_one_configuration(self):
+        from core.config import DignityConfig
+
+        a = DignityConfig()
+        b = DignityConfig()
+        b.data.synthetic.seed += 1
+        assert config_hash(a) == config_hash(DignityConfig())
+        assert config_hash(a) != config_hash(b)
+        assert len(config_hash(a)) == 16
