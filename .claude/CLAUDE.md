@@ -45,7 +45,7 @@ format that export no longer supports (DGNTY-3, DGNTY-35). No shipped config wri
 ## Commands
 
 ```bash
-# Tests (182 collected: test_core 33, test_data 64, test_models 14, test_privacy 34,
+# Tests (185 collected: test_core 34, test_data 66, test_models 14, test_privacy 34,
 # test_operator 4, test_docs 4, test_train 9, test_checkpoint 3, test_export 7,
 # test_calibration 3, test_labels 7 — one skips without CUDA)
 # every test is limited to 300 s (pytest.ini; pytest-timeout)

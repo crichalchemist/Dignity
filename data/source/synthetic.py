@@ -137,13 +137,16 @@ class SyntheticGenerator:
         d_lo, d_hi = cfg.duration_range
         durations = [int(d) for d in self.rng.integers(d_lo, d_hi + 1, size=k)]
         # Drop the last anomaly until the spans fit. If even one span is longer
-        # than the block this ends at k = 0: the block was drawn anomalous but
+        # than block_len - 1 this ends at k = 0: the block was drawn anomalous but
         # carries no anomaly, so its truth is 0 (label_noise may still flip its
         # block_label). That is allowed (G14).
-        while durations and sum(durations) > n:
+        while durations and sum(durations) > n - 1:
             durations.pop()
+        # Gaps start at 1 so no span starts at row 0: injectors act through the
+        # log-return into each span row, and row 0 has none (a flash crash there
+        # would be labelled but never happen).
         gaps = np.sort(
-            self.rng.integers(0, n - sum(durations) + 1, size=len(durations))
+            self.rng.integers(1, n - sum(durations) + 1, size=len(durations))
         )
         starts = gaps + np.cumsum([0, *durations])[:-1]  # start_i = g_i + sum d_j<i
         return [(int(s), d) for s, d in zip(starts, durations, strict=True)]

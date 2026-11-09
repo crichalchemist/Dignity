@@ -118,8 +118,9 @@ a single release and only then splits train/val/test by block, and any later
 release, so a fitted pipeline cannot score batches smaller than `k` with the
 stage on.
 
-`dignity-train` prints `Privacy: ε spent X of Y` after preprocessing so the
-ledger is visible, not theoretical.
+`dignity-train` prints `Privacy: ε spent per split: train X, val X, test X`
+(each to three decimals) after preprocessing so the ledger is visible, not
+theoretical.
 
 ## What is not here
 

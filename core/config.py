@@ -90,6 +90,11 @@ class DataConfig:
                 f"expected one of {_SOURCES}"
             )
         self.split = tuple(float(x) for x in self.split)
+        if len(self.split) != 3 or min(self.split) <= 0:
+            raise ValueError(
+                f"data.split={self.split} must be 3 positive fractions "
+                "(train, val, test)"
+            )
         if abs(sum(self.split) - 1) >= 1e-9:
             raise ValueError(f"data.split={self.split} must sum to 1")
         if isinstance(self.synthetic, dict):

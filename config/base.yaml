@@ -27,18 +27,8 @@ data:
     - directional_change
     - volume_volatility
     - regime
-
-train:
-  epochs: 50
-  lr: 0.0003
-  weight_decay: 0.00001
-  use_amp: true
-  gradient_clip: 1.0
-  checkpoint_dir: ./runs
-  save_interval: 5
-
-# Event-record generator under data.synthetic — commented out; every field at default.
-# data:
+# Event-record generator (data.synthetic) — commented out; every field at default.
+# To override, uncomment these lines in place: they nest under data: above.
 #   synthetic:
 #     n_blocks: 1000
 #     block_len: 160              # >= seq_len + horizon + 1
@@ -52,6 +42,15 @@ train:
 #     label_noise: 0.0
 #     regime_switch_prob: 0.0
 #     seed: 42
+
+train:
+  epochs: 50
+  lr: 0.0003
+  weight_decay: 0.00001
+  use_amp: true
+  gradient_clip: 1.0
+  checkpoint_dir: ./runs
+  save_interval: 5
 
 # Privacy stage — commented out by default. No block => no privacy stage runs.
 # See docs/PRIVACY.md for what each mechanism guarantees.

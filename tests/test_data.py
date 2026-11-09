@@ -8,6 +8,7 @@ import pandas as pd
 import pytest
 import scipy.stats
 import torch
+from numpy.lib.stride_tricks import sliding_window_view
 
 from core.config import DignityConfig, PrivacyConfig, SyntheticConfig
 from core.privacy import BudgetExhausted, PrivacyManager
@@ -150,6 +151,24 @@ class TestSyntheticGenerator:
         assert spans["max"].max() + 1 > 150
         assert durations.nunique() >= 20
         assert durations.between(3, 60).all()
+
+    def test_no_anomaly_starts_at_row_zero_where_its_entry_return_is_lost(self):
+        # Injectors act through the log-return INTO each span row; row 0 has none,
+        # so a flash crash starting there would be labelled but never happen.
+        # Spans nearly as long as the block make a row-0 start near-certain if the
+        # generator allowed one.
+        cfg = SyntheticConfig(
+            n_blocks=200,
+            contamination=1.0,
+            anomalies_per_block=(1, 1),
+            duration_range=(150, 159),
+        )
+        frame = SyntheticGenerator(cfg).generate()
+        row = pd.Series(np.arange(len(frame)) % cfg.block_len, index=frame.index)
+        hit = frame["is_anomalous"]
+        onsets = row[hit].groupby(frame.loc[hit, "anomaly_id"]).min()
+        assert len(onsets) == cfg.n_blocks
+        assert onsets.min() >= 1
 
     def test_block_label_is_the_truth_without_noise_and_flipped_with_full_noise(
         self,
@@ -465,6 +484,28 @@ class TestSequenceAwareSplit:
         assert d.train.X.shape[1:] == (100, 4)
         assert d.train.X.dtype == np.float32
 
+    def test_rolling_signals_restart_at_every_block(self, easy_frame):
+        # Raw columns cannot show a leak across a joint; the rolling signals can.
+        # Every block's windows must equal the block transformed on its own with
+        # the same fitted scaler, so no signal reads the previous block's rows.
+        base = DignityConfig.from_yaml(str(ROOT / "config" / "base.yaml"))
+        pipeline = TransactionPipeline(seq_len=100, features=base.data.features)
+        d = _split(pipeline, easy_frame, np.random.default_rng(0))
+        derived = {"volatility", "momentum", "directional_change", "volume_volatility"}
+        assert derived <= set(d.feature_names)
+
+        starts = window_starts(160, 100, 10)
+        for w in (d.train, d.val, d.test):
+            for block_id in np.unique(w.block_index):
+                block = easy_frame[easy_frame["block_id"] == block_id]
+                alone = sliding_window_view(pipeline._transform_on(block), 100, axis=0)[
+                    starts
+                ]
+                np.testing.assert_array_equal(
+                    w.X[w.block_index == block_id],
+                    alone.transpose(0, 2, 1).astype(np.float32),
+                )
+
     def test_every_positive_window_contains_an_anomalous_row(self, easy_frame):
         # DGNTY-18/39: a risk label with no anomalous row inside would teach noise.
         d = _split(
@@ -475,6 +516,24 @@ class TestSequenceAwareSplit:
         for w in (d.train, d.val, d.test):
             assert (w.onset_offset[w.y_risk == 1] >= 0).all()
             assert (w.onset_offset[w.y_risk == 0] == -1).all()
+
+        # Recompute every window's truth from the event record itself, not from
+        # anything the pipeline returned. WindowSet carries block_index but no
+        # window start; a block's windows are emitted in window_starts order.
+        overlap = 0.0  # what _split passes
+        starts = window_starts(160, 100, 10)
+        for w in (d.train, d.val, d.test):
+            for block_id in np.unique(w.block_index):
+                idx = np.flatnonzero(w.block_index == block_id)
+                assert len(idx) == len(starts)
+                rows = easy_frame.loc[
+                    easy_frame["block_id"] == block_id, "is_anomalous"
+                ].to_numpy()
+                windows = sliding_window_view(rows, 100)[starts]
+                positive = windows.mean(axis=1) > overlap
+                first = np.where(windows.any(axis=1), windows.argmax(axis=1), -1)
+                np.testing.assert_array_equal(w.y_risk[idx], positive.astype(np.int8))
+                np.testing.assert_array_equal(w.onset_offset[idx], first)
 
     def test_validation_outliers_are_not_absorbed_by_the_scaler(self):
         # Five constant blocks; the one in val and the one in test are six orders
@@ -499,15 +558,43 @@ class TestSequenceAwareSplit:
     def test_single_privacy_release_covers_all_three_splits(self, easy_frame):
         # The budget equals the per-column epsilon, so a second release for any
         # split would raise BudgetExhausted. All three come from one draw.
+        # Bounds sit inside the easy prices so the clip bites on both ends.
+        bounds = [500.0, 3000.0]
+        privacy = PrivacyConfig(
+            epsilon_total=1.0,
+            features={
+                "price": {"mechanism": "laplace", "epsilon": 1.0, "bounds": bounds}
+            },
+        )
         pipeline = TransactionPipeline(
             seq_len=100,
             features=["volume", "price"],
-            privacy=_laplace_price(eps_total=1.0, eps=1.0),
+            privacy=privacy,
             privacy_rng=_ZeroNoise(),
         )
         d = _split(pipeline, easy_frame, np.random.default_rng(0))
         assert pipeline.privacy_manager.budget.spent == pytest.approx(1.0)
         assert d.epsilon_spent == {"train": 1.0, "val": 1.0, "test": 1.0}
+
+        # Zero noise => the release is a pure clip. Every split must carry the
+        # released values, so it equals a plain run on pre-clipped prices ...
+        pre_clipped = easy_frame.assign(price=easy_frame["price"].clip(*bounds))
+        ref = _split(
+            TransactionPipeline(seq_len=100, features=["volume", "price"]),
+            pre_clipped,
+            np.random.default_rng(0),
+        )
+        raw = _split(
+            TransactionPipeline(seq_len=100, features=["volume", "price"]),
+            easy_frame,
+            np.random.default_rng(0),
+        )
+        for name in ("train", "val", "test"):
+            got, want = getattr(d, name), getattr(ref, name)
+            np.testing.assert_array_equal(got.block_index, want.block_index)
+            np.testing.assert_allclose(got.X, want.X)
+            # ... and differs from the unreleased frame, or the release did nothing
+            assert not np.allclose(got.X, getattr(raw, name).X)
 
     def test_no_privacy_reports_no_epsilon(self, easy_frame):
         d = _split(

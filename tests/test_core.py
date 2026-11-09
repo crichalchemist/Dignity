@@ -263,6 +263,13 @@ class TestSyntheticConfig:
         with pytest.raises(ValueError, match="split"):
             DataConfig(split=(0.7, 0.2, 0.2))
 
+    def test_split_must_name_train_val_and_test(self):
+        # [0.8, 0.2] sums to 1 but leaves process_blocks no test fraction
+        with pytest.raises(ValueError, match="data.split"):
+            DataConfig(split=[0.8, 0.2])
+        with pytest.raises(ValueError, match="data.split"):
+            DataConfig(split=[0.9, 0.1, 0.0])
+
     def test_default_type_weights_cover_every_anomaly_type(self):
         assert set(SyntheticConfig().type_weights) == set(ANOMALY_TYPES)
 
