@@ -16,6 +16,11 @@ def majority(y_train: np.ndarray, n_test: int) -> np.ndarray:
     return np.full(n_test, float(np.mean(y_train)))
 
 
+def risk_score_forecast(risk_score: np.ndarray, horizon: int) -> np.ndarray:
+    """Early-warning baseline: today's risk score is the score at every horizon."""
+    return np.repeat(risk_score[:, None], horizon, axis=1).astype(np.float32)
+
+
 def _window_features(X: np.ndarray) -> np.ndarray:
     """[max, min, std] over time for every column, shape [N, 3F]."""
     return np.concatenate([X.max(axis=1), X.min(axis=1), X.std(axis=1)], axis=1)

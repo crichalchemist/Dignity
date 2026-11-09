@@ -6,7 +6,7 @@ import pandas as pd
 import pytest
 
 import eval.metrics as metrics_module
-from eval.baselines import block_tree
+from eval.baselines import block_tree, risk_score_forecast
 from eval.metrics import (
     bootstrap_ci,
     forecast_metrics,
@@ -138,6 +138,12 @@ class TestBaselines:
         )  # row order: 9, 2, 5
         y, _ = block_tree(df_train, df_test)
         assert y.tolist() == [0, 0, 1]  # ascending block_id: 2, 5, 9
+
+    def test_risk_score_baseline_predicts_the_same_risk_at_every_horizon(self):
+        s = np.array([0.1, 0.7, 0.4], np.float32)
+        out = risk_score_forecast(s, horizon=4)
+        assert out.shape == (3, 4) and (out == s[:, None]).all()
+        assert out.dtype == np.float32
 
 
 PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
