@@ -136,9 +136,6 @@ a mechanism, it needs a test in `tests/test_privacy.py` or CI's 100% gate on tha
 - `setup.py` declares `dignity-export = export.to_onnx:main`, but `export/to_onnx.py` has **no
   `main()`** — only an `if __name__ == "__main__":` block. The console script fails; `python -m
   export.to_onnx` works.
-- `pytest.ini` documents that markers (`fast`, `timeout_300`) map to timeouts "via conftest.py
-  pytest-timeout hook". **No such hook exists** in `tests/conftest.py` and `pytest-timeout` is not
-  in `requirements.txt`. The markers are declared but inert.
 - **Only `task: risk` trains end to end.** This contradicts "Adding a task ... Nothing else
   changes" above. The engine also needs work:
   - `forecast` fails in `train_epoch` on a shape mismatch, because the 1-D binary synthetic
