@@ -1,16 +1,18 @@
 """Test model components."""
 
+import numpy as np
 import pytest
 import torch
 import torch.nn as nn
 
+from core.config import PolicyConfig
 from models.backbone.attention import AdditiveAttention
 from models.backbone.cnn1d import CNN1D
 from models.backbone.hybrid import DignityBackbone
 from models.backbone.lstm import StackedLSTM
 from models.dignity import Dignity
 from models.head.forecast import ForecastHead
-from models.head.policy import PolicyHead
+from models.head.policy import ACTIONS, PolicyHead, cost_matrix
 from models.head.risk import RiskHead
 
 
@@ -63,6 +65,12 @@ class TestBackboneComponents:
 
 class TestTaskHeads:
     """Test task-specific heads."""
+
+    def test_cost_matrix_rows_follow_actions_and_columns_index_the_true_state(self):
+        C = cost_matrix(PolicyConfig().costs)
+        assert C.dtype == np.float32
+        assert C.tolist() == [[0.0, 10.0], [1.0, 1.0], [3.0, 0.5]]
+        assert set(PolicyConfig().costs) == set(ACTIONS)
 
     def test_risk_head(self):
         """Test risk scoring head."""

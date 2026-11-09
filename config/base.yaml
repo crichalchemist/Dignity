@@ -9,6 +9,7 @@ model:
   dropout: 0.1
   cnn_kernel_size: 3
   horizon: 10  # forecast H
+  n_actions: 3  # policy; must equal len(ACTIONS)
 
 data:
   source: synthetic  # only "synthetic" in v1.0; other sources are v1.1 (DGNTY-41)
@@ -66,6 +67,13 @@ eval:
   out_dir: results/v1.0
   img_dir: docs/img
 
+# Triage costs C[action][true state]; review_budget caps the share of windows sent to analysts (blocks do not count).
+policy:
+  costs:
+    allow: {anomaly: 10.0, normal: 0.0}
+    review: {anomaly: 1.0, normal: 1.0}
+    block: {anomaly: 0.5, normal: 3.0}
+  review_budget: 0.05
 # Privacy stage — commented out by default. No block => no privacy stage runs.
 # See docs/PRIVACY.md for what each mechanism guarantees.
 # privacy:

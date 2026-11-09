@@ -1,8 +1,19 @@
 """Policy head for reinforcement learning (optional)."""
 
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+
+ACTIONS = ("allow", "review", "block")
+
+
+def cost_matrix(costs: dict[str, dict[str, float]]) -> np.ndarray:
+    """Cost table as float32 [3, 2]; rows follow ACTIONS, column 0 is normal
+    (y = 0) and column 1 is anomaly (y = 1), so C[a, y] indexes directly."""
+    return np.array(
+        [[costs[a]["normal"], costs[a]["anomaly"]] for a in ACTIONS], np.float32
+    )
 
 
 class PolicyHead(nn.Module):

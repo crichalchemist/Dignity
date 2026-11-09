@@ -11,6 +11,7 @@ from core.config import (
     DataConfig,
     DignityConfig,
     EvalConfig,
+    PolicyConfig,
     PrivacyConfig,
     SyntheticConfig,
     TrainConfig,
@@ -379,3 +380,58 @@ class TestEvalConfig:
             TrainConfig(select_metric="brier")
         for ok in ("pr_auc", "auroc", "recall_at_1pct_fpr"):
             assert TrainConfig(select_metric=ok).select_metric == ok
+
+
+class TestPolicyConfig:
+    def test_default_cost_table_is_the_spec_table(self):
+        c = DignityConfig().policy
+        assert c.review_budget == 0.05
+        assert c.costs == {
+            "allow": {"anomaly": 10.0, "normal": 0.0},
+            "review": {"anomaly": 1.0, "normal": 1.0},
+            "block": {"anomaly": 0.5, "normal": 3.0},
+        }
+        assert DignityConfig().model.n_actions == 3  # == len(ACTIONS)
+
+    def test_policy_block_round_trips_through_yaml(self, tmp_path):
+        # Mutate first: the default reloads equal even if to_yaml drops policy.
+        cfg = DignityConfig()
+        cfg.policy.review_budget = 0.1
+        cfg.policy.costs["block"]["normal"] = 2.0
+        path = str(tmp_path / "c.yaml")
+        cfg.to_yaml(path)
+        assert "policy" in yaml.safe_load(Path(path).read_text())
+        back = DignityConfig.from_yaml(path)
+        assert back.policy == cfg.policy
+        assert back.policy.review_budget == 0.1
+        assert back.policy.costs["block"]["normal"] == 2.0
+
+    def test_base_yaml_spells_out_policy_block_and_n_actions_raw(self):
+        # The dataclass fills defaults, so a key missing from base.yaml would
+        # still load; read the raw file.
+        raw = yaml.safe_load(Path("config/base.yaml").read_text())
+        assert set(raw["policy"]) == {"costs", "review_budget"}
+        assert "n_actions" in raw["model"]
+        assert DignityConfig.from_yaml("config/base.yaml").policy == PolicyConfig()
+
+    @pytest.mark.parametrize(
+        "mutate, match",
+        [
+            (lambda d: d["costs"].pop("review"), "actions"),
+            (lambda d: d["costs"]["block"].pop("normal"), "anomaly"),
+            (lambda d: d.update(review_budget=0.0), "review_budget"),
+            (lambda d: d.update(review_budget=1.5), "review_budget"),
+        ],
+    )
+    def test_rejects_a_cost_table_that_cannot_price_every_decision(self, mutate, match):
+        d = {
+            "costs": {
+                "allow": {"anomaly": 10.0, "normal": 0.0},
+                "review": {"anomaly": 1.0, "normal": 1.0},
+                "block": {"anomaly": 0.5, "normal": 3.0},
+            },
+            "review_budget": 0.05,
+        }
+        mutate(d)
+        with pytest.raises(ValueError, match=match):
+            PolicyConfig(**d)
