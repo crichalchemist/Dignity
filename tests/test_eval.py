@@ -195,6 +195,16 @@ class TestBaselines:
         assert (a == 1).sum() == 10
         assert np.flatnonzero(a == 1).tolist() == list(range(90, 100))
 
+    def test_baseline_thresholds_come_from_val_scores_never_test_scores(self):
+        C = cost_matrix(PolicyConfig().costs)
+        val_s = np.r_[np.zeros(1900), np.full(100, 0.5)]
+        val_y = np.r_[np.zeros(1900, int), np.tile([0, 1], 50)]
+        # the val grid's lowest reviewing threshold is 0.025 (a val quantile), so
+        # 0.01 stays allowed; a grid that included test scores would review it
+        test_s = np.r_[np.full(5, 0.01), np.zeros(95)]
+        a = threshold_policy(val_s, val_y, test_s, C, budget=0.05)
+        assert (a == 0).all()
+
     def test_baseline_thresholds_do_not_depend_on_score_precision(self):
         C = cost_matrix(PolicyConfig().costs)
         val_s = np.r_[np.zeros(1900), np.full(100, 0.1)]
@@ -568,7 +578,10 @@ class TestEvalRunForecast:
 
 class TestPolicyMetrics:
     def _metrics(self, n_boot=50):
-        a = np.array([0, 1, 2, 2, 0, 1])
+        # one review and three blocks, so swapping the two action indices changes
+        # the cost, review rate, block rate and false-block rate (not the recall:
+        # review and block both catch an anomaly)
+        a = np.array([0, 1, 2, 2, 2, 0])
         y = np.array([1, 0, 1, 0, 0, 1])
         return policy_metrics(
             a,
@@ -581,11 +594,11 @@ class TestPolicyMetrics:
 
     def test_policy_is_scored_on_cost_capacity_catches_and_false_blocks(self):
         m = self._metrics()
-        assert m["expected_cost"]["value"] == pytest.approx(15.5 / 6)
-        assert m["review_rate"]["value"] == pytest.approx(2 / 6)
-        assert m["block_rate"]["value"] == pytest.approx(2 / 6)
-        assert m["anomaly_recall"]["value"] == pytest.approx(2 / 3)
-        assert m["false_block_rate"]["value"] == pytest.approx(1 / 3)
+        assert m["expected_cost"]["value"] == pytest.approx(27.5 / 6)
+        assert m["review_rate"]["value"] == pytest.approx(1 / 6)
+        assert m["block_rate"]["value"] == pytest.approx(3 / 6)
+        assert m["anomaly_recall"]["value"] == pytest.approx(1 / 3)
+        assert m["false_block_rate"]["value"] == pytest.approx(2 / 3)
         # guard (J30): weak by design, a percentile CI need not bracket the value
         for v in m.values():
             assert v["ci_low"] <= v["ci_high"]
@@ -701,9 +714,9 @@ class TestEvalRunPolicy:
 
         loaded, real = [], train.loop.load_backbone
 
-        def spy(model, path, feature_names):
+        def spy(model, path, *rest):
             loaded.append(path)
-            return real(model, path, feature_names)
+            return real(model, path, *rest)
 
         monkeypatch.setattr(train.loop, "load_backbone", spy)
         run_policy(config, "tuning", data, risk)

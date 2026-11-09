@@ -363,7 +363,17 @@ class TestEvalConfig:
         c = DignityConfig.from_yaml(str(root / "config" / "train_policy.yaml"))
         assert c.model.task == "policy" and c.train.checkpoint_dir == "./runs/policy"
         assert c.train.init_backbone_from == "./runs/risk/best.pt"
-        assert c.policy.review_budget == 0.05 and c.privacy is None
+        assert c.policy.review_budget == 0.05
+
+    def test_shipped_risk_and_policy_configs_preprocess_identically(self):
+        # the documented flow warm-starts policy from the risk run; load_backbone
+        # refuses a checkpoint fitted to other preprocessing, so the pair must match
+        root = Path(__file__).resolve().parents[1]
+        risk = DignityConfig.from_yaml(str(root / "config" / "train_risk.yaml"))
+        policy = DignityConfig.from_yaml(str(root / "config" / "train_policy.yaml"))
+        assert risk.privacy is not None
+        assert policy.privacy == risk.privacy
+        assert policy.data == risk.data
 
     def test_eval_block_survives_a_yaml_round_trip(self, tmp_path):
         # to_yaml must write eval:, or a saved run config silently reverts the

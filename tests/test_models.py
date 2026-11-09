@@ -104,6 +104,15 @@ class TestTaskHeads:
         assert not hasattr(head, "value") and not hasattr(head, "sample_action")
         assert ACTIONS == ("allow", "review", "block")
 
+    def test_policy_head_returns_raw_logits_not_probabilities(self):
+        # ONNX consumers apply softmax themselves; a head that already did would be
+        # squashed twice. Raw logits are exactly the final linear layer's output.
+        head = PolicyHead(input_size=32, n_actions=3).eval()
+        context = torch.randn(8, 32) * 5
+        logits = head(context)
+        assert torch.equal(logits, head.policy(head.shared(context)))
+        assert not torch.allclose(logits.sum(1), torch.ones(8), atol=1e-3)
+
     def test_policy_head_rejects_an_action_count_the_cost_table_cannot_price(self):
         with pytest.raises(ValueError, match="ACTIONS"):
             PolicyHead(input_size=256, n_actions=4)
@@ -127,6 +136,14 @@ class TestDignityModel:
             torch.randn(2, 50, 9)
         )
         assert out.shape == (2, 3) and attn.shape == (2, 50)
+
+    def test_policy_model_output_is_the_heads_logits_for_the_backbone_context(self):
+        model = Dignity(task="policy", input_size=9, hidden_size=64, n_actions=3).eval()
+        x = torch.randn(2, 50, 9)
+        out, _ = model(x)
+        context, _ = model.backbone(x)
+        assert torch.equal(out, model.head(context))
+        assert not torch.allclose(out.sum(1), torch.ones(2), atol=1e-3)
 
     def test_forecast_model_takes_horizon_not_volume_price_shape(self):
         model = Dignity(
@@ -182,24 +199,34 @@ class TestDignityModel:
 
 
 class TestDecisionRule:
+    # review rows sit among allow rows and are NOT in p(review) order: row 2
+    # (0.90) and row 5 (0.80) are the most review-likely, rows 1 and 4 must yield
     PROBS = np.array(
-        [[0.05, 0.90, 0.05], [0.15, 0.80, 0.05], [0.25, 0.70, 0.05], [0.05, 0.60, 0.35]]
-        + [[0.90, 0.05, 0.05]] * 16
+        [
+            [0.90, 0.05, 0.05],
+            [0.05, 0.60, 0.35],  # review 0.60, next best block
+            [0.05, 0.90, 0.05],  # review 0.90
+            [0.90, 0.05, 0.05],
+            [0.25, 0.70, 0.05],  # review 0.70, next best allow
+            [0.15, 0.80, 0.05],  # review 0.80
+        ]
+        + [[0.90, 0.05, 0.05]] * 14
     )
 
     def test_reviews_over_analyst_capacity_go_to_their_next_best_action(self):
         a = decide_actions(self.PROBS, review_budget=0.10)  # capacity 2 of 20
-        assert a[:4].tolist() == [1, 1, 0, 2] and (a[4:] == 0).all()
+        assert a[:6].tolist() == [0, 2, 1, 0, 0, 1] and (a[6:] == 0).all()
 
     def test_reviews_within_capacity_are_left_alone(self):
         a = decide_actions(self.PROBS, review_budget=0.25)  # capacity 5
-        assert a[:4].tolist() == [1, 1, 1, 1]
+        assert a[:6].tolist() == [0, 1, 1, 0, 1, 1] and (a[6:] == 0).all()
 
     def test_review_capacity_survives_float_error_in_the_budget(self):
         assert review_capacity(20, 0.05) == 1
         assert review_capacity(100, 0.07) == 7  # 0.07 * 100 = 7.000000000000001
         assert review_capacity(30, 0.1) == 3
         assert review_capacity(100, 0.29) == 29  # 0.29 * 100 = 28.999999999999996
+        assert review_capacity(10, 0.07) == 0  # floors 0.7; rounding would give 1
 
     def test_decisions_are_int64_indices_into_actions(self):
         a = decide_actions(self.PROBS, review_budget=0.10)

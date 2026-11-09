@@ -45,9 +45,9 @@ format that export no longer supports (DGNTY-3, DGNTY-35). No shipped config wri
 ## Commands
 
 ```bash
-# Tests (347 collected: test_core 50, test_data 69, test_models 21, test_privacy 34,
-# test_operator 4, test_docs 4, test_train 64, test_checkpoint 3, test_export 9,
-# test_calibration 3, test_labels 7, test_gates 11, test_ci 3, test_eval 55,
+# Tests (359 collected: test_core 51, test_data 69, test_models 23, test_privacy 34,
+# test_operator 4, test_docs 4, test_train 71, test_checkpoint 3, test_export 9,
+# test_calibration 3, test_labels 7, test_gates 11, test_ci 4, test_eval 56,
 # test_colab_eval 10 — one skips without CUDA)
 # every test is limited to 300 s (pytest.ini; pytest-timeout)
 pytest tests/ -v
@@ -101,7 +101,8 @@ models/dignity.py Dignity           →  DignityBackbone + one head
 train/engine.py                     →  train_epoch / predict
 train/loop.py fit                  →  shared loop (cli, notebook, eval.run); best.pt on val PR-AUC (policy: val neg_cost under the review cap)
 train/checkpoint.py                 →  self-describing checkpoints (FORMAT_VERSION 2) / build_model_from_meta
-train/losses.py                     →  risk_loss, forecast_loss (masked per-horizon BCE)
+train/losses.py                     →  risk_loss, forecast_loss (masked per-horizon BCE),
+                                       expected_cost_loss (policy: softmax-weighted cost table)
 eval/{metrics,baselines,plots,run}.py → risk.json, forecast.json, policy.json + charts; CIs bootstrap blocks, not windows
 export/to_onnx.py                   →  export + verify + benchmark
 ```
@@ -154,7 +155,7 @@ a mechanism, it needs a test in `tests/test_privacy.py` or CI's 100% gate on tha
 - **The policy warm-starts from a risk checkpoint.** Trained cold, the spec expected-cost loss
   stalls at "review everything". `config/train_policy.yaml` sets `train.init_backbone_from:
   ./runs/risk/best.pt`, so train risk first; `train/loop.load_backbone` copies only the
-  `backbone.*` tensors (feature names and shapes must match, else `ValueError`) and `fit` reads
+  `backbone.*` tensors (feature names, scaler center/scale, privacy block and shapes must match, else `ValueError` (under privacy the scaler tolerates 25% of scale: its noise is unseeded); the checkpoint must also share the run's `data:` block (same split); the two shipped configs share one `privacy:` block, keep them equal) and `fit` reads
   the key only for `task: policy`. Policy selects `best.pt` on val `neg_cost` under the review
   cap and ignores `select_metric`, `pos_weight` and the chance guard; resuming across metrics
   raises `ValueError`.

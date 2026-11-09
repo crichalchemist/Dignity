@@ -1,5 +1,6 @@
 """The one training loop: the CLI, the notebook and eval.run all call ``fit``."""
 
+import dataclasses
 import json
 import math
 import warnings
@@ -11,7 +12,7 @@ import pandas as pd
 import torch
 from torch.amp import GradScaler
 
-from core.config import DignityConfig
+from core.config import DataConfig, DignityConfig, PrivacyConfig
 from data.loader import create_dataloader
 from data.pipeline import SplitData, TransactionPipeline, WindowSet
 from data.source.synthetic import SyntheticGenerator
@@ -146,18 +147,81 @@ def _selection_metric(config: DignityConfig) -> str:
     return "neg_cost" if config.model.task == "policy" else config.train.select_metric
 
 
-def load_backbone(model, path: str, feature_names: list[str]) -> None:
+# The privacy stage draws its noise from secrets.SystemRandom (deliberately
+# unseeded, core/privacy.py), so two runs of one config fit scalers that differ by
+# a few percent of scale at full size, over 20% at 60 blocks. Under privacy a
+# scaler counts as matching when center and scale agree within this fraction of
+# the run's scale. load_backbone also requires the same data config, so this only
+# has to absorb noise draws, not a different dataset. Without privacy the scaler
+# is deterministic.
+_DP_SCALER_TOL = 0.25
+
+
+def _privacy_dict(privacy) -> dict | None:
+    """A PrivacyConfig, or its asdict form from checkpoint meta, as a plain dict."""
+    if privacy is None:
+        return None
+    if isinstance(privacy, PrivacyConfig):
+        return privacy.to_dict()
+    return PrivacyConfig(**privacy).to_dict()
+
+
+def load_backbone(
+    model,
+    path: str,
+    data: SplitData,
+    privacy: PrivacyConfig | None,
+    data_config: DataConfig,
+) -> None:
     """Copy only the ``backbone.*`` tensors of a checkpoint into ``model``.
 
-    The head is left untouched. Raises ValueError when the checkpoint was trained
-    on other features, its backbone tensors are not exactly the model's, or any
-    has another shape.
+    The head is left untouched. ``data`` and ``privacy`` are the current run's
+    preprocessing and ``data_config`` its data block. Raises ValueError when the checkpoint was trained on other
+    features, on inputs scaled differently (scaler center/scale; within 25% of
+    scale under privacy, whose noise is unseeded) or privatized
+    differently (privacy block), when it was trained on another data config (so
+    another train split: risk-train blocks could land in this run's val/test), when its backbone tensors are not exactly the
+    model's, or when any has another shape.
     """
     ckpt = load_checkpoint(path, map_location="cpu")
-    if ckpt["meta"].feature_names != list(feature_names):
+    meta = ckpt["meta"]
+    if meta.feature_names != list(data.feature_names):
         raise ValueError(
-            f"{path}: checkpoint features {ckpt['meta'].feature_names} differ "
-            f"from the run's features {list(feature_names)}"
+            f"{path}: checkpoint features {meta.feature_names} differ "
+            f"from the run's features {list(data.feature_names)}"
+        )
+    scale_now = np.asarray(data.scaler_scale, dtype=np.float64)
+    for name, saved_arr, now in (
+        ("scaler_center", meta.scaler_center, data.scaler_center),
+        ("scaler_scale", meta.scaler_scale, data.scaler_scale),
+    ):
+        if privacy is None:
+            same = np.allclose(saved_arr, now, rtol=1e-6)
+        else:
+            gap = np.abs(np.asarray(saved_arr) - np.asarray(now))
+            same = bool((gap <= _DP_SCALER_TOL * scale_now).all())
+        if not same:
+            raise ValueError(
+                f"{path}: checkpoint {name} {list(saved_arr)} differs from the "
+                f"run's {np.asarray(now).tolist()}; the backbone was fitted to "
+                "differently preprocessed inputs"
+            )
+    saved_data = json.loads(json.dumps(meta.config["data"]))
+    run_data = json.loads(json.dumps(dataclasses.asdict(data_config)))
+    if saved_data != run_data:
+        differ = sorted(
+            k
+            for k in saved_data.keys() | run_data.keys()
+            if saved_data.get(k) != run_data.get(k)
+        )
+        raise ValueError(
+            f"{path}: checkpoint data config differs from the run's in {differ}; "
+            "the backbone was trained on a different train split"
+        )
+    if _privacy_dict(meta.config.get("privacy")) != _privacy_dict(privacy):
+        raise ValueError(
+            f"{path}: checkpoint privacy config differs from the run's; "
+            "the backbone was fitted to differently privatized inputs"
         )
     saved = {k: v for k, v in ckpt["model_state"].items() if k.startswith("backbone.")}
     current = {k: v for k, v in model.state_dict().items() if k.startswith("backbone.")}
@@ -205,7 +269,9 @@ def fit(
     model = build_model_from_meta(meta).to(device)
     # resume restores the full state below, so a warm start would be overwritten
     if model.task == "policy" and train_cfg.init_backbone_from and not resume_from:
-        load_backbone(model, train_cfg.init_backbone_from, data.feature_names)
+        load_backbone(
+            model, train_cfg.init_backbone_from, data, config.privacy, config.data
+        )
     loss_fn = _task_loss(config, data.train)
     optimizer = torch.optim.AdamW(
         model.parameters(), lr=train_cfg.lr, weight_decay=train_cfg.weight_decay
