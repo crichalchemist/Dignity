@@ -27,9 +27,6 @@ REMOVED = (
     "gaussian mechanism",
 )
 
-# README links it; the repo has none. Owner's call (M0 note).
-KNOWN_MISSING = {"LICENSE"}
-
 
 def _public_docs():
     yield ROOT / "README.md"
@@ -62,8 +59,8 @@ class TestDocs:
         for path in _public_docs():
             for lineno, line in enumerate(path.read_text().splitlines(), start=1):
                 for target in re.findall(r"\]\(([^)#\s]+)(?:#[^)]*)?\)", line):
-                    if re.match(r"\w+:", target) or target in KNOWN_MISSING:
-                        continue  # http(s):, mailto:, allow-listed
+                    if re.match(r"\w+:", target):
+                        continue  # http(s):, mailto:
                     if not (path.parent / target).exists():
                         dead.append(f"{path.relative_to(ROOT)}:{lineno}: {target}")
         assert dead == []
