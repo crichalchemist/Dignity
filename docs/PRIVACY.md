@@ -112,7 +112,7 @@ model. With `epsilon_total: 1.0` split 0.5/0.5, the Laplace scale is
 width/ε = 2000 for `volume` and 1000 for `price` — far above the synthetic
 signal, so released values carry little information about the source. Because
 the feature epsilons sum to `epsilon_total`, a pipeline instance can release
-**once**: `process_blocks` (what `train/cli.py` calls) spends the whole budget in
+**once**: `process_blocks` (what `train/loop.py::prepare_data` calls) spends the whole budget in
 a single release and only then splits train/val/test by block, and any later
 `transform` raises `BudgetExhausted`. `generalize` needs at least `k` rows per
 release, so a fitted pipeline cannot score batches smaller than `k` with the

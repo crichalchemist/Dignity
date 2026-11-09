@@ -195,7 +195,7 @@ model = create_dignity_model(
 ### train/ - Training
 
 **engine.py** - Training loop
-The training loop is `train/cli.py` (`train_epoch` + `predict`); this section is rewritten from the code in
+The training loop is `train/loop.py::fit` (`train_epoch` + `predict`); this section is rewritten from the code in
 v1.0's documentation milestone.
 
 **cli.py** - Command-line interface
@@ -210,7 +210,7 @@ python -m train.cli \
 
 **to_onnx.py** - ONNX export
 ```bash
-python -m export.to_onnx --checkpoint runs/risk/dignity_risk_best.pt --output dignity_risk.onnx
+python -m export.to_onnx --checkpoint runs/risk/best.pt --output dignity_risk.onnx
 ```
 
 ## Model Architecture Details
@@ -281,7 +281,7 @@ Output: (batch, num_actions)
 
 ## Training Pipeline
 
-The training loop is `train/cli.py` (`train_epoch` + `predict`); this section is rewritten from the code in
+The training loop is `train/loop.py::fit` (`train_epoch` + `predict`); this section is rewritten from the code in
 v1.0's documentation milestone.
 
 ## Data Flow Example

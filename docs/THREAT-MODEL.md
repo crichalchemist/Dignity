@@ -28,7 +28,7 @@ before signal computation. Test: `TestPrivacyStage::test_privacy_stage_runs_befo
 **Not defended.**
 
 - Raw model inputs that are not listed under `privacy.features`, and labels. The
-  stage covers only what the config names; `train/cli.py` releases labels as-is.
+  stage covers only what the config names; `train/loop.py::prepare_data` releases labels as-is.
   The shipped `config/train_risk.yaml` lists every raw source column its model
   consumes (`volume`, `price`, `fee_rate`, `tx_count`). Test:
   `TestPrivacyConfig::test_shipped_risk_config_covers_every_raw_model_input`.

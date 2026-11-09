@@ -112,3 +112,57 @@ def tiny_train_config(tmp_path):
         return path
 
     return make
+
+
+def _tiny_window_set(rng: np.random.Generator):
+    """120 separable windows; every WindowSet field is passed by keyword."""
+    from data.pipeline import WindowSet
+
+    n, horizon = 120, 10
+    y = (np.arange(n) % 2).astype(np.int8)
+    X = rng.standard_normal((n, 20, 3)).astype(np.float32)
+    X[y == 1, :, 0] += 2.0
+    d = rng.integers(1, 21, n)
+    y_forecast = np.stack([(d <= h + 1) for h in range(horizon)], axis=1)
+    return WindowSet(
+        X=X,
+        y_risk=y,
+        y_forecast=y_forecast.astype(np.float32),
+        forecast_mask=y == 0,
+        block_index=np.arange(n) // 6,
+        onset_offset=np.where(y == 1, 0, -1),
+        anomaly_type=np.where(y == 1, "wash_trading", "none").astype(object),
+    )
+
+
+@pytest.fixture
+def tiny_split():
+    """A SplitData of three 120-window splits, drawn from one rng in order."""
+    from data.pipeline import SplitData
+
+    rng = np.random.default_rng(0)
+    train, val, test = (_tiny_window_set(rng) for _ in range(3))
+    return SplitData(
+        train=train,
+        val=val,
+        test=test,
+        feature_names=["a", "b", "c"],
+        scaler_center=np.zeros(3),
+        scaler_scale=np.ones(3),
+        epsilon_spent={},
+    )
+
+
+@pytest.fixture
+def tiny_fit_config() -> DignityConfig:
+    """A CPU config for fit() that finishes in seconds."""
+    config = DignityConfig()
+    config.device = "cpu"
+    config.model.hidden_size = 16
+    config.model.n_layers = 1
+    config.data.batch_size = 32
+    config.data.num_workers = 0
+    config.train.epochs = 3
+    config.train.use_amp = False
+    config.train.save_interval = 1
+    return config
