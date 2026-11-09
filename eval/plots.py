@@ -104,3 +104,38 @@ def plot_lead_times(result: dict, path: str) -> None:
     ax.set_title(f"{lead['n_missed']} of {lead['n_onsets']} onsets missed")
     fig.savefig(path, dpi=150, bbox_inches="tight")
     plt.close(fig)
+
+
+def plot_policy_cost(result: dict, path: str) -> None:
+    """Expected cost per window for the model and the threshold baseline.
+
+    ``result`` is a policy.json payload; whiskers are the block-bootstrap CIs and
+    the subtitle gives each side's review and block rates.
+    """
+    plt = _pyplot()
+    sides = {
+        "model": result["metrics"],
+        "threshold_policy": result["baselines"]["threshold_policy"],
+    }
+    fig, ax = plt.subplots(figsize=(5, 4.5))
+    for i, side in enumerate(sides.values()):
+        entry = side["expected_cost"]
+        v = float(entry["value"])
+        ax.bar([i], [v], color=f"C{i}")
+        low, high = entry.get("ci_low"), entry.get("ci_high")
+        if low is not None and high is not None:
+            err = [[max(v - low, 0.0)], [max(high - v, 0.0)]]
+            ax.errorbar([i], [v], yerr=err, color="black", capsize=4)
+    ax.set_xticks(range(len(sides)))
+    ax.set_xticklabels(list(sides))
+    ax.set_ylabel("expected cost per window")
+    ax.set_title(
+        "  |  ".join(
+            f"{name}: review {side['review_rate']['value']:.1%}, "
+            f"block {side['block_rate']['value']:.1%}"
+            for name, side in sides.items()
+        ),
+        fontsize=8,
+    )
+    fig.savefig(path, dpi=150, bbox_inches="tight")
+    plt.close(fig)

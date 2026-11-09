@@ -28,12 +28,6 @@ def main(argv: list[str] | None = None) -> int:
     config = DignityConfig.from_yaml(args.config)
     print(config)
 
-    task = config.model.task
-    if task == "policy":
-        raise NotImplementedError(
-            f"task={task!r} does not train end to end until M4 (DGNTY-2)"
-        )
-
     print("\nGenerating synthetic data...")
     df, data = prepare_data(config)
 

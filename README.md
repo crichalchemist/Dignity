@@ -103,6 +103,9 @@ dignity-train --config config/train_risk.yaml
 # Train the early-warning (forecast) model
 dignity-train --config config/train_forecast.yaml
 
+# Train the triage (allow / review / block) model
+dignity-train --config config/train_policy.yaml
+
 # Train on Colab with optimized settings
 dignity-train --config config/colab.yaml
 ```
@@ -249,10 +252,11 @@ Dignity/
 ├── export/                   # Deployment (1 module)
 │   └── to_onnx.py           # ONNX export with verification
 │
-├── config/                   # YAML configurations (4 files)
+├── config/                   # YAML configurations (5 files)
 │   ├── base.yaml            # Default configuration template
 │   ├── train_risk.yaml      # Risk scoring optimized
 │   ├── train_forecast.yaml  # Early warning (forecast task)
+│   ├── train_policy.yaml    # Triage (allow / review / block)
 │   └── colab.yaml           # Google Colab optimized
 │
 ├── tests/                    # Test suite (31 tests)

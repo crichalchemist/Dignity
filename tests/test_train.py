@@ -291,6 +291,23 @@ class TestTrainCli:
         ckpt = load_checkpoint(str(tmp_path / "runs/smoke/train/best.pt"))
         assert ckpt["meta"].task == "risk" and ckpt["epoch"] == 1
 
+    @pytest.mark.parametrize("task", ["risk", "forecast", "policy"])
+    def test_every_task_trains_from_the_cli(self, task, tmp_path):
+        raw = yaml.safe_load((ROOT / "config/smoke.yaml").read_text())
+        if task == "policy":
+            # the documented flow: risk first, then the policy warm-starts from it
+            raw["model"]["task"] = "risk"
+            raw["train"]["checkpoint_dir"] = str(tmp_path / "risk")
+            (tmp_path / "r.yaml").write_text(yaml.safe_dump(raw))
+            assert main(["--config", str(tmp_path / "r.yaml")]) == 0
+            raw["train"]["init_backbone_from"] = str(tmp_path / "risk" / "best.pt")
+        raw["model"]["task"] = task
+        raw["train"]["checkpoint_dir"] = str(tmp_path / "run")
+        cfg = tmp_path / "c.yaml"
+        cfg.write_text(yaml.safe_dump(raw))
+        assert main(["--config", str(cfg)]) == 0
+        assert load_checkpoint(tmp_path / "run" / "best.pt")["meta"].task == task
+
 
 def _script_val_metrics(monkeypatch, pr_auc, auroc):
     """Replace the val metrics with scripted per-epoch values (one call each)."""

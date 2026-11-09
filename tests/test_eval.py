@@ -23,11 +23,20 @@ from eval.plots import (
     plot_forecast_pr_auc,
     plot_lead_times,
     plot_per_type_recall,
+    plot_policy_cost,
     plot_pr_curves,
 )
-from eval.run import _early_warning, _spread, config_hash, main
+from eval.run import (
+    _early_warning,
+    _fit_risk,
+    _spread,
+    config_hash,
+    main,
+    run_policy,
+)
 from models.head.policy import cost_matrix
 from train.checkpoint import load_checkpoint
+from train.loop import prepare_data
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -246,7 +255,7 @@ class TestEvalRunSmoke:
     ):
         monkeypatch.chdir(tmp_path)  # all smoke outputs land in tmp_path
         t0 = time.perf_counter()
-        assert main(["--smoke", "--seed", "tuning"]) == 0
+        assert main(["--smoke", "--seed", "tuning", "--tasks", "risk"]) == 0
         assert time.perf_counter() - t0 < 60
         printed = capsys.readouterr().out
         assert "majority" in printed and "window_logistic" in printed  # spec 5.3
@@ -268,21 +277,6 @@ class TestEvalRunSmoke:
         assert isinstance(out["metrics"]["model_gate"]["passed"], bool)
         for png in ("risk_pr_curve.png", "risk_per_type_recall.png"):
             assert (tmp_path / "runs/smoke/img" / png).stat().st_size > 0
-
-    def test_unbuilt_tasks_are_refused_not_silently_skipped(
-        self, capsys, monkeypatch, tmp_path
-    ):
-        monkeypatch.chdir(tmp_path)
-
-        def boom(*args, **kwargs):
-            raise AssertionError("must not run")
-
-        # prepare_data is the first data-touching call of every task path
-        monkeypatch.setattr("eval.run.prepare_data", boom)
-        with pytest.raises(SystemExit) as exc:
-            main(["--smoke", "--seed", "tuning", "--tasks", "policy"])
-        assert exc.value.code == 2
-        assert "not implemented until M4" in capsys.readouterr().err
 
     def test_smoke_preset_cannot_be_combined_with_the_evaluation_seed(
         self, monkeypatch
@@ -615,3 +609,104 @@ class TestPolicyMetrics:
         )
         assert m["anomaly_recall"] == {"value": None, "ci_low": None, "ci_high": None}
         json.dumps(m, allow_nan=False)
+
+
+class TestPolicyPlots:
+    def test_policy_cost_chart_is_written_as_png(self, tmp_path):
+        side = {
+            "expected_cost": {"value": 0.8, "ci_low": 0.6, "ci_high": 1.0},
+            "review_rate": {"value": 0.05, "ci_low": 0.04, "ci_high": 0.06},
+            "block_rate": {"value": 0.2, "ci_low": None, "ci_high": None},
+        }
+        result = {"metrics": side, "baselines": {"threshold_policy": side}}
+        plot_policy_cost(result, str(tmp_path / "cost.png"))
+        assert (tmp_path / "cost.png").read_bytes()[:8] == PNG_MAGIC
+
+
+class TestEvalRunPolicy:
+    def test_policy_and_baseline_both_stay_within_analyst_capacity(
+        self, monkeypatch, tmp_path
+    ):
+        monkeypatch.chdir(tmp_path)
+        assert main(["--smoke", "--seed", "tuning", "--tasks", "policy"]) == 0
+        r = json.loads((tmp_path / "runs/smoke/results/policy.json").read_text())
+        five = {
+            "expected_cost",
+            "review_rate",
+            "block_rate",
+            "anomaly_recall",
+            "false_block_rate",
+        }
+        assert five <= set(r["metrics"])
+        assert set(r["baselines"]) == {"threshold_policy"}
+        assert set(r["baselines"]["threshold_policy"]) == five
+        for side in (r["metrics"], r["baselines"]["threshold_policy"]):
+            assert side["review_rate"]["value"] <= 0.05 + 1e-9
+        assert (tmp_path / "runs/smoke/img/policy_cost.png").exists()
+
+    def test_policy_results_carry_the_training_seed_spread(self, monkeypatch, tmp_path):
+        # spec 8a (J9): CI over blocks AND spread across training seeds
+        monkeypatch.chdir(tmp_path)
+        assert main(["--smoke", "--seed", "tuning", "--tasks", "policy"]) == 0
+        r = json.loads((tmp_path / "runs/smoke/results/policy.json").read_text())
+        spread = r["metrics"]["seed_spread"]
+        assert spread["train_seeds"] == [42]
+        assert len(spread["expected_cost"]["values"]) == 1
+
+    @pytest.mark.parametrize("tasks", ["risks", "risk,forcast", "", "policy,"])
+    def test_unknown_task_names_are_refused_before_anything_runs(
+        self, tasks, monkeypatch, tmp_path
+    ):
+        # a typo must not exit 0 with a missing results file
+        monkeypatch.chdir(tmp_path)
+
+        def boom(*args, **kwargs):
+            raise AssertionError("must not run")
+
+        # prepare_data is the first data-touching call of every task path
+        monkeypatch.setattr("eval.run.prepare_data", boom)
+        with pytest.raises(SystemExit) as exc:
+            main(["--smoke", "--seed", "tuning", "--tasks", tasks])
+        assert exc.value.code == 2
+        assert not (tmp_path / "runs").exists()
+
+    def test_one_run_writes_one_config_hash_and_one_sha(self, monkeypatch, tmp_path):
+        # M7's TestFinalResults checks this after a GPU run; catch a per-task hash here
+        monkeypatch.chdir(tmp_path)
+        assert (
+            main(["--smoke", "--seed", "tuning", "--tasks", "risk,forecast,policy"])
+            == 0
+        )
+        docs = [
+            json.loads((tmp_path / f"runs/smoke/results/{n}.json").read_text())
+            for n in ("risk", "forecast", "policy")
+        ]
+        assert len({d["config_hash"] for d in docs}) == 1
+        assert len({d["git_sha"] for d in docs}) == 1
+
+    def test_each_policy_seed_warm_starts_from_the_same_seeds_risk_checkpoint(
+        self, monkeypatch, tmp_path
+    ):
+        # J3: the triage backbone starts from risk; seed s must get risk seed s
+        import train.loop
+
+        monkeypatch.chdir(tmp_path)
+        config = DignityConfig.from_yaml(str(ROOT / "config/smoke.yaml"))
+        config.eval.n_train_seeds = 2
+        config.eval.n_bootstrap = 5
+        _, data = prepare_data(config)
+        risk = _fit_risk(config, data, "tuning")
+        risk_paths = [r.best_path for _, r in risk[0]]
+        assert len(set(risk_paths)) == 2
+
+        loaded, real = [], train.loop.load_backbone
+
+        def spy(model, path, feature_names):
+            loaded.append(path)
+            return real(model, path, feature_names)
+
+        monkeypatch.setattr(train.loop, "load_backbone", spy)
+        run_policy(config, "tuning", data, risk)
+        assert loaded == risk_paths
+        # the shared run config is never edited by the per-seed warm start
+        assert config.train.init_backbone_from is None

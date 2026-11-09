@@ -19,12 +19,19 @@ from core.config import DignityConfig
 from data.loader import create_dataloader
 from data.pipeline import TransactionPipeline
 from data.source.synthetic import RAW_COLUMNS
-from eval.baselines import block_tree, majority, risk_score_forecast, window_logistic
+from eval.baselines import (
+    block_tree,
+    majority,
+    risk_score_forecast,
+    threshold_policy,
+    window_logistic,
+)
 from eval.metrics import (
     FPR_BUDGET,
     forecast_metrics,
     lead_times,
     model_gate,
+    policy_metrics,
     risk_metrics,
     threshold_at_fpr,
 )
@@ -32,8 +39,10 @@ from eval.plots import (
     plot_forecast_pr_auc,
     plot_lead_times,
     plot_per_type_recall,
+    plot_policy_cost,
     plot_pr_curves,
 )
+from models.head.policy import cost_matrix, decide_actions
 from train.checkpoint import build_model_from_meta, load_checkpoint
 from train.engine import predict
 from train.loop import FitResult, fit, prepare_data
@@ -58,18 +67,26 @@ def _git_sha() -> str:
 
 
 def _train_seeds(
-    config: DignityConfig, data, seed_name: str
+    config: DignityConfig,
+    data,
+    seed_name: str,
+    init_backbones: list[str] | None = None,
 ) -> list[tuple[int, FitResult]]:
     """Train one model per training seed; model init is independent of the data.
 
     The task is part of the run directory, so tasks never share a ``best.pt``.
+    ``init_backbones[k]`` warm-starts the k-th seed's backbone (policy only).
     """
     runs = []
     for k in range(config.eval.n_train_seeds):
         s = config.seed + k
         run_dir = Path(config.train.checkpoint_dir) / f"eval_{seed_name}"
         run_dir = run_dir / config.model.task / f"train_seed_{s}"
-        runs.append((s, fit(config, data, s, str(run_dir))))
+        seed_config = config
+        if init_backbones is not None:
+            seed_config = copy.deepcopy(config)
+            seed_config.train.init_backbone_from = init_backbones[k]
+        runs.append((s, fit(seed_config, data, s, str(run_dir))))
     return runs
 
 
@@ -392,6 +409,76 @@ def run_forecast(
     return result
 
 
+def run_policy(
+    config: DignityConfig,
+    seed_name: str,
+    data,
+    risk: tuple[list, list, list],
+    run_ctx: dict | None = None,
+) -> dict:
+    """Fit the triage head per seed; compare it with two thresholds on risk.
+
+    Each policy seed warm-starts from the same seed's risk checkpoint. Both sides
+    act under ``policy.review_budget``; the baseline's thresholds are tuned on val.
+    """
+    run_ctx = run_ctx or _run_ctx(config)
+    seed = config.data.synthetic.seed
+    n_boot = config.eval.n_bootstrap
+    budget = config.policy.review_budget
+    C = cost_matrix(config.policy.costs)
+    test = data.test
+    policy_config = _task_config(config, "policy")
+    risk_runs, risk_val, risk_test = risk
+    runs = _train_seeds(
+        policy_config, data, seed_name, [r.best_path for _, r in risk_runs]
+    )
+
+    model_sides, baseline_sides = [], []
+    for k, (_, result) in enumerate(runs):
+        boot = n_boot if k == 0 else 0  # CIs only for the headline seed
+        probs = _predict(policy_config, result, test.X)["probs"]
+        actions = decide_actions(probs, budget)
+        model_sides.append(
+            policy_metrics(actions, test.y_risk, C, test.block_index, boot, seed)
+        )
+        baseline_actions = threshold_policy(
+            risk_val[k], data.val.y_risk, risk_test[k], C, budget
+        )
+        baseline_sides.append(
+            policy_metrics(
+                baseline_actions, test.y_risk, C, test.block_index, boot, seed
+            )
+        )
+
+    metrics = model_sides[0]  # headline model: first training seed
+    metrics["seed_spread"] = {
+        "train_seeds": [s for s, _ in runs],
+        "expected_cost": _spread([m["expected_cost"]["value"] for m in model_sides]),
+        "baseline_expected_cost": _spread(
+            [m["expected_cost"]["value"] for m in baseline_sides]
+        ),
+    }
+    baselines = {"threshold_policy": baseline_sides[0]}
+
+    img_dir = Path(config.eval.img_dir)
+    img_dir.mkdir(parents=True, exist_ok=True)
+    result = _payload(metrics, baselines, run_ctx)
+    plot_policy_cost(result, str(img_dir / "policy_cost.png"))
+
+    path = _write_result(config, "policy", metrics, baselines, run_ctx)
+    base = baselines["threshold_policy"]
+    print(
+        f"expected cost: model {_fmt_ci(metrics['expected_cost'])} "
+        f"| threshold_policy {_fmt_ci(base['expected_cost'])}"
+    )
+    print(
+        f"review rate: model {_fmt(metrics['review_rate'])} "
+        f"| threshold_policy {_fmt(base['review_rate'])}"
+    )
+    print(f"wrote {path}")
+    return result
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Run the Dignity evaluation.")
     source = parser.add_mutually_exclusive_group(required=True)
@@ -400,12 +487,12 @@ def main(argv: list[str] | None = None) -> int:
         "--smoke", action="store_true", help="CI-sized run of config/smoke.yaml"
     )
     parser.add_argument("--seed", choices=("tuning", "eval"), required=True)
-    parser.add_argument("--tasks", default="risk")
+    parser.add_argument("--tasks", default="risk,forecast,policy")
     args = parser.parse_args(argv)
 
     tasks = {t.strip() for t in args.tasks.split(",")}
-    for task in sorted(tasks - {"risk", "forecast"}):
-        parser.error(f"task {task} is not implemented until M4")
+    for task in sorted(tasks - {"risk", "forecast", "policy"}):
+        parser.error(f"unknown task {task!r}; choose from risk, forecast, policy")
     if args.smoke and args.seed == "eval":
         parser.error("--smoke never runs on the evaluation seed")
 
@@ -415,13 +502,16 @@ def main(argv: list[str] | None = None) -> int:
     config.data.synthetic.seed = getattr(config.eval, f"{args.seed}_seed")
     run_ctx = _run_ctx(config)  # once, after the seed override
 
-    # forecast baselines score with the risk models, so risk is always fitted
+    # forecast and policy baselines score with the risk models (and policy warm
+    # starts from them), so risk is always fitted
     df, data = prepare_data(config)
     risk = _fit_risk(config, data, args.seed)
     if "risk" in tasks:
         run_risk(config, args.seed, run_ctx, df, data, risk)
     if "forecast" in tasks:
         run_forecast(config, args.seed, data, risk, run_ctx)
+    if "policy" in tasks:
+        run_policy(config, args.seed, data, risk, run_ctx)
     return 0
 
 

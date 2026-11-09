@@ -5,7 +5,9 @@ import re
 from pathlib import Path
 
 import numpy as np
+import pytest
 import torch
+import yaml
 from torch.amp import GradScaler
 
 from core.config import DignityConfig
@@ -18,6 +20,8 @@ from train.checkpoint import (
     make_meta,
     save_checkpoint,
 )
+
+ROOT = Path(__file__).resolve().parents[1]
 
 FEATURES = [
     "volume",
@@ -126,3 +130,35 @@ class TestExportCli:
         )
         assert rc == 0
         assert get_onnx_model_info(str(out))["inputs"][0]["shape"][2] == 7  # not 9
+
+    @pytest.mark.parametrize("task, width", [("forecast", 10), ("policy", 3)])
+    def test_forecast_and_policy_checkpoints_export_and_verify(
+        self, task, width, tmp_path
+    ):
+        # the cumulative-hazard head and the logits head go through ONNX export and
+        # verification exactly as a user's dignity-export run does
+        import train.cli
+
+        raw = yaml.safe_load((ROOT / "config/smoke.yaml").read_text())
+        if task == "policy":
+            # the documented flow: risk first, then the policy warm-starts from it
+            raw["model"]["task"] = "risk"
+            raw["train"]["checkpoint_dir"] = str(tmp_path / "risk")
+            (tmp_path / "r.yaml").write_text(yaml.safe_dump(raw))
+            assert train.cli.main(["--config", str(tmp_path / "r.yaml")]) == 0
+            raw["train"]["init_backbone_from"] = str(tmp_path / "risk" / "best.pt")
+        raw["model"]["task"] = task
+        raw["train"]["checkpoint_dir"] = str(tmp_path / "run")
+        (tmp_path / "c.yaml").write_text(yaml.safe_dump(raw))
+        assert train.cli.main(["--config", str(tmp_path / "c.yaml")]) == 0
+        out = tmp_path / f"{task}.onnx"
+        rc = to_onnx.main(
+            [
+                "--checkpoint",
+                str(tmp_path / "run" / "best.pt"),
+                "--output",
+                str(out),
+            ]
+        )
+        assert rc == 0
+        assert get_onnx_model_info(str(out))["outputs"][0]["shape"][-1] == width

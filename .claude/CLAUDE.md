@@ -45,9 +45,9 @@ format that export no longer supports (DGNTY-3, DGNTY-35). No shipped config wri
 ## Commands
 
 ```bash
-# Tests (294 collected: test_core 42, test_data 69, test_models 14, test_privacy 34,
-# test_operator 4, test_docs 4, test_train 43, test_checkpoint 3, test_export 7,
-# test_calibration 3, test_labels 7, test_gates 11, test_ci 3, test_eval 40,
+# Tests (347 collected: test_core 50, test_data 69, test_models 21, test_privacy 34,
+# test_operator 4, test_docs 4, test_train 64, test_checkpoint 3, test_export 9,
+# test_calibration 3, test_labels 7, test_gates 11, test_ci 3, test_eval 55,
 # test_colab_eval 10 — one skips without CUDA)
 # every test is limited to 300 s (pytest.ini; pytest-timeout)
 pytest tests/ -v
@@ -64,8 +64,8 @@ pre-commit run --all-files
 pytest tests/ --cov --cov-fail-under=100
 
 python -m eval.gates --seed 1000   # data gate; tuning seed only, refuses 2026
-python -m eval.run --smoke --seed tuning  # CI-sized end-to-end evaluation; outputs under runs/smoke/
-python -m eval.run --smoke --seed tuning --tasks risk,forecast  # --tasks forecast also fits risk (baseline) but writes only forecast.json
+python -m eval.run --smoke --seed tuning  # CI-sized, all three tasks (--tasks defaults to risk,forecast,policy); outputs under runs/smoke/
+python -m eval.run --smoke --seed tuning --tasks risk,forecast  # --tasks forecast also fits risk (baseline) but writes only forecast.json; unknown names exit 2
 python -m eval.run --config config/synthetic_hard.yaml --seed tuning  # full run on a Colab GPU; see docs/RESULTS.md
 
 # Train
@@ -102,7 +102,7 @@ train/engine.py                     →  train_epoch / predict
 train/loop.py fit                  →  shared loop (cli, notebook, eval.run); best.pt on val PR-AUC (policy: val neg_cost under the review cap)
 train/checkpoint.py                 →  self-describing checkpoints (FORMAT_VERSION 2) / build_model_from_meta
 train/losses.py                     →  risk_loss, forecast_loss (masked per-horizon BCE)
-eval/{metrics,baselines,plots,run}.py → risk.json, forecast.json + charts; CIs bootstrap blocks, not windows
+eval/{metrics,baselines,plots,run}.py → risk.json, forecast.json, policy.json + charts; CIs bootstrap blocks, not windows
 export/to_onnx.py                   →  export + verify + benchmark
 ```
 
@@ -160,8 +160,9 @@ a mechanism, it needs a test in `tests/test_privacy.py` or CI's 100% gate on tha
   raises `ValueError`.
 - **Forecast is early warning, and `eval.run` fits risk for it.** Forecast windows with an
   anomaly active at their last row are masked out of the loss, the metrics and lead time
-  (`forecast_mask`). `--tasks forecast` (and later `policy`) also fits risk once per training
-  seed, because their baseline is today's risk score, but writes `risk.json` only when `risk`
+  (`forecast_mask`). `--tasks forecast` and `--tasks policy` also fit risk once per training
+  seed (their baseline is today's risk score, and each policy seed warm-starts its backbone
+  from the same seed's risk `best.pt`), but write `risk.json` only when `risk`
   is in `--tasks`. Each task trains under its own `eval_<seed>/<task>/train_seed_<s>/` directory.
 - **Timestamps are milliseconds everywhere.** `CryptoSource._normalize_timestamp` auto-detects
   seconds (`< 2e10`), ms (`2e10–3e13`), ns (`> 3e13`), and datetime strings, normalizing all to ms
