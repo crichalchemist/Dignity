@@ -183,7 +183,7 @@ class TestDataGate:
         assert gates.main(["--seed", "2026"]) == 2
         assert "evaluation seed" in capsys.readouterr().out
 
-    @pytest.mark.slow  # marker is inert (pytest.ini); this runs in CI on purpose
+    @pytest.mark.slow  # runs in every CI job; M2.16 measured the PR run at 3 min
     def test_shipped_presets_pass_the_data_gate_on_the_tuning_seed(self):
         result = data_gate(DEFAULT_PRESETS, TUNING_SEED)
         assert result["passed"], json.dumps(result, indent=2)
