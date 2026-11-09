@@ -1,6 +1,8 @@
 """Tests for the training engine."""
 
+import json
 import math
+import warnings
 
 import numpy as np
 import pytest
@@ -11,6 +13,7 @@ from data.loader import create_dataloader
 from models.dignity import Dignity
 from train.checkpoint import load_checkpoint
 from train.engine import predict, train_epoch
+from train.loop import ChanceGuardWarning, fit, resolve_pos_weight
 from train.losses import risk_loss
 
 
@@ -170,3 +173,160 @@ class TestTrainCli:
         )
         assert load_checkpoint(runs / "dignity_risk_best.pt")["epoch"] == 1
         assert load_checkpoint(runs / "dignity_risk_epoch2.pt")["best_metric"] == 1e-6
+
+
+def _script_val_metrics(monkeypatch, pr_auc, auroc):
+    """Replace the val metrics with scripted per-epoch values (one call each)."""
+    calls = iter(zip(pr_auc, auroc, strict=True))
+
+    def scripted(y, score, block_index, n_boot, seed, anomaly_type=None):
+        pr, au = next(calls)
+        return {
+            "auroc": {"value": au},
+            "pr_auc": {"value": pr},
+            "recall_at_1pct_fpr": {"value": 0.5},
+            "brier": {"value": 0.25},
+        }
+
+    monkeypatch.setattr("train.loop.risk_metrics", scripted)
+
+
+class TestFit:
+    def test_best_checkpoint_is_the_epoch_with_highest_val_pr_auc(
+        self, tiny_split, tiny_fit_config, tmp_path, monkeypatch
+    ):
+        _script_val_metrics(monkeypatch, [0.6, 0.9, 0.7], [0.9, 0.6, 0.95])
+        r = fit(tiny_fit_config, tiny_split, seed=0, run_dir=str(tmp_path))
+        assert r.best_metric == 0.9
+        assert load_checkpoint(r.best_path)["epoch"] == 2
+
+    def test_best_checkpoint_follows_the_configured_select_metric(
+        self, tiny_split, tiny_fit_config, tmp_path, monkeypatch
+    ):
+        _script_val_metrics(monkeypatch, [0.6, 0.9, 0.7], [0.9, 0.6, 0.95])
+        tiny_fit_config.train.select_metric = "auroc"
+        r = fit(tiny_fit_config, tiny_split, seed=0, run_dir=str(tmp_path))
+        assert r.best_metric == 0.95
+        assert load_checkpoint(r.best_path)["epoch"] == 3
+
+    def test_a_run_leaves_a_self_describing_record_of_every_epoch(
+        self, tiny_split, tiny_fit_config, tmp_path
+    ):
+        r = fit(tiny_fit_config, tiny_split, seed=0, run_dir=str(tmp_path))
+        assert r.meta.input_size == 3 and r.meta.feature_names == ["a", "b", "c"]
+        assert set(r.history[0]) == {
+            "epoch",
+            "lr",
+            "train_loss",
+            "val_auroc",
+            "val_pr_auc",
+            "val_recall_at_1pct_fpr",
+            "val_brier",
+        }
+        assert json.loads((tmp_path / "history.json").read_text()) == r.history
+        assert (tmp_path / "best.pt").exists() and (tmp_path / "last.pt").exists()
+
+    def test_early_stopping_halts_after_patience_epochs_without_improvement(
+        self, tiny_split, tiny_fit_config, tmp_path
+    ):
+        tiny_fit_config.train.lr = 0.0
+        tiny_fit_config.train.epochs, tiny_fit_config.train.patience = 10, 1
+        r = fit(tiny_fit_config, tiny_split, seed=0, run_dir=str(tmp_path))
+        assert len(r.history) == 2
+        assert load_checkpoint(str(tmp_path / "last.pt"))["epoch"] == 2
+
+    def test_the_exit_epoch_is_saved_even_off_the_save_interval(
+        self, tiny_split, tiny_fit_config, tmp_path
+    ):
+        tiny_fit_config.train.lr = 0.0
+        tiny_fit_config.train.epochs, tiny_fit_config.train.patience = 10, 1
+        tiny_fit_config.train.save_interval = 5
+        fit(tiny_fit_config, tiny_split, seed=0, run_dir=str(tmp_path))
+        assert load_checkpoint(str(tmp_path / "last.pt"))["epoch"] == 2
+
+    def test_the_final_epoch_is_saved_even_off_the_save_interval(
+        self, tiny_split, tiny_fit_config, tmp_path
+    ):
+        tiny_fit_config.train.patience = None
+        tiny_fit_config.train.save_interval = 5
+        fit(tiny_fit_config, tiny_split, seed=0, run_dir=str(tmp_path))
+        assert load_checkpoint(str(tmp_path / "last.pt"))["epoch"] == 3
+
+    def test_chance_guard_warns_once_when_val_auroc_stays_below_floor(
+        self, tiny_split, tiny_fit_config, tmp_path
+    ):
+        tiny_fit_config.train.chance_guard_auroc = 1.01
+        tiny_fit_config.train.guard_epochs = 1
+        with pytest.warns(ChanceGuardWarning, match="chance guard") as rec:
+            fit(tiny_fit_config, tiny_split, seed=0, run_dir=str(tmp_path))
+        assert sum(w.category is ChanceGuardWarning for w in rec) == 1
+
+    def test_learning_rate_follows_a_decaying_schedule(
+        self, tiny_split, tiny_fit_config, tmp_path
+    ):
+        r = fit(tiny_fit_config, tiny_split, 0, str(tmp_path))
+        # epochs=3, base lr 3e-4: the lr each epoch trained with
+        assert [h["lr"] for h in r.history] == pytest.approx(
+            [3e-4, 3e-4 * 0.75, 3e-4 * 0.25]
+        )
+
+    def test_resumed_run_continues_the_same_lr_schedule(
+        self, tiny_split, tiny_fit_config, tmp_path
+    ):
+        full = fit(tiny_fit_config, tiny_split, 0, str(tmp_path / "full"))
+        tiny_fit_config.train.epochs = 2
+        fit(tiny_fit_config, tiny_split, 0, str(tmp_path / "split"))
+        tiny_fit_config.train.epochs = 3
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", UserWarning)  # scheduler-order warning
+            resumed = fit(
+                tiny_fit_config,
+                tiny_split,
+                0,
+                str(tmp_path / "split"),
+                resume_from=str(tmp_path / "split" / "last.pt"),
+            )
+        assert resumed.history[-1]["lr"] == pytest.approx(full.history[2]["lr"])
+
+    def test_resume_keeps_old_history_rows_and_returns_only_new_ones(
+        self, tiny_split, tiny_fit_config, tmp_path
+    ):
+        tiny_fit_config.train.epochs = 2
+        first = fit(tiny_fit_config, tiny_split, 0, str(tmp_path))
+        tiny_fit_config.train.epochs = 3
+        resumed = fit(
+            tiny_fit_config,
+            tiny_split,
+            0,
+            str(tmp_path),
+            resume_from=str(tmp_path / "last.pt"),
+        )
+        assert [h["epoch"] for h in resumed.history] == [3]
+        saved = json.loads((tmp_path / "history.json").read_text())
+        assert saved == first.history + resumed.history
+
+    def test_resume_does_not_overwrite_better_checkpoint(
+        self, tiny_split, tiny_fit_config, tmp_path
+    ):
+        tiny_fit_config.train.lr, tiny_fit_config.train.epochs = 0.0, 2
+        first = fit(tiny_fit_config, tiny_split, 0, str(tmp_path))
+        tiny_fit_config.train.epochs = 3
+        fit(
+            tiny_fit_config,
+            tiny_split,
+            0,
+            str(tmp_path),
+            resume_from=str(tmp_path / "last.pt"),
+        )
+        # an equal epoch 3 must not replace it
+        assert load_checkpoint(first.best_path)["epoch"] == 1
+
+
+class TestPosWeight:
+    def test_pos_weight_defaults_to_train_negative_to_positive_ratio(self):
+        assert resolve_pos_weight(None, np.array([0, 0, 0, 1])) == 3.0
+        assert resolve_pos_weight(2.5, np.array([0, 0, 0, 1])) == 2.5
+
+    def test_pos_weight_refuses_a_train_split_without_positives(self):
+        with pytest.raises(ValueError, match="no positive"):
+            resolve_pos_weight(None, np.zeros(4))
