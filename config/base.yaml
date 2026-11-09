@@ -57,6 +57,7 @@ train:
   chance_guard_auroc: 0.55  # warn if val AUROC is below this at guard_epochs; null disables
   guard_epochs: 5
   patience: 10  # early stopping; null disables
+  init_backbone_from: null  # policy only: risk checkpoint to warm-start the backbone
 
 eval:
   tuning_seed: 1000  # frozen; the model never sees eval_seed before M7

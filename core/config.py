@@ -122,6 +122,7 @@ class TrainConfig:
     chance_guard_auroc: float | None = 0.55  # warn below this at guard_epochs
     guard_epochs: int = 5
     patience: int | None = 10  # early stopping; None disables
+    init_backbone_from: str | None = None  # policy only: risk checkpoint to warm-start
 
     def __post_init__(self):
         if self.select_metric not in _SELECT_METRICS:

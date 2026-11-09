@@ -99,7 +99,7 @@ data/labels.py                      →  risk/forecast labels from the event rec
 data/loader.py                      →  TransactionDataset (dict batches) / create_dataloader
 models/dignity.py Dignity           →  DignityBackbone + one head
 train/engine.py                     →  train_epoch / predict
-train/loop.py fit                  →  shared loop (cli, notebook, eval.run); best.pt on val PR-AUC
+train/loop.py fit                  →  shared loop (cli, notebook, eval.run); best.pt on val PR-AUC (policy: val neg_cost under the review cap)
 train/checkpoint.py                 →  self-describing checkpoints (FORMAT_VERSION 2) / build_model_from_meta
 train/losses.py                     →  risk_loss, forecast_loss (masked per-horizon BCE)
 eval/{metrics,baselines,plots,run}.py → risk.json, forecast.json + charts; CIs bootstrap blocks, not windows
@@ -113,8 +113,9 @@ export/to_onnx.py                   →  export + verify + benchmark
 this is the single most common source of shape bugs, and `train/losses.py::risk_loss` reshapes predictions
 and labels to `[B]`; `forecast_loss` keeps `[B, H]` and masks windows with an active anomaly.
 
-Adding a task = new head module in `models/head/` + a branch in `Dignity.__init__` + a loss in
-`train/losses.py` and its branch in `train/loop.py::fit`. Nothing else changes.
+Adding a task = a head in `models/head/`, a branch in `Dignity.__init__`, a loss in
+`train/losses.py`, target/selection/head_kwargs branches in `train/loop.fit`, metrics in
+`eval/metrics.py`, a baseline in `eval/baselines.py`, and a branch in `eval/run.py`.
 
 `core/signals.SignalProcessor` is an **all-static utility class**. `core/privacy.PrivacyManager`
 is **instance-based**: it is bound to a `PrivacyBudget` (ε ledger), an optional HMAC key, and
@@ -149,6 +150,14 @@ a mechanism, it needs a test in `tests/test_privacy.py` or CI's 100% gate on tha
   run proves nothing about it; `tests/test_train.py` has a GPU-only test. If you ever switch the
   head to logits, switch the loss to `BCEWithLogitsLoss` in the same change and re-check ONNX
   consumers that expect probabilities.
+  `PolicyHead` returns logits; `expected_cost_loss` takes the softmax in float32 outside autocast.
+- **The policy warm-starts from a risk checkpoint.** Trained cold, the spec expected-cost loss
+  stalls at "review everything". `config/train_policy.yaml` sets `train.init_backbone_from:
+  ./runs/risk/best.pt`, so train risk first; `train/loop.load_backbone` copies only the
+  `backbone.*` tensors (feature names and shapes must match, else `ValueError`) and `fit` reads
+  the key only for `task: policy`. Policy selects `best.pt` on val `neg_cost` under the review
+  cap and ignores `select_metric`, `pos_weight` and the chance guard; resuming across metrics
+  raises `ValueError`.
 - **Forecast is early warning, and `eval.run` fits risk for it.** Forecast windows with an
   anomaly active at their last row are masked out of the loss, the metrics and lead time
   (`forecast_mask`). `--tasks forecast` (and later `policy`) also fits risk once per training
@@ -161,10 +170,6 @@ a mechanism, it needs a test in `tests/test_privacy.py` or CI's 100% gate on tha
 
 ## Known breakage (do not "discover" these again — fix or leave, but don't be confused)
 
-- **Only `task: risk` trains end to end.** This contradicts "Adding a task ... Nothing else
-  changes" above. The engine also needs work:
-  - `train/cli.py` raises `NotImplementedError` for `policy` until M4.
-  - `policy` head kwargs (`n_actions`) arrive in PR 2; `forecast` passes `horizon`.
 - **`docs/` and `README.md` drift from the code easily.** `tests/test_docs.py` guards removed
   claims and links to missing files, not stale examples. Trust the source, and when you touch a
   documented symbol, fix the doc in the same change.

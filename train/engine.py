@@ -91,9 +91,7 @@ def predict(
     and ``{"probs": float32 [N, 3]}`` (softmax over allow/review/block) for policy.
     """
     if model.task not in ("risk", "forecast", "policy"):
-        raise NotImplementedError(
-            f"predict for task={model.task!r} arrives with its head in M4"
-        )
+        raise NotImplementedError(f"predict does not support task={model.task!r}")
 
     model.eval()
     scores = []

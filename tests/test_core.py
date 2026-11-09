@@ -354,8 +354,16 @@ class TestEvalConfig:
             "chance_guard_auroc",
             "guard_epochs",
             "patience",
+            "init_backbone_from",
         ):
             assert key in raw["train"], key
+
+    def test_shipped_policy_config_trains_the_policy_task(self):
+        root = Path(__file__).resolve().parents[1]
+        c = DignityConfig.from_yaml(str(root / "config" / "train_policy.yaml"))
+        assert c.model.task == "policy" and c.train.checkpoint_dir == "./runs/policy"
+        assert c.train.init_backbone_from == "./runs/risk/best.pt"
+        assert c.policy.review_budget == 0.05 and c.privacy is None
 
     def test_eval_block_survives_a_yaml_round_trip(self, tmp_path):
         # to_yaml must write eval:, or a saved run config silently reverts the

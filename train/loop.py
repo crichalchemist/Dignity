@@ -16,6 +16,7 @@ from data.loader import create_dataloader
 from data.pipeline import SplitData, TransactionPipeline, WindowSet
 from data.source.synthetic import SyntheticGenerator
 from eval.metrics import risk_metrics
+from models.head.policy import cost_matrix, decide_actions
 from train.checkpoint import (
     CheckpointMeta,
     build_model_from_meta,
@@ -24,7 +25,7 @@ from train.checkpoint import (
     save_checkpoint,
 )
 from train.engine import predict, train_epoch
-from train.losses import forecast_loss, risk_loss
+from train.losses import expected_cost_loss, forecast_loss, risk_loss
 
 _VAL_METRICS = ("auroc", "pr_auc", "recall_at_1pct_fpr", "brier")
 _FORECAST_VAL_METRICS = ("auroc", "pr_auc", "recall_at_1pct_fpr")
@@ -76,6 +77,8 @@ def _task_targets(task: str, ws: WindowSet) -> dict[str, np.ndarray]:
         return {"y": ws.y_risk.astype(np.float32)}
     if task == "forecast":
         return {"y": ws.y_forecast.astype(np.float32), "mask": ws.forecast_mask}
+    if task == "policy":
+        return {"y": ws.y_risk.astype(np.int64)}
     raise NotImplementedError(f"task={task!r} does not train end to end yet")
 
 
@@ -86,6 +89,8 @@ def _task_loss(config: DignityConfig, train_ws: WindowSet):
     if task == "forecast":
         labels = train_ws.y_forecast[train_ws.forecast_mask].ravel()
         return forecast_loss(resolve_pos_weight(config.train.pos_weight, labels))
+    if task == "policy":
+        return expected_cost_loss(torch.from_numpy(cost_matrix(config.policy.costs)))
     raise NotImplementedError(f"task={task!r} does not train end to end yet")
 
 
@@ -93,6 +98,12 @@ def _val_metrics(
     config: DignityConfig, val_ws: WindowSet, score: np.ndarray, seed: int
 ) -> tuple[dict[str, float], float | None]:
     """The row's ``val_*`` entries and the AUROC the chance guard reads."""
+    if config.model.task == "policy":
+        # the cost of the capped decisions; AUROC is undefined for 3 actions
+        costs = cost_matrix(config.policy.costs).astype(np.float64)
+        actions = decide_actions(score, config.policy.review_budget)
+        neg_cost = -costs[actions, val_ws.y_risk.astype(np.int64)].mean()
+        return {"val_neg_cost": float(neg_cost)}, None
     if config.model.task == "risk":
         val = risk_metrics(
             val_ws.y_risk, score, val_ws.block_index, n_boot=0, seed=seed
@@ -125,7 +136,39 @@ def _val_metrics(
 def _head_kwargs(config: DignityConfig) -> dict:
     if config.model.task == "forecast":
         return {"horizon": config.model.horizon}
+    if config.model.task == "policy":
+        return {"n_actions": config.model.n_actions}
     return {}
+
+
+def _selection_metric(config: DignityConfig) -> str:
+    """The val metric best.pt is kept on: policy always uses neg_cost."""
+    return "neg_cost" if config.model.task == "policy" else config.train.select_metric
+
+
+def load_backbone(model, path: str, feature_names: list[str]) -> None:
+    """Copy only the ``backbone.*`` tensors of a checkpoint into ``model``.
+
+    The head is left untouched. Raises ValueError when the checkpoint was trained
+    on other features or any backbone tensor has another shape.
+    """
+    ckpt = load_checkpoint(path, map_location="cpu")
+    if ckpt["meta"].feature_names != list(feature_names):
+        raise ValueError(
+            f"{path}: checkpoint features {ckpt['meta'].feature_names} differ "
+            f"from the run's features {list(feature_names)}"
+        )
+    saved = {k: v for k, v in ckpt["model_state"].items() if k.startswith("backbone.")}
+    current = {k: v for k, v in model.state_dict().items() if k.startswith("backbone.")}
+    for k, v in current.items():
+        if k not in saved:
+            raise ValueError(f"{path}: backbone tensor {k} is missing")
+        if saved[k].shape != v.shape:
+            raise ValueError(
+                f"{path}: backbone tensor {k} has shape {tuple(saved[k].shape)}, "
+                f"the model expects {tuple(v.shape)}"
+            )
+    model.load_state_dict(saved, strict=False)
 
 
 def fit(
@@ -135,7 +178,7 @@ def fit(
     run_dir: str,
     resume_from: str | None = None,
 ) -> FitResult:
-    """Train a risk or forecast model.
+    """Train a risk, forecast or policy model.
 
     Writes best.pt, last.pt and history.json to run_dir.
     """
@@ -155,6 +198,8 @@ def fit(
         _head_kwargs(config),
     )
     model = build_model_from_meta(meta).to(device)
+    if model.task == "policy" and train_cfg.init_backbone_from:
+        load_backbone(model, train_cfg.init_backbone_from, data.feature_names)
     loss_fn = _task_loss(config, data.train)
     optimizer = torch.optim.AdamW(
         model.parameters(), lr=train_cfg.lr, weight_decay=train_cfg.weight_decay
@@ -165,6 +210,16 @@ def fit(
     start_epoch = 1
     if resume_from:
         ckpt = load_checkpoint(resume_from, map_location=device)
+        saved_metric = (
+            "neg_cost"
+            if ckpt["meta"].task == "policy"
+            else ckpt["meta"].config["train"].get("select_metric")
+        )
+        if saved_metric != _selection_metric(config):
+            raise ValueError(
+                f"{resume_from} was selected on {saved_metric!r}; this run selects "
+                f"on {_selection_metric(config)!r}, so best_metric is not comparable"
+            )
         model.load_state_dict(ckpt["model_state"])
         optimizer.load_state_dict(ckpt["optimizer_state"])
         # a CPU (disabled) run saves {}, which an enabled scaler refuses to load
@@ -215,7 +270,8 @@ def fit(
             use_amp=use_amp,
             grad_clip=train_cfg.gradient_clip,
         )
-        score = predict(model, val_loader, device)["score"]
+        pred = predict(model, val_loader, device)
+        score = pred["probs"] if model.task == "policy" else pred["score"]
         val_row, guard_auroc = _val_metrics(config, data.val, score, seed)
         row = {"epoch": epoch, "lr": float(lr), "train_loss": train_metrics["loss"]}
         row.update(val_row)
@@ -226,7 +282,7 @@ def fit(
             + " ".join(f"{k}={v:.4f}" for k, v in val_row.items())
         )
 
-        selected = row[f"val_{train_cfg.select_metric}"]
+        selected = row[f"val_{_selection_metric(config)}"]
         if selected > best_metric:
             best_metric = selected
             stale = 0
@@ -287,7 +343,7 @@ def fit(
     # a best.pt left by an earlier run does not count; a resumed run keeps its own
     if not (wrote_best or (resume_from and best_path.exists())):
         raise RuntimeError(
-            f"no best checkpoint was written: validation {config.train.select_metric} "
+            f"no best checkpoint was written: validation {_selection_metric(config)} "
             f"never improved (NaN or no epochs run) in run_dir {out}"
         )
     return FitResult(

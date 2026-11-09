@@ -1,6 +1,7 @@
 """Tests for the training engine."""
 
 import ast
+import copy
 import importlib
 import json
 import math
@@ -24,6 +25,7 @@ from train.loop import (
     ChanceGuardWarning,
     FitResult,
     fit,
+    load_backbone,
     prepare_data,
     resolve_pos_weight,
 )
@@ -613,6 +615,177 @@ class TestFitForecast:
         path.write_text(yaml.safe_dump(raw))
         DignityConfig.from_yaml(str(path))  # the edited preset is itself valid
         assert main(["--config", str(path)]) == 0
+
+
+def _script_policy_actions(monkeypatch, action_per_epoch):
+    """Replace decide_actions with one scripted action per epoch (every window).
+
+    Returns the review budgets it was called with.
+    """
+    budgets, calls = [], iter(action_per_epoch)
+
+    def scripted(probs, review_budget):
+        budgets.append(review_budget)
+        return np.full(len(probs), next(calls), dtype=np.int64)
+
+    monkeypatch.setattr("train.loop.decide_actions", scripted)
+    return budgets
+
+
+@pytest.fixture
+def policy_fit_config(tiny_fit_config):
+    tiny_fit_config.model.task = "policy"
+    return tiny_fit_config
+
+
+class TestFitPolicy:
+    def test_policy_fit_saves_a_checkpoint_that_rebuilds_with_three_actions(
+        self, tiny_split, policy_fit_config, tmp_path
+    ):
+        cfg = policy_fit_config
+        r = fit(cfg, tiny_split, seed=0, run_dir=str(tmp_path))
+        assert r.meta.head_kwargs == {"n_actions": 3}
+        C = cost_matrix(cfg.policy.costs)
+        assert -C.max() <= r.best_metric <= 0.0  # neg_cost
+        out, _ = build_model_from_meta(r.meta)(
+            torch.randn(2, cfg.data.seq_len, r.meta.input_size)
+        )
+        assert out.shape == (2, 3)
+
+    def test_policy_selects_the_epoch_with_the_lowest_capped_validation_cost(
+        self, tiny_split, policy_fit_config, tmp_path, monkeypatch
+    ):
+        # J11: costs are label-free (allow 2.0, review 0.5, block 1.0), so the
+        # scripted epoch actions (allow, review, block) give neg_cost -2.0, -0.5,
+        # -1.0; only real selection on the capped decision lands on epoch 2.
+        cfg = policy_fit_config
+        cfg.policy.costs = {
+            "allow": {"anomaly": 2.0, "normal": 2.0},
+            "review": {"anomaly": 0.5, "normal": 0.5},
+            "block": {"anomaly": 1.0, "normal": 1.0},
+        }
+        budgets = _script_policy_actions(monkeypatch, [0, 1, 2])
+        r = fit(cfg, tiny_split, seed=0, run_dir=str(tmp_path))
+        assert [h["val_neg_cost"] for h in r.history] == [-2.0, -0.5, -1.0]
+        assert r.best_metric == -0.5
+        assert load_checkpoint(r.best_path)["epoch"] == 2
+        assert budgets == [cfg.policy.review_budget] * 3
+
+    def test_policy_history_rows_carry_only_the_cost_metric(
+        self, tiny_split, policy_fit_config, tmp_path
+    ):
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", ChanceGuardWarning)  # guard is skipped
+            r = fit(policy_fit_config, tiny_split, seed=0, run_dir=str(tmp_path))
+        assert set(r.history[0]) == {"epoch", "lr", "train_loss", "val_neg_cost"}
+
+    def test_a_policy_run_that_never_improves_names_neg_cost_in_its_error(
+        self, tiny_split, policy_fit_config, tmp_path, monkeypatch
+    ):
+        monkeypatch.setattr(
+            "train.loop._val_metrics",
+            lambda *a, **k: ({"val_neg_cost": float("nan")}, None),
+        )
+        with pytest.raises(RuntimeError, match="neg_cost"):
+            fit(policy_fit_config, tiny_split, seed=0, run_dir=str(tmp_path))
+
+    def test_resume_refuses_a_checkpoint_selected_on_another_metric(
+        self, tiny_split, tiny_fit_config, tmp_path
+    ):
+        # a risk checkpoint's best_metric is a PR-AUC; comparing a policy
+        # neg_cost against it would silently never save a best.pt
+        policy_cfg = copy.deepcopy(tiny_fit_config)
+        policy_cfg.model.task = "policy"
+        risk = fit(tiny_fit_config, tiny_split, seed=0, run_dir=str(tmp_path / "r"))
+        last = str(tmp_path / "r" / "last.pt")
+        assert risk.meta.task == "risk"
+        with pytest.raises(ValueError, match="neg_cost"):
+            fit(
+                policy_cfg,
+                tiny_split,
+                0,
+                str(tmp_path / "p"),
+                resume_from=last,
+            )
+
+    def test_a_policy_run_resumes_from_its_own_checkpoint(
+        self, tiny_split, policy_fit_config, tmp_path
+    ):
+        policy_fit_config.train.epochs = 2
+        fit(policy_fit_config, tiny_split, 0, str(tmp_path))
+        policy_fit_config.train.epochs = 3
+        resumed = fit(
+            policy_fit_config,
+            tiny_split,
+            0,
+            str(tmp_path),
+            resume_from=str(tmp_path / "last.pt"),
+        )
+        assert [h["epoch"] for h in resumed.history] == [3]
+
+
+def _backbone_state(path):
+    state = load_checkpoint(path)["model_state"]
+    return {k: v for k, v in state.items() if k.startswith("backbone.")}
+
+
+class TestLoadBackbone:
+    @pytest.fixture
+    def risk_best(self, tiny_split, tiny_fit_config, tmp_path):
+        tiny_fit_config.model.task = "risk"
+        tiny_fit_config.train.epochs = 1
+        r = fit(tiny_fit_config, tiny_split, seed=0, run_dir=str(tmp_path / "risk"))
+        return r.best_path
+
+    def _policy_model(self, hidden_size=16):
+        return Dignity(task="policy", input_size=3, hidden_size=hidden_size, n_layers=1)
+
+    def test_warm_start_copies_the_risk_backbone_and_leaves_the_head_alone(
+        self, risk_best
+    ):
+        torch.manual_seed(1)
+        model = self._policy_model()
+        head_before = {k: v.clone() for k, v in model.head.state_dict().items()}
+        load_backbone(model, risk_best, ["a", "b", "c"])
+        want = _backbone_state(risk_best)
+        assert want
+        got = model.state_dict()
+        for k, v in want.items():
+            assert torch.equal(got[k], v), k
+        for k, v in model.head.state_dict().items():
+            assert torch.equal(v, head_before[k]), k
+
+    def test_warm_start_refuses_a_checkpoint_trained_on_other_features(self, risk_best):
+        with pytest.raises(ValueError, match="feature"):
+            load_backbone(self._policy_model(), risk_best, ["a", "b", "z"])
+
+    def test_warm_start_refuses_a_backbone_of_another_width(self, risk_best):
+        with pytest.raises(ValueError, match="shape"):
+            load_backbone(self._policy_model(hidden_size=8), risk_best, ["a", "b", "c"])
+
+    def test_only_a_policy_fit_with_a_configured_path_warm_starts(
+        self, tiny_split, tiny_fit_config, tmp_path, monkeypatch
+    ):
+        calls = []
+        monkeypatch.setattr("train.loop.load_backbone", lambda *a: calls.append(a))
+        tiny_fit_config.train.epochs = 1
+        tiny_fit_config.train.init_backbone_from = "risk.pt"
+        for task in ("risk", "forecast"):
+            tiny_fit_config.model.task = task
+            fit(tiny_fit_config, tiny_split, 0, str(tmp_path / task))
+        assert calls == []
+
+        tiny_fit_config.model.task = "policy"
+        tiny_fit_config.train.init_backbone_from = None
+        fit(tiny_fit_config, tiny_split, 0, str(tmp_path / "cold"))
+        assert calls == []
+
+        tiny_fit_config.train.init_backbone_from = "risk.pt"
+        fit(tiny_fit_config, tiny_split, 0, str(tmp_path / "warm"))
+        assert len(calls) == 1
+        model, path, names = calls[0]
+        assert model.task == "policy" and path == "risk.pt"
+        assert names == ["a", "b", "c"]
 
 
 class TestPosWeight:
