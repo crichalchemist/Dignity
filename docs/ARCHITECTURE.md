@@ -167,12 +167,8 @@ model = create_dignity_model(
 ### train/ - Training
 
 **engine.py** - Training loop
-```python
-from train.engine import train_epoch, validate_epoch
-
-train_loss = train_epoch(model, train_loader, optimizer, device)
-val_loss = validate_epoch(model, val_loader, device)
-```
+The training loop is `train/cli.py` (`train_epoch` + `predict`); this section is rewritten from the code in
+v1.0's documentation milestone.
 
 **cli.py** - Command-line interface
 ```bash
@@ -261,46 +257,8 @@ Output: (batch, num_actions)
 
 ## Training Pipeline
 
-```python
-from core.config import DignityConfig
-from data.pipeline import TransactionPipeline
-from data.loader import create_dataloaders
-from models.dignity import create_dignity_model
-from train.engine import train_epoch, validate_epoch
-import torch
-
-# 1. Load configuration
-config = DignityConfig.from_yaml("config/train_risk.yaml")
-
-# 2. Prepare data
-pipeline = TransactionPipeline(config)
-data = pipeline.load_and_process("transactions.csv")
-
-# 3. Create data loaders
-train_loader, val_loader = create_dataloaders(data, config, split=0.8)
-
-# 4. Create model
-model = create_dignity_model(config, task="risk")
-model = model.to(config.training.device)
-
-# 5. Setup optimizer and loss
-optimizer = torch.optim.AdamW(model.parameters(), lr=config.training.learning_rate)
-criterion = torch.nn.CrossEntropyLoss()
-
-# 6. Training loop
-for epoch in range(config.training.epochs):
-    train_loss = train_epoch(
-        model, train_loader, optimizer, criterion, config.training.device
-    )
-    val_loss = validate_epoch(model, val_loader, criterion, config.training.device)
-
-    print(f"Epoch {epoch}: train_loss={train_loss:.4f}, val_loss={val_loss:.4f}")
-
-    # Save best model
-    if val_loss < best_val_loss:
-        torch.save(model.state_dict(), "checkpoints/best_model.pth")
-        best_val_loss = val_loss
-```
+The training loop is `train/cli.py` (`train_epoch` + `predict`); this section is rewritten from the code in
+v1.0's documentation milestone.
 
 ## Data Flow Example
 

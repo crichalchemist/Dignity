@@ -45,8 +45,8 @@ format that export no longer supports (DGNTY-3, DGNTY-35). No shipped config wri
 ## Commands
 
 ```bash
-# Tests (108 collected: test_core 27, test_data 23, test_models 14, test_privacy 34,
-# test_operator 4, test_docs 4, test_train 2 — one skips without CUDA)
+# Tests (116 collected: test_core 27, test_data 25, test_models 14, test_privacy 34,
+# test_operator 4, test_docs 4, test_train 8 — one skips without CUDA)
 # every test is limited to 300 s (pytest.ini; pytest-timeout)
 pytest tests/ -v
 pytest tests/test_models.py -v                       # one file
@@ -86,9 +86,10 @@ data/source/{synthetic,crypto}.py   →  raw DataFrame (volume, price, fee_rate,
 core/privacy.py                     →  privacy stage: runs once per fit/transform, BEFORE signals
 data/pipeline.py TransactionPipeline→  compute_signals → RobustScaler → sliding windows
                                        (process_blocks: per-sequence split for synthetic)
-data/loader.py                      →  TransactionDataset / create_dataloader
+data/loader.py                      →  TransactionDataset (dict batches) / create_dataloader
 models/dignity.py Dignity           →  DignityBackbone + one head
-train/engine.py                     →  train_epoch / validate_epoch / save_checkpoint
+train/engine.py                     →  train_epoch / predict / save_checkpoint
+train/losses.py                     →  risk_loss
 export/to_onnx.py                   →  export + verify + benchmark
 ```
 
@@ -96,11 +97,11 @@ export/to_onnx.py                   →  export + verify + benchmark
 (CNN1D → StackedLSTM → AdditiveAttention, in `models/backbone/hybrid.py`) with `RiskHead`,
 `ForecastHead`, or `PolicyHead`. Backbone `forward` returns `(context [B,H], attn_weights [B,T])`;
 `Dignity.forward` returns `(predictions, attn_weights)`. **Every caller must unpack the tuple** —
-this is the single most common source of shape bugs, and `train/engine.py` compensates with a
-`predictions.dim() > y.dim()` squeeze.
+this is the single most common source of shape bugs, and `train/losses.py::risk_loss` reshapes predictions
+and labels to `[B]`.
 
-Adding a task = new head module in `models/head/` + a branch in `Dignity.__init__` + a loss branch
-in `train/cli.py`. Nothing else changes.
+Adding a task = new head module in `models/head/` + a branch in `Dignity.__init__` + a loss in
+`train/losses.py` and its branch in `train/cli.py`. Nothing else changes.
 
 `core/signals.SignalProcessor` is an **all-static utility class**. `core/privacy.PrivacyManager`
 is **instance-based**: it is bound to a `PrivacyBudget` (ε ledger), an optional HMAC key, and
@@ -141,17 +142,13 @@ a mechanism, it needs a test in `tests/test_privacy.py` or CI's 100% gate on tha
   export.to_onnx` works.
 - **Only `task: risk` trains end to end.** This contradicts "Adding a task ... Nothing else
   changes" above. The engine also needs work:
-  - `forecast` fails in `train_epoch` on a shape mismatch, because the 1-D binary synthetic
-    labels meet a `[B, pred_len, num_features]` output.
-  - `policy` fails because `PolicyHead` returns a tuple and the engine calls `.dim()` on it.
+  - `train/cli.py` raises `NotImplementedError` for `forecast` and `policy` until M4.
   - `train/cli.py` never passes head kwargs (`pred_len`, `n_actions`) from config.
 - **A CLI-trained checkpoint does not load in `export/to_onnx.py`.**
   - Training sizes the model with `len(pipeline.available_features)` (7 for base/train_risk on
     synthetic data).
   - Export rebuilds it with `config.model.input_size` (9) and the input shape with
     `len(config.data.features)`, so `load_state_dict` raises a size mismatch.
-- `train_epoch` evaluates `y.dim()` before handling `y is None`, so label-free batches crash
-  in training. `validate_epoch` guards it correctly.
 - **`docs/` and `README.md` drift from the code easily.** `tests/test_docs.py` guards removed
   claims and links to missing files, not stale examples. Trust the source, and when you touch a
   documented symbol, fix the doc in the same change.
