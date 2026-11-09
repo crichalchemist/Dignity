@@ -181,12 +181,8 @@ python -m train.cli \
 ### export/ - Deployment
 
 **to_onnx.py** - ONNX export
-```python
-from export.to_onnx import export_dignity_to_onnx
-
-export_dignity_to_onnx(
-    checkpoint_path="checkpoints/dignity_risk_best.pth", output_path="dignity_risk.onnx"
-)
+```bash
+python -m export.to_onnx --checkpoint runs/risk/dignity_risk_best.pt --output dignity_risk.onnx
 ```
 
 ## Model Architecture Details

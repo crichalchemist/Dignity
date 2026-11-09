@@ -45,8 +45,9 @@ format that export no longer supports (DGNTY-3, DGNTY-35). No shipped config wri
 ## Commands
 
 ```bash
-# Tests (120 collected: test_core 27, test_data 25, test_models 14, test_privacy 34,
-# test_operator 4, test_docs 4, test_train 9, test_checkpoint 3 — one skips without CUDA)
+# Tests (127 collected: test_core 27, test_data 25, test_models 14, test_privacy 34,
+# test_operator 4, test_docs 4, test_train 9, test_checkpoint 3, test_export 7 — one skips
+# without CUDA)
 # every test is limited to 300 s (pytest.ini; pytest-timeout)
 pytest tests/ -v
 pytest tests/test_models.py -v                       # one file
@@ -68,8 +69,8 @@ python -m train.cli --config config/colab.yaml
 # notebooks/train_risk.ipynb is the same run as a notebook (Colab badge inside). ruff lints
 # and formats .ipynb files too, so it must stay `ruff check`/`ruff format` clean.
 
-# ONNX export (run the module directly; see "Known breakage" below)
-python -m export.to_onnx --checkpoint runs/risk/dignity_risk_best.pt --output dignity_risk.onnx --benchmark
+# ONNX export
+dignity-export --checkpoint runs/risk/dignity_risk_best.pt --output dignity_risk.onnx --benchmark  # or python -m export.to_onnx
 ```
 
 `pytest.ini` sets `pythonpath = . run`. Imports across the package are **absolute from the repo
@@ -139,18 +140,10 @@ a mechanism, it needs a test in `tests/test_privacy.py` or CI's 100% gate on tha
 
 ## Known breakage (do not "discover" these again — fix or leave, but don't be confused)
 
-- `setup.py` declares `dignity-export = export.to_onnx:main`, but `export/to_onnx.py` has **no
-  `main()`** — only an `if __name__ == "__main__":` block. The console script fails; `python -m
-  export.to_onnx` works.
 - **Only `task: risk` trains end to end.** This contradicts "Adding a task ... Nothing else
   changes" above. The engine also needs work:
   - `train/cli.py` raises `NotImplementedError` for `forecast` and `policy` until M4.
   - `train/cli.py` never passes head kwargs (`pred_len`, `n_actions`) from config.
-- **A CLI-trained checkpoint does not load in `export/to_onnx.py`.**
-  - Training sizes the model with `len(pipeline.available_features)` (7 for base/train_risk on
-    synthetic data).
-  - Export rebuilds it with `config.model.input_size` (9) and the input shape with
-    `len(config.data.features)`, so `load_state_dict` raises a size mismatch.
 - **`docs/` and `README.md` drift from the code easily.** `tests/test_docs.py` guards removed
   claims and links to missing files, not stale examples. Trust the source, and when you touch a
   documented symbol, fix the doc in the same change.
