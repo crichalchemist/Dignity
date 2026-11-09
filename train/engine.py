@@ -1,5 +1,6 @@
 """Training engine with AMP and DDP support."""
 
+import numpy as np
 import torch
 import torch.nn as nn
 from torch.amp import GradScaler, autocast
@@ -8,157 +9,98 @@ from tqdm import tqdm
 
 def train_epoch(
     model: nn.Module,
-    dataloader: torch.utils.data.DataLoader,
+    loader: torch.utils.data.DataLoader,
     optimizer: torch.optim.Optimizer,
-    criterion: nn.Module,
+    loss_fn,
     device: torch.device,
-    use_amp: bool = True,
-    grad_clip: float = 1.0,
-    log_interval: int = 10,
+    grad_scaler: GradScaler,
+    use_amp: bool,
+    grad_clip: float,
 ) -> dict[str, float]:
     """
-    Train for one epoch.
+    Train for one epoch over dict batches.
 
     Args:
         model: Model to train
-        dataloader: Training dataloader
+        loader: Training dataloader yielding ``{"x": ..., **targets}`` dicts
         optimizer: Optimizer
-        criterion: Loss function
+        loss_fn: ``loss_fn(outputs, batch) -> scalar loss``
         device: Device
+        grad_scaler: Caller-owned GradScaler (the engine never builds one)
         use_amp: Use automatic mixed precision
         grad_clip: Gradient clipping value
-        log_interval: Logging interval
 
     Returns:
-        Dictionary with training metrics
+        ``{"loss": mean batch loss}``
     """
     model.train()
-    scaler = GradScaler("cuda", enabled=use_amp)
 
     total_loss = 0.0
-    num_batches = len(dataloader)
+    num_batches = len(loader)
 
-    pbar = tqdm(dataloader, desc="Training")
+    pbar = tqdm(loader, desc="Training")
 
-    for batch_idx, batch in enumerate(pbar):
-        # Unpack batch
-        if len(batch) == 2:
-            x, y = batch
-            x, y = x.to(device), y.to(device)
-        else:
-            x = batch.to(device)
-            y = None
+    for batch in pbar:
+        batch = {k: v.to(device) for k, v in batch.items()}
 
         # Zero gradients
         optimizer.zero_grad()
 
         # Forward pass with AMP
-        with autocast("cuda", enabled=use_amp):
-            predictions, _ = model(x)
-            # Squeeze predictions if they have an extra dimension
-            if predictions.dim() > y.dim():
-                predictions = predictions.squeeze(-1)
+        with autocast(device.type, enabled=use_amp):
+            outputs, _ = model(batch["x"])
 
         # The loss runs outside autocast in float32: RiskHead emits sigmoid
         # probabilities scored with BCELoss, which autocast refuses ("unsafe to
-        # autocast"). Casting the half-precision predictions up is the
+        # autocast"). Casting the half-precision outputs up is the
         # documented pattern for losses that must stay in float32.
-        with autocast("cuda", enabled=False):
-            predictions = predictions.float()
-            loss = criterion(predictions, y) if y is not None else predictions.mean()
+        with autocast(device.type, enabled=False):
+            loss = loss_fn(outputs.float(), batch)
 
         # Backward pass
-        scaler.scale(loss).backward()
+        grad_scaler.scale(loss).backward()
 
         # Gradient clipping
         if grad_clip > 0:
-            scaler.unscale_(optimizer)
+            grad_scaler.unscale_(optimizer)
             torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
 
         # Optimizer step
-        scaler.step(optimizer)
-        scaler.update()
+        grad_scaler.step(optimizer)
+        grad_scaler.update()
 
         # Track loss
         total_loss += loss.item()
 
         # Update progress bar
-        if (batch_idx + 1) % log_interval == 0:
-            avg_loss = total_loss / (batch_idx + 1)
-            pbar.set_postfix({"loss": f"{avg_loss:.4f}"})
+        pbar.set_postfix({"loss": f"{loss.item():.4f}"})
 
     return {"loss": total_loss / num_batches}
 
 
-def validate_epoch(
+def predict(
     model: nn.Module,
-    dataloader: torch.utils.data.DataLoader,
-    criterion: nn.Module,
+    loader: torch.utils.data.DataLoader,
     device: torch.device,
-) -> dict[str, float]:
+) -> dict[str, np.ndarray]:
     """
-    Validate for one epoch.
+    Score every window in ``loader``, in loader order.
 
-    Args:
-        model: Model to validate
-        dataloader: Validation dataloader
-        criterion: Loss function
-        device: Device
-
-    Returns:
-        Dictionary with validation metrics
+    Returns ``{"score": float32 [N]}`` for the risk task.
     """
+    if model.task != "risk":
+        raise NotImplementedError(
+            f"predict for task={model.task!r} arrives with its head in M4"
+        )
+
     model.eval()
-
-    total_loss = 0.0
-    all_predictions = []
-    all_targets = []
-
+    scores = []
     with torch.no_grad():
-        for batch in tqdm(dataloader, desc="Validating"):
-            # Unpack batch
-            if len(batch) == 2:
-                x, y = batch
-                x, y = x.to(device), y.to(device)
-            else:
-                x = batch.to(device)
-                y = None
+        for batch in tqdm(loader, desc="Predicting"):
+            outputs, _ = model(batch["x"].to(device))
+            scores.append(outputs.reshape(-1).float().cpu())
 
-            # Forward pass
-            predictions, _ = model(x)
-
-            # Compute loss
-            if y is not None:
-                # Squeeze predictions if they have an extra dimension
-                if predictions.dim() > y.dim():
-                    predictions = predictions.squeeze(-1)
-                loss = criterion(predictions, y)
-                total_loss += loss.item()
-
-                # Store for metrics
-                all_predictions.append(predictions.cpu())
-                all_targets.append(y.cpu())
-
-    # Compute metrics
-    metrics = {"loss": total_loss / len(dataloader)}
-
-    if all_predictions:
-        predictions_cat = torch.cat(all_predictions)
-        targets_cat = torch.cat(all_targets)
-
-        # Add task-specific metrics
-        # For risk scoring (binary). Predictions were squeezed to [N] above when
-        # the head emits [N, 1], so a 1-D tensor is the single-output case too.
-        if (
-            (predictions_cat.dim() == 1 or predictions_cat.size(-1) == 1)
-            and targets_cat.max() <= 1
-            and targets_cat.min() >= 0
-        ):
-            preds_binary = (predictions_cat > 0.5).float()
-            accuracy = (preds_binary == targets_cat).float().mean().item()
-            metrics["accuracy"] = accuracy
-
-    return metrics
+    return {"score": torch.cat(scores).numpy().astype(np.float32)}
 
 
 def save_checkpoint(

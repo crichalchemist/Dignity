@@ -33,7 +33,6 @@ train:
   use_amp: true
   gradient_clip: 0.5
   checkpoint_dir: ./runs/risk
-  log_interval: 10
   save_interval: 10
 
 # Privacy stage (see docs/PRIVACY.md). Runs on raw columns before signals.

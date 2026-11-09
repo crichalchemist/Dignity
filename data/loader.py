@@ -6,55 +6,56 @@ from torch.utils.data import DataLoader, Dataset
 
 
 class TransactionDataset(Dataset):
-    """PyTorch Dataset for transaction sequences."""
+    """PyTorch Dataset for transaction sequences.
 
-    def __init__(self, X: np.ndarray, y: np.ndarray | None = None, device: str = "cpu"):
+    Samples are dicts: ``{"x": float32 tensor, **targets}``. Targets keep their
+    numpy dtype, and every tensor stays on the CPU (the engine moves batches).
+    """
+
+    def __init__(self, X: np.ndarray, targets: dict[str, np.ndarray] | None = None):
         """
         Args:
             X: Sequences [n_samples, seq_len, n_features]
-            y: Optional labels/targets
-            device: Device to load tensors on
+            targets: Optional named per-sample targets, each [n_samples, ...]
         """
-        self.X = torch.FloatTensor(X).to(device)
-        self.y = torch.FloatTensor(y).to(device) if y is not None else None
+        self.X = torch.as_tensor(X, dtype=torch.float32)
+        self.targets = {k: torch.as_tensor(v) for k, v in (targets or {}).items()}
 
     def __len__(self) -> int:
         return len(self.X)
 
-    def __getitem__(self, idx: int) -> tuple:
-        if self.y is not None:
-            return self.X[idx], self.y[idx]
-        return self.X[idx]
+    def __getitem__(self, idx: int) -> dict[str, torch.Tensor]:
+        return {"x": self.X[idx], **{k: v[idx] for k, v in self.targets.items()}}
 
 
 def create_dataloader(
     X: np.ndarray,
-    y: np.ndarray | None = None,
+    targets: dict[str, np.ndarray] | None = None,
     batch_size: int = 64,
     shuffle: bool = True,
     num_workers: int = 0,
-    device: str = "cpu",
+    pin_memory: bool = False,
 ) -> DataLoader:
     """
     Create a DataLoader from sequences.
 
     Args:
         X: Sequences [n_samples, seq_len, n_features]
-        y: Optional labels/targets
+        targets: Optional named per-sample targets
         batch_size: Batch size
         shuffle: Whether to shuffle
         num_workers: Number of dataloader workers
-        device: Device to load data on
+        pin_memory: Whether to pin host memory for faster CUDA transfer
 
     Returns:
-        DataLoader
+        DataLoader yielding dict batches
     """
-    dataset = TransactionDataset(X, y, device=device)
+    dataset = TransactionDataset(X, targets)
 
     return DataLoader(
         dataset,
         batch_size=batch_size,
         shuffle=shuffle,
         num_workers=num_workers,
-        pin_memory=(device == "cuda"),
+        pin_memory=pin_memory,
     )

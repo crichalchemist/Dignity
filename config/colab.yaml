@@ -30,7 +30,6 @@ train:
   use_amp: true
   gradient_clip: 1.0
   checkpoint_dir: /content/drive/MyDrive/dignity/runs
-  log_interval: 5
   save_interval: 10
 
 device: cuda

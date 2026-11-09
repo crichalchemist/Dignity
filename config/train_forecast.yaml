@@ -33,7 +33,6 @@ train:
   use_amp: true
   gradient_clip: 1.0
   checkpoint_dir: ./runs/forecast
-  log_interval: 10
   save_interval: 5
 
 device: cuda

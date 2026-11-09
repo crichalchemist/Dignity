@@ -6,7 +6,7 @@ from pathlib import Path
 
 import numpy as np
 import torch
-import torch.nn as nn
+from torch.amp import GradScaler
 
 # Add parent directory to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -16,15 +16,11 @@ from data.loader import create_dataloader
 from data.pipeline import TransactionPipeline
 from data.source.synthetic import SyntheticGenerator
 from models.dignity import Dignity
-from train.engine import (
-    load_checkpoint,
-    save_checkpoint,
-    train_epoch,
-    validate_epoch,
-)
+from train.engine import load_checkpoint, predict, save_checkpoint, train_epoch
+from train.losses import risk_loss
 
 
-def main():
+def main(argv: list[str] | None = None) -> None:
     """Main training entry point."""
     parser = argparse.ArgumentParser(description="Train Dignity models")
     parser.add_argument(
@@ -34,7 +30,7 @@ def main():
         "--resume", type=str, default=None, help="Path to checkpoint to resume from"
     )
 
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
 
     # Load config
     print(f"Loading config from {args.config}")
@@ -47,6 +43,13 @@ def main():
 
     # Set random seed
     torch.manual_seed(config.seed)
+
+    task = config.model.task
+    if task != "risk":
+        raise NotImplementedError(
+            f"task={task!r} does not train end to end until M4 (DGNTY-1, DGNTY-2)"
+        )
+    use_amp = config.train.use_amp and device.type == "cuda"
 
     # Generate/load data
     print("\nGenerating synthetic data...")
@@ -84,11 +87,21 @@ def main():
 
     # Create dataloaders
     train_loader = create_dataloader(
-        X_train, y_train, batch_size=config.data.batch_size, shuffle=True, device=device
+        X_train,
+        {"y": y_train},
+        batch_size=config.data.batch_size,
+        shuffle=True,
+        num_workers=config.data.num_workers,
+        pin_memory=device.type == "cuda",
     )
 
     val_loader = create_dataloader(
-        X_val, y_val, batch_size=config.data.batch_size, shuffle=False, device=device
+        X_val,
+        {"y": y_val},
+        batch_size=config.data.batch_size,
+        shuffle=False,
+        num_workers=config.data.num_workers,
+        pin_memory=device.type == "cuda",
     )
 
     # Create model
@@ -109,12 +122,8 @@ def main():
     )
 
     # Loss function
-    if config.model.task == "risk":
-        criterion = nn.BCELoss()
-    elif config.model.task == "forecast":
-        criterion = nn.MSELoss()
-    else:
-        criterion = nn.CrossEntropyLoss()
+    loss_fn = risk_loss(None)
+    grad_scaler = GradScaler("cuda", enabled=use_amp)
 
     # Create checkpoint directory
     checkpoint_dir = Path(config.train.checkpoint_dir)
@@ -136,25 +145,24 @@ def main():
         # Train
         train_metrics = train_epoch(
             model=model,
-            dataloader=train_loader,
+            loader=train_loader,
             optimizer=optimizer,
-            criterion=criterion,
+            loss_fn=loss_fn,
             device=device,
-            use_amp=config.train.use_amp,
+            grad_scaler=grad_scaler,
+            use_amp=use_amp,
             grad_clip=config.train.gradient_clip,
-            log_interval=config.train.log_interval,
         )
 
         # Validate
-        val_metrics = validate_epoch(
-            model=model, dataloader=val_loader, criterion=criterion, device=device
-        )
+        scores = predict(model, val_loader, device)["score"]
+        val_loss = loss_fn(
+            torch.from_numpy(scores), {"y": torch.from_numpy(y_val)}
+        ).item()
 
         # Print metrics
         print(f"\nTrain Loss: {train_metrics['loss']:.4f}")
-        print(f"Val Loss: {val_metrics['loss']:.4f}")
-        if "accuracy" in val_metrics:
-            print(f"Val Accuracy: {val_metrics['accuracy']:.4f}")
+        print(f"Val Loss: {val_loss:.4f}")
 
         # Save checkpoint
         if epoch % config.train.save_interval == 0:
@@ -165,20 +173,20 @@ def main():
                 model=model,
                 optimizer=optimizer,
                 epoch=epoch,
-                metrics={"train": train_metrics, "val": val_metrics},
+                metrics={"train": train_metrics, "val": {"loss": val_loss}},
                 path=str(checkpoint_path),
             )
             print(f"Checkpoint saved to {checkpoint_path}")
 
         # Save best model
-        if val_metrics["loss"] < best_val_loss:
-            best_val_loss = val_metrics["loss"]
+        if val_loss < best_val_loss:
+            best_val_loss = val_loss
             best_path = checkpoint_dir / f"dignity_{config.model.task}_best.pt"
             save_checkpoint(
                 model=model,
                 optimizer=optimizer,
                 epoch=epoch,
-                metrics={"train": train_metrics, "val": val_metrics},
+                metrics={"train": train_metrics, "val": {"loss": val_loss}},
                 path=str(best_path),
             )
             print(f"Best model saved (val_loss: {best_val_loss:.4f})")

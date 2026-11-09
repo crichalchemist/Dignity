@@ -3,6 +3,7 @@
 import numpy as np
 import pandas as pd
 import pytest
+import torch
 
 from core.config import PrivacyConfig
 from core.privacy import BudgetExhausted
@@ -341,31 +342,41 @@ class TestSequenceAwareSplit:
 class TestDataLoader:
     """Test PyTorch data loading."""
 
-    def test_dataset_creation(self):
-        """Test TransactionDataset."""
+    def test_samples_are_dicts_that_stay_on_cpu(self):
         X = np.random.randn(100, 50, 9)
-        y = np.random.randint(0, 2, 100)
+        ds = TransactionDataset(
+            X, {"y": np.random.randint(0, 2, 100), "mask": np.ones(100, bool)}
+        )
+        s = ds[0]
+        assert set(s) == {"x", "y", "mask"}
+        assert s["x"].shape == (50, 9) and s["x"].dtype == torch.float32
+        assert s["x"].device.type == "cpu"
+        assert s["y"].dtype == torch.int64 and s["mask"].dtype == torch.bool
 
-        dataset = TransactionDataset(X, y)
+    def test_label_free_dataset_yields_only_x(self):
+        assert set(TransactionDataset(np.random.randn(3, 5, 2))[0]) == {"x"}
 
-        assert len(dataset) == 100
+    def test_dataloader_batches_dicts_and_carries_worker_knobs(self):
+        X, y = np.random.randn(100, 50, 9), np.random.randint(0, 2, 100)
+        loader = create_dataloader(X, {"y": y}, batch_size=16, shuffle=False)
+        batch = next(iter(loader))
+        assert batch["x"].shape == (16, 50, 9) and batch["y"].shape == (16,)
+        knobs = create_dataloader(X, {"y": y}, num_workers=2, pin_memory=True)
+        assert knobs.num_workers == 2 and knobs.pin_memory is True
 
-        sample_x, sample_y = dataset[0]
-        assert sample_x.shape == (50, 9)
-        assert sample_y.shape == ()
-
-    def test_dataloader_creation(self):
-        """Test DataLoader creation."""
-        X = np.random.randn(100, 50, 9)
-        y = np.random.randint(0, 2, 100)
-
-        loader = create_dataloader(X, y, batch_size=16, shuffle=True, device="cpu")
-
-        assert len(loader) == 100 // 16 + 1  # batches
-
-        batch_x, batch_y = next(iter(loader))
-        assert batch_x.shape[0] <= 16  # batch size
-        assert batch_x.shape[1:] == (50, 9)
+    def test_worker_processes_yield_the_same_dict_batches(self):
+        # The shipped default spawns worker processes (spawn on macOS and Colab):
+        # the dataset must pickle and the batches must match the in-process ones.
+        X = np.random.default_rng(0).standard_normal((32, 10, 3)).astype("float32")
+        t = {"y": np.arange(32) % 2, "mask": np.ones(32, bool)}
+        serial = list(create_dataloader(X, t, batch_size=8, shuffle=False))
+        workers = list(
+            create_dataloader(X, t, batch_size=8, shuffle=False, num_workers=2)
+        )
+        assert len(workers) == len(serial)
+        for a, b in zip(serial, workers, strict=True):
+            assert a.keys() == b.keys()
+            assert all(torch.equal(a[k], b[k]) for k in a)
 
 
 if __name__ == "__main__":

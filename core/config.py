@@ -63,7 +63,6 @@ class TrainConfig:
     use_amp: bool = True
     gradient_clip: float = 1.0
     checkpoint_dir: str = "./runs"
-    log_interval: int = 10
     save_interval: int = 5
 
 
