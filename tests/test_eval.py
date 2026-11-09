@@ -15,6 +15,7 @@ from eval.metrics import (
     forecast_metrics,
     lead_times,
     model_gate,
+    policy_metrics,
     risk_metrics,
     threshold_at_fpr,
 )
@@ -547,3 +548,48 @@ class TestEvalRunForecast:
                 "meta"
             ].task
         assert tasks == {"risk": "risk", "forecast": "forecast"}
+
+
+class TestPolicyMetrics:
+    def _metrics(self, n_boot=50):
+        a = np.array([0, 1, 2, 2, 0, 1])
+        y = np.array([1, 0, 1, 0, 0, 1])
+        return policy_metrics(
+            a,
+            y,
+            cost_matrix(PolicyConfig().costs),
+            np.array([0, 0, 1, 1, 2, 2]),
+            n_boot=n_boot,
+            seed=0,
+        )
+
+    def test_policy_is_scored_on_cost_capacity_catches_and_false_blocks(self):
+        m = self._metrics()
+        assert m["expected_cost"]["value"] == pytest.approx(15.5 / 6)
+        assert m["review_rate"]["value"] == pytest.approx(2 / 6)
+        assert m["block_rate"]["value"] == pytest.approx(2 / 6)
+        assert m["anomaly_recall"]["value"] == pytest.approx(2 / 3)
+        assert m["false_block_rate"]["value"] == pytest.approx(1 / 3)
+        # guard (J30): weak by design, a percentile CI need not bracket the value
+        for v in m.values():
+            assert v["ci_low"] <= v["ci_high"]
+
+    def test_every_value_is_a_plain_number_or_null_for_strict_json(self):
+        for n_boot in (50, 0):
+            m = self._metrics(n_boot)
+            for v in m.values():
+                assert type(v["value"]) is float
+                assert all(type(v[k]) in (float, type(None)) for k in v)
+            json.dumps(m, allow_nan=False)
+
+    def test_a_split_without_anomalies_has_null_recall_not_nan(self):
+        m = policy_metrics(
+            np.array([0, 2, 1, 0]),
+            np.zeros(4, int),
+            cost_matrix(PolicyConfig().costs),
+            np.array([0, 0, 1, 1]),
+            n_boot=20,
+            seed=0,
+        )
+        assert m["anomaly_recall"] == {"value": None, "ci_low": None, "ci_high": None}
+        json.dumps(m, allow_nan=False)

@@ -5,6 +5,8 @@ from collections.abc import Callable
 import numpy as np
 from sklearn.metrics import average_precision_score, roc_auc_score, roc_curve
 
+from models.head.policy import ACTIONS
+
 FPR_BUDGET = 0.01
 
 
@@ -230,6 +232,64 @@ def lead_times(
         "n_onsets": n_onsets,
         "n_missed": n_missed,
     }
+
+
+def policy_metrics(
+    actions: np.ndarray,
+    y: np.ndarray,
+    cost_matrix: np.ndarray,
+    block_index: np.ndarray,
+    n_boot: int,
+    seed: int,
+) -> dict:
+    """Triage scored on fixed actions, with block-bootstrap intervals.
+
+    ``expected_cost`` is the mean of ``cost_matrix[action, y]`` per window;
+    ``review_rate`` and ``block_rate`` are action shares; ``anomaly_recall`` is
+    P(review or block | anomaly) and ``false_block_rate`` is P(block | normal).
+    Resamples redraw blocks only; the decision rule is never re-run.
+    """
+    review, block = ACTIONS.index("review"), ACTIONS.index("block")
+    actions = np.asarray(actions)
+    y = np.asarray(y).astype(int)
+    cost = np.asarray(cost_matrix, np.float64)[actions, y]
+    is_review, is_block = actions == review, actions == block
+
+    def expected_cost(idx):
+        return float(cost[idx].mean())
+
+    def review_rate(idx):
+        return float(is_review[idx].mean())
+
+    def block_rate(idx):
+        return float(is_block[idx].mean())
+
+    def anomaly_recall(idx):
+        hit = (is_review | is_block)[idx][y[idx] == 1]
+        return float(hit.mean()) if len(hit) else float("nan")
+
+    def false_block_rate(idx):
+        hit = is_block[idx][y[idx] == 0]
+        return float(hit.mean()) if len(hit) else float("nan")
+
+    stat_fns = {
+        "expected_cost": expected_cost,
+        "review_rate": review_rate,
+        "block_rate": block_rate,
+        "anomaly_recall": anomaly_recall,
+        "false_block_rate": false_block_rate,
+    }
+    everything = np.arange(len(actions))
+    out = {}
+    for name, fn in stat_fns.items():
+        value = fn(everything)
+        low, high = _interval(fn, block_index, n_boot, seed)
+        out[name] = {
+            "value": None if np.isnan(value) else value,
+            "ci_low": low,
+            "ci_high": high,
+        }
+    return out
 
 
 def model_gate(model_pr_auc: dict, baseline_pr_aucs: dict[str, dict]) -> dict:
