@@ -120,6 +120,11 @@ python -m export.to_onnx \
     --benchmark
 ```
 
+The checkpoint carries its own feature list, input width and sequence length, so
+export needs no config. Checkpoints written before v1.0 are rejected with an
+"unsupported checkpoint format" error; retrain them with `dignity-train`.
+`dignity-export` is equivalent.
+
 ## Architecture
 
 ### Data Pipeline Flow

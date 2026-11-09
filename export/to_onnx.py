@@ -1,9 +1,18 @@
 """Export Dignity models to ONNX format for deployment."""
 
+import argparse
+import sys
+
 import numpy as np
 import onnx
 import onnxruntime as ort
 import torch
+
+from train.checkpoint import (
+    UnsupportedCheckpointError,
+    build_model_from_meta,
+    load_checkpoint,
+)
 
 
 def export_to_onnx(
@@ -12,7 +21,7 @@ def export_to_onnx(
     input_shape: tuple[int, int, int] = (1, 100, 9),
     opset_version: int = 13,
     verify: bool = True,
-) -> None:
+) -> bool:
     """
     Export Dignity model to ONNX format.
 
@@ -22,6 +31,9 @@ def export_to_onnx(
         input_shape: Input shape (batch, seq_len, features)
         opset_version: ONNX opset version
         verify: Whether to verify exported model
+
+    Returns:
+        The verification result when verify is set, otherwise True
     """
     model.eval()
 
@@ -57,7 +69,8 @@ def export_to_onnx(
     # Verify export
     if verify:
         print("\nVerifying ONNX model...")
-        verify_onnx_export(model, output_path, dummy_input)
+        return verify_onnx_export(model, output_path, dummy_input)
+    return True
 
 
 def verify_onnx_export(
@@ -217,12 +230,7 @@ def benchmark_onnx_inference(
     }
 
 
-if __name__ == "__main__":
-    import argparse
-
-    from core.config import DignityConfig
-    from models.dignity import Dignity
-
+def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Export Dignity model to ONNX")
     parser.add_argument(
         "--checkpoint", type=str, required=True, help="Path to model checkpoint"
@@ -231,40 +239,27 @@ if __name__ == "__main__":
         "--output", type=str, required=True, help="Output ONNX file path"
     )
     parser.add_argument(
-        "--config", type=str, default=None, help="Config file (if not in checkpoint)"
-    )
-    parser.add_argument(
         "--benchmark", action="store_true", help="Run inference benchmark"
     )
 
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
 
-    # Load config
-    if args.config:
-        config = DignityConfig.from_yaml(args.config)
-    else:
-        # Try to infer from checkpoint name
-        config = DignityConfig()  # Use defaults
-
-    # Load model
     print("Loading model...")
-    model = Dignity(
-        task=config.model.task,
-        input_size=config.model.input_size,
-        hidden_size=config.model.hidden_size,
-        n_layers=config.model.n_layers,
-        dropout=config.model.dropout,
-    )
-
-    checkpoint = torch.load(args.checkpoint, map_location="cpu")
-    model.load_state_dict(checkpoint["model_state_dict"])
+    try:
+        ckpt = load_checkpoint(args.checkpoint)
+    except UnsupportedCheckpointError as e:
+        print(str(e), file=sys.stderr)
+        return 3
+    meta = ckpt["meta"]
+    model = build_model_from_meta(meta)
+    model.load_state_dict(ckpt["model_state"])
+    input_shape = (1, meta.config["data"]["seq_len"], meta.input_size)
 
     # Export
-    export_to_onnx(
-        model=model,
-        output_path=args.output,
-        input_shape=(1, config.data.seq_len, len(config.data.features)),
-    )
+    if not export_to_onnx(
+        model=model, output_path=args.output, input_shape=input_shape
+    ):
+        return 1
 
     # Get info
     print("\nModel Information:")
@@ -275,8 +270,14 @@ if __name__ == "__main__":
     # Benchmark
     if args.benchmark:
         print("\nRunning inference benchmark...")
-        stats = benchmark_onnx_inference(args.output)
+        stats = benchmark_onnx_inference(args.output, input_shape=input_shape)
         print(f"  Mean: {stats['mean_ms']:.2f} ms")
         print(f"  Std: {stats['std_ms']:.2f} ms")
         print(f"  Median: {stats['median_ms']:.2f} ms")
         print(f"  P95: {stats['p95_ms']:.2f} ms")
+
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
