@@ -74,22 +74,25 @@ def _score(config: DignityConfig, result: FitResult, X: np.ndarray) -> np.ndarra
     return predict(model, loader, device)["score"]
 
 
-def _write_result(
-    config: DignityConfig, name: str, metrics: dict, baselines: dict, run_ctx: dict
-) -> Path:
-    """Write ``<out_dir>/<name>.json`` with the contract's five top-level keys."""
-    out_dir = Path(config.eval.out_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
-    payload = {
+def _payload(metrics: dict, baselines: dict, run_ctx: dict) -> dict:
+    return {
         "config_hash": run_ctx["config_hash"],
         "seed": int(run_ctx["seed"]),
         "git_sha": run_ctx["git_sha"],
         "metrics": metrics,
         "baselines": baselines,
     }
+
+
+def _write_result(
+    config: DignityConfig, name: str, metrics: dict, baselines: dict, run_ctx: dict
+) -> Path:
+    """Write ``<out_dir>/<name>.json`` with the contract's five top-level keys."""
+    out_dir = Path(config.eval.out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
     path = out_dir / f"{name}.json"
     with open(path, "w") as f:
-        json.dump(payload, f, indent=2)
+        json.dump(_payload(metrics, baselines, run_ctx), f, indent=2, allow_nan=False)
     return path
 
 
@@ -164,13 +167,19 @@ def run_risk(
         seq_len=config.data.seq_len, features=list(RAW_COLUMNS)
     ).process_blocks(
         df,
-        config.data.split,
-        config.model.horizon,
-        config.data.label_overlap,
-        np.random.default_rng(config.data.synthetic.seed),
+        split=config.data.split,
+        horizon=config.model.horizon,
+        overlap=config.data.label_overlap,
+        rng=np.random.default_rng(config.data.synthetic.seed),
     )
-    assert np.array_equal(raw.test.block_index, test.block_index)
-    assert np.array_equal(raw.test.y_risk, test.y_risk)
+    if not np.array_equal(raw.test.block_index, test.block_index):
+        raise RuntimeError(
+            "raw-column split assigned different test blocks than the model split"
+        )
+    if not np.array_equal(raw.test.y_risk, test.y_risk):
+        raise RuntimeError(
+            "raw-column split produced different test labels than the model split"
+        )
 
     s_majority = majority(train.y_risk, len(test.y_risk))
     s_logistic = window_logistic(raw.train, raw.test)
@@ -233,13 +242,7 @@ def run_risk(
     )
     print(f"wrote {path}")
 
-    return {
-        "config_hash": run_ctx["config_hash"],
-        "seed": int(run_ctx["seed"]),
-        "git_sha": run_ctx["git_sha"],
-        "metrics": metrics,
-        "baselines": baselines,
-    }
+    return _payload(metrics, baselines, run_ctx)
 
 
 def main(argv: list[str] | None = None) -> int:

@@ -205,7 +205,15 @@ class TestEvalRunSmoke:
             assert (tmp_path / "runs/smoke/img" / png).stat().st_size > 0
 
     @pytest.mark.parametrize("task", ["forecast", "policy"])
-    def test_unbuilt_tasks_are_refused_not_silently_skipped(self, task, capsys):
+    def test_unbuilt_tasks_are_refused_not_silently_skipped(
+        self, task, capsys, monkeypatch, tmp_path
+    ):
+        monkeypatch.chdir(tmp_path)
+
+        def boom(*args, **kwargs):
+            raise AssertionError("must not run")
+
+        monkeypatch.setattr("eval.run.run_risk", boom)
         with pytest.raises(SystemExit) as exc:
             main(["--smoke", "--seed", "tuning", "--tasks", task])
         assert exc.value.code == 2
