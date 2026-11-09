@@ -193,7 +193,8 @@ a mechanism, it needs a test in `tests/test_privacy.py` or CI's 100% gate on tha
 - Branches: both `main` and `dev` are protected (required checks `lint`, `test (3.10)`,
   `test (3.12)`; no deletion, no force-push); `dev` is the integration branch. Branch feature
   work from `dev` and open PRs against `dev`; `dev` → `main` is the release step. CI runs on
-  pushes to both and on every PR. PR titles carry `DGNTY-n`; merged branches are deleted
+  pushes to both and on every PR; the `smoke` job (installed console scripts, all three tasks)
+  also runs but is not yet a required check. PR titles carry `DGNTY-n`; merged branches are deleted
   automatically.
 - `.env` holds API keys (COGNEE, FRED, TWELVEDATA) and is gitignored. `.internal/` is gitignored
   local design notes — read it for background, never cite it as public documentation.
