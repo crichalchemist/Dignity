@@ -45,8 +45,8 @@ format that export no longer supports (DGNTY-3, DGNTY-35). No shipped config wri
 ## Commands
 
 ```bash
-# Tests (116 collected: test_core 27, test_data 25, test_models 14, test_privacy 34,
-# test_operator 4, test_docs 4, test_train 8 — one skips without CUDA)
+# Tests (120 collected: test_core 27, test_data 25, test_models 14, test_privacy 34,
+# test_operator 4, test_docs 4, test_train 9, test_checkpoint 3 — one skips without CUDA)
 # every test is limited to 300 s (pytest.ini; pytest-timeout)
 pytest tests/ -v
 pytest tests/test_models.py -v                       # one file
@@ -88,7 +88,8 @@ data/pipeline.py TransactionPipeline→  compute_signals → RobustScaler → sl
                                        (process_blocks: per-sequence split for synthetic)
 data/loader.py                      →  TransactionDataset (dict batches) / create_dataloader
 models/dignity.py Dignity           →  DignityBackbone + one head
-train/engine.py                     →  train_epoch / predict / save_checkpoint
+train/engine.py                     →  train_epoch / predict
+train/checkpoint.py                 →  self-describing checkpoints (FORMAT_VERSION 2) / build_model_from_meta
 train/losses.py                     →  risk_loss
 export/to_onnx.py                   →  export + verify + benchmark
 ```
@@ -118,6 +119,7 @@ a mechanism, it needs a test in `tests/test_privacy.py` or CI's 100% gate on tha
   (`price_change` and `regime` are never produced), and `train/cli.py` builds the model with
   `input_size=len(pipeline.available_features)` — **`model.input_size` in YAML is ignored**.
   If a model's input width is unexpected, check `available_features` first.
+  The checkpoint stores `available_features` in order (`meta.feature_names`).
 - **Synthetic data is 1000 independent sequences glued end to end**, all normal blocks
   first, then all anomalous. `train/cli.py` therefore uses `TransactionPipeline.process_blocks`
   (block = `seq_len + 20` rows): shuffle and split at the block level, fit the scaler on train
