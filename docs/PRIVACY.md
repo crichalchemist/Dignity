@@ -52,12 +52,19 @@ cannot be understated.** **ε is spent from the budget before any sample is draw
 **By default, noise comes from `secrets.SystemRandom`, not a seedable PRNG.**
 (`tests/test_privacy.py::TestAddLaplaceNoise::test_default_rng_is_system_random`,
 `tests/test_data.py::TestPrivacyStage::test_system_randomness_is_the_default_mode`.)
+A seed alone never changes this: the training path always supplies one, and only
+`deterministic_rng` turns it into a seeded stream
+(`tests/test_data.py::TestPrivacyStage::test_system_mode_ignores_a_supplied_seed`),
+and both shipped training configs leave it off
+(`tests/test_core.py::TestPrivacyConfig::test_shipped_configs_stay_on_system_randomness`).
 
 **Experiment mode.** `privacy.deterministic_rng: true` plus a seed gives each split
 its own seeded `random.Random`, so the privacy release reproduces exactly. This is seeded
 experiment mode, not DP-grade randomness: reproducibility and DP-grade randomness
 are mutually exclusive, so use it for experiments and the published curve, never
-for a release. The CLI prints the active mode. Tests:
+for a release. The CLI prints the active mode, and a real release records it
+(`tests/test_data.py::TestPrivacyStage::test_a_real_release_records_system_mode_and_says_it_is_not_reproducible`,
+`tests/test_data.py::TestPrivacyStage::test_a_release_through_the_rng_seam_records_injected_mode`). Tests:
 `tests/test_data.py::TestPrivacyStage::test_deterministic_mode_reproduces_the_release`,
 `tests/test_data.py::TestPrivacyStage::test_deterministic_splits_draw_distinct_noise`,
 `tests/test_data.py::TestPrivacyStage::test_deterministic_mode_without_seed_is_refused`,

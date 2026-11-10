@@ -1,6 +1,7 @@
 """Test data pipeline."""
 
 import dataclasses
+import random
 import secrets
 from pathlib import Path
 
@@ -529,6 +530,72 @@ class TestPrivacyStage:
         )
         assert p.privacy_mode == "system"
         assert isinstance(p._new_manager("train")._rng, secrets.SystemRandom)
+
+    def test_system_mode_ignores_a_supplied_seed(self):
+        # prepare_data always passes the data seed; only deterministic_rng may turn
+        # it into a seeded stream, or a default run would silently become seeded
+        p = TransactionPipeline(
+            seq_len=10, features=["price"], privacy=_laplace_price(), privacy_seed=7
+        )
+        assert p.privacy_mode == "system"
+        for split in ("train", "val", "test", "instance"):
+            assert isinstance(p._new_manager(split)._rng, secrets.SystemRandom), split
+
+    def test_instance_stream_is_its_own_seeded_stream(self):
+        cfg = dataclasses.replace(_laplace_price(), deterministic_rng=True)
+        p = TransactionPipeline(seq_len=10, privacy=cfg, privacy_seed=7)
+        first = p.privacy_manager._rng.random()
+        assert first == random.Random("dignity-privacy:7:instance").random()
+        assert first != p._new_manager("train")._rng.random()
+
+    def test_a_real_release_records_system_mode_and_says_it_is_not_reproducible(
+        self, easy_config
+    ):
+        cfg = _laplace_price()
+        data = _process_easy(
+            TransactionPipeline(
+                seq_len=easy_config.data.seq_len,
+                features=["volume"],
+                privacy=PrivacyConfig(
+                    epsilon_total=1.0,
+                    features={
+                        "volume": {
+                            "mechanism": "laplace",
+                            "epsilon": 1.0,
+                            "bounds": [50.0, 150.0],
+                        }
+                    },
+                ),
+                privacy_seed=7,
+            ),
+            easy_config,
+        )
+        assert data.privacy_mode == "system"
+        assert describe_privacy(data, cfg).endswith(
+            "; not reproducible from seed, set privacy.deterministic_rng for "
+            "experiments"
+        )
+
+    def test_a_release_through_the_rng_seam_records_injected_mode(self, easy_config):
+        data = _process_easy(
+            TransactionPipeline(
+                seq_len=easy_config.data.seq_len,
+                features=["volume"],
+                privacy=PrivacyConfig(
+                    epsilon_total=1.0,
+                    features={
+                        "volume": {
+                            "mechanism": "laplace",
+                            "epsilon": 1.0,
+                            "bounds": [50.0, 150.0],
+                        }
+                    },
+                ),
+                privacy_rng=_ZeroNoise(),
+            ),
+            easy_config,
+        )
+        assert data.privacy_mode == "injected"
 
     def test_privacy_mode_is_off_without_a_block_and_injected_with_a_seam(self):
         assert TransactionPipeline(seq_len=10).privacy_mode == "off"

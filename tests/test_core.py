@@ -229,6 +229,12 @@ class TestPrivacyConfig:
         )
         assert DignityConfig.from_yaml(str(root / "base.yaml")).privacy is None
 
+    def test_shipped_configs_stay_on_system_randomness(self):
+        root = Path(__file__).resolve().parents[1] / "config"
+        for name in ("train_risk.yaml", "train_policy.yaml"):
+            cfg = DignityConfig.from_yaml(str(root / name))
+            assert cfg.privacy.deterministic_rng is False, name
+
     def test_shipped_risk_config_covers_every_raw_model_input(self):
         root = Path(__file__).resolve().parents[1] / "config"
         cfg = DignityConfig.from_yaml(str(root / "train_risk.yaml"))
