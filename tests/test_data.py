@@ -14,7 +14,7 @@ from core.config import DignityConfig, PrivacyConfig, SyntheticConfig
 from core.privacy import BudgetExhausted, PrivacyManager
 from data.labels import window_starts
 from data.loader import TransactionDataset, create_dataloader
-from data.pipeline import TransactionPipeline
+from data.pipeline import SplitData, TransactionPipeline, describe_privacy
 from data.source.anomalies import (
     ANOMALY_INJECTORS,
     ANOMALY_TYPES,
@@ -365,6 +365,29 @@ class TestPrivacyStage:
         with pytest.raises(BudgetExhausted):
             priv.process(_frame(), fit=False)
 
+    @pytest.mark.parametrize("mechanism", ["laplace", "generalize"])
+    def test_unfitted_transform_fails_before_it_releases_anything(self, mechanism):
+        # A caller that forgot to fit must be able to fit afterwards: the failed
+        # transform must not have consumed the pipeline's one release.
+        if mechanism == "laplace":
+            cfg = _laplace_price()
+            name = "price"
+        else:
+            cfg = PrivacyConfig(
+                epsilon_total=1.0,
+                k=5,
+                features={"fee_rate": {"mechanism": "generalize", "bins": 2}},
+            )
+            name = "fee_rate"
+        priv = TransactionPipeline(
+            seq_len=10, features=[name], privacy=cfg, privacy_rng=_ZeroNoise()
+        )
+        with pytest.raises(RuntimeError, match="fitted"):
+            priv.transform(_frame())
+        assert priv.privacy_manager.budget.spent == 0.0
+        priv.fit(_frame())
+        assert priv.fitted
+
     def test_absent_privacy_block_is_a_noop(self):
         plain = TransactionPipeline(seq_len=10, features=["price"])
         df = _frame()
@@ -424,6 +447,20 @@ class TestPrivacyStage:
         priv = TransactionPipeline(seq_len=10, privacy=cfg)
         assert len(priv.privacy_manager.pseudonymize("x")) == 64
 
+    def test_describe_privacy_reports_each_split(self, easy_config):
+        data = _process_easy(
+            TransactionPipeline(seq_len=easy_config.data.seq_len, features=["volume"]),
+            easy_config,
+        )
+        spent = {"train": 1.0, "val": 1.0, "test": 1.0}
+        released = dataclasses.replace(data, epsilon_spent=spent)
+        assert describe_privacy(released, _laplace_price()) == (
+            "Privacy: ε spent per split train=1.000 val=1.000 test=1.000, each of "
+            "1.000 (parallel composition over disjoint blocks)"
+        )
+        assert isinstance(data, SplitData)
+        assert describe_privacy(data, None) == "Privacy: off"
+
 
 class _ReversedOrder:
     """Stand-in rng: the highest-numbered blocks come first, so they land in val."""
@@ -444,6 +481,23 @@ def _labelled(df: pd.DataFrame, block_len: int) -> pd.DataFrame:
 
 def _split(pipeline, df, rng):
     return pipeline.process_blocks(df, (0.7, 0.15, 0.15), 10, 0.0, rng)
+
+
+def _easy_blocks(easy_config, n_blocks=12):
+    syn = dataclasses.replace(easy_config.data.synthetic, n_blocks=n_blocks)
+    return SyntheticGenerator(syn).generate()
+
+
+def _process_easy(pipeline, easy_config, df=None):
+    if df is None:
+        df = _easy_blocks(easy_config)
+    return pipeline.process_blocks(
+        df,
+        (0.5, 0.25, 0.25),
+        easy_config.model.horizon,
+        0.0,
+        np.random.default_rng(0),
+    )
 
 
 class TestSequenceAwareSplit:
@@ -570,10 +624,45 @@ class TestSequenceAwareSplit:
         assert np.abs(d.train.X).max() < 10
         assert np.abs(d.val.X).min() > 100 and np.abs(d.test.X).min() > 100
 
-    def test_single_privacy_release_covers_all_three_splits(self, easy_frame):
-        # The budget equals the per-column epsilon, so a second release for any
-        # split would raise BudgetExhausted. All three come from one draw.
-        # Bounds sit inside the easy prices so the clip bites on both ends.
+    def test_each_split_spends_its_own_full_budget(self, easy_config, monkeypatch):
+        # Three releases, each spending the full epsilon on its own ledger; one
+        # shared ledger would raise BudgetExhausted on the second split. The
+        # recorder pins the order and that each release got its own manager.
+        privacy = PrivacyConfig(
+            epsilon_total=1.0,
+            features={
+                "volume": {"mechanism": "laplace", "epsilon": 1.0, "bounds": [0, 1e6]}
+            },
+        )
+        pipeline = TransactionPipeline(
+            seq_len=easy_config.data.seq_len,
+            features=["volume", "fee_rate"],
+            privacy=privacy,
+            privacy_rng=_ZeroNoise(),
+        )
+        made = []
+        real = TransactionPipeline._new_manager
+
+        def recorder(self, split):
+            manager = real(self, split)
+            made.append((split, manager))
+            return manager
+
+        monkeypatch.setattr(TransactionPipeline, "_new_manager", recorder)
+        data = _process_easy(pipeline, easy_config)
+        assert [s for s, _ in made] == ["train", "val", "test"]
+        assert len({id(m) for _, m in made}) == 3
+        for _, manager in made:
+            assert manager.budget.spent == pytest.approx(1.0)
+        assert data.epsilon_spent == pytest.approx(
+            {"train": 1.0, "val": 1.0, "test": 1.0}
+        )
+
+    def test_every_split_carries_its_own_release(self, easy_frame):
+        # Zero noise => the release is a pure clip. Every split must carry the
+        # released values, so it equals a plain run on pre-clipped prices and
+        # differs from the raw run. Bounds sit inside the easy prices so the
+        # clip bites on both ends.
         bounds = [500.0, 3000.0]
         privacy = PrivacyConfig(
             epsilon_total=1.0,
@@ -588,11 +677,8 @@ class TestSequenceAwareSplit:
             privacy_rng=_ZeroNoise(),
         )
         d = _split(pipeline, easy_frame, np.random.default_rng(0))
-        assert pipeline.privacy_manager.budget.spent == pytest.approx(1.0)
         assert d.epsilon_spent == {"train": 1.0, "val": 1.0, "test": 1.0}
 
-        # Zero noise => the release is a pure clip. Every split must carry the
-        # released values, so it equals a plain run on pre-clipped prices ...
         pre_clipped = easy_frame.assign(price=easy_frame["price"].clip(*bounds))
         ref = _split(
             TransactionPipeline(seq_len=100, features=["volume", "price"]),
@@ -608,8 +694,103 @@ class TestSequenceAwareSplit:
             got, want = getattr(d, name), getattr(ref, name)
             np.testing.assert_array_equal(got.block_index, want.block_index)
             np.testing.assert_allclose(got.X, want.X)
-            # ... and differs from the unreleased frame, or the release did nothing
             assert not np.allclose(got.X, getattr(raw, name).X)
+
+    def test_generalize_edges_and_scaler_fit_on_train_release_only(self, easy_config):
+        # Run 1 learns the train block ids. Run 2 sets fee_rate = 1e3 on every
+        # non-train row, with the same rng seed so the block shuffle is identical.
+        # If val/test rows reached the class edges or the scaler, train X would
+        # change.
+        privacy = PrivacyConfig(
+            epsilon_total=1.0,
+            k=5,
+            features={"fee_rate": {"mechanism": "generalize", "bins": 4}},
+        )
+
+        def pipeline():
+            return TransactionPipeline(
+                seq_len=easy_config.data.seq_len,
+                features=["fee_rate"],
+                privacy=privacy,
+            )
+
+        df = _easy_blocks(easy_config)
+        first = _process_easy(pipeline(), easy_config, df)
+        train_ids = set(np.unique(first.train.block_index))
+        df2 = df.copy()
+        df2.loc[~df2["block_id"].isin(train_ids), "fee_rate"] = 1e3
+        second = _process_easy(pipeline(), easy_config, df2)
+        np.testing.assert_array_equal(first.train.X, second.train.X)
+        assert set(np.unique(second.val.X)) <= set(np.unique(second.train.X))
+        assert set(np.unique(second.test.X)) <= set(np.unique(second.train.X))
+
+    def test_no_further_release_after_process_blocks(self, easy_config):
+        # One release per split, then the pipeline is spent: a later transform or
+        # a second process_blocks would release the same rows again at full
+        # epsilon. Without a privacy block there is nothing to spend.
+        privacy = PrivacyConfig(
+            epsilon_total=1.0,
+            features={
+                "volume": {"mechanism": "laplace", "epsilon": 1.0, "bounds": [0, 1e6]}
+            },
+        )
+        df = _easy_blocks(easy_config)
+        pipeline = TransactionPipeline(
+            seq_len=easy_config.data.seq_len,
+            features=["volume"],
+            privacy=privacy,
+            privacy_rng=_ZeroNoise(),
+        )
+        _process_easy(pipeline, easy_config, df)
+        with pytest.raises(BudgetExhausted, match="one release per split"):
+            pipeline.transform(df)
+        with pytest.raises(BudgetExhausted, match="one release per split"):
+            _process_easy(pipeline, easy_config, df)
+
+        plain = TransactionPipeline(
+            seq_len=easy_config.data.seq_len, features=["volume"]
+        )
+        _process_easy(plain, easy_config, df)
+        _process_easy(plain, easy_config, df)
+
+    @pytest.mark.parametrize(
+        "second",
+        ["fit", "fit_transform", "transform", "process_blocks"],
+    )
+    @pytest.mark.parametrize("first", ["fit", "fit_transform", "process_blocks"])
+    @pytest.mark.parametrize("mechanism", ["laplace", "generalize"])
+    def test_a_pipeline_never_releases_twice_on_any_pair_of_paths(
+        self, easy_config, mechanism, first, second
+    ):
+        # Whichever path released first, every other path must refuse. Generalize
+        # spends no epsilon and the Laplace block is under-allocated (1.0 of 2.0),
+        # so the ledger has room in both cases: only the instance flag can refuse.
+        if mechanism == "laplace":
+            feature = {"mechanism": "laplace", "epsilon": 1.0, "bounds": [0, 1e6]}
+            name, eps_total = "volume", 2.0
+        else:
+            feature = {"mechanism": "generalize", "bins": 2}
+            name, eps_total = "fee_rate", 1.0
+        privacy = PrivacyConfig(epsilon_total=eps_total, k=5, features={name: feature})
+        df = _easy_blocks(easy_config)
+        pipeline = TransactionPipeline(
+            seq_len=easy_config.data.seq_len,
+            features=[name],
+            privacy=privacy,
+            privacy_rng=_ZeroNoise(),
+        )
+
+        def run(path):
+            if path == "process_blocks":
+                return _process_easy(pipeline, easy_config, df)
+            return getattr(pipeline, path)(df)
+
+        run(first)
+        refusal = (
+            "one release per split" if first == "process_blocks" else "instance ledger"
+        )
+        with pytest.raises(BudgetExhausted, match=refusal):
+            run(second)
 
     def test_no_privacy_reports_no_epsilon(self, easy_frame):
         d = _split(

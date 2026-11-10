@@ -6,7 +6,7 @@ import secrets
 import numpy as np
 import pytest
 
-from core.privacy import BudgetExhausted, PrivacyBudget, PrivacyManager
+from core.privacy import BudgetExhausted, Generalization, PrivacyBudget, PrivacyManager
 
 
 class TestPrivacyBudget:
@@ -257,3 +257,56 @@ class TestGeneralizeAmounts:
             members = values[out == rep]
             assert rep == pytest.approx((members.min() + members.max()) / 2.0)
         assert len(np.unique(out)) == 2
+
+
+class TestGeneralization:
+    """Classes fitted on one release, applied to another: k holds on the fit data only."""
+
+    def test_unseen_values_map_only_to_train_representatives(self):
+        train = np.random.default_rng(0).lognormal(3.0, 1.0, size=500)
+        val = np.random.default_rng(1).lognormal(3.5, 1.2, size=200)
+        g = PrivacyManager.fit_generalization(train, bins=10, k=5)
+        assert isinstance(g, Generalization)
+        assert set(np.unique(g.apply(val))) <= set(g.representatives)
+
+    def test_train_classes_hold_at_least_k_fit_records(self):
+        train = np.random.default_rng(0).lognormal(3.0, 1.0, size=500)
+        g = PrivacyManager.fit_generalization(train, bins=10, k=7)
+        assert (_class_sizes(g.apply(train)) >= 7).all()
+
+    def test_out_of_range_values_map_to_the_end_classes(self):
+        g = PrivacyManager.fit_generalization(np.arange(50.0), bins=5, k=5)
+        out = g.apply(np.array([-1e9, 1e9]))
+        assert out[0] == g.representatives[0] and out[1] == g.representatives[-1]
+
+    def test_value_between_classes_goes_to_the_class_whose_edge_it_passed(self):
+        # quantile edges of ten 1.0s and ten 100.0s at bins=2 are [1, 50.5, 100]
+        train = np.concatenate([np.full(10, 1.0), np.full(10, 100.0)])
+        g = PrivacyManager.fit_generalization(train, bins=2, k=5)
+        np.testing.assert_array_equal(g.apply(np.array([50.0, 60.0])), [1.0, 100.0])
+
+    def test_identical_fit_values_form_one_class_that_absorbs_everything(self):
+        g = PrivacyManager.fit_generalization(np.full(20, 42.0), bins=10, k=5)
+        assert g.boundaries.size == 0
+        np.testing.assert_array_equal(g.apply(np.array([-5.0, 42.0, 1e6])), 42.0)
+
+    def test_a_value_in_an_empty_interior_bin_joins_the_class_below_it(self):
+        # edges are [0, 8, 10, 12, 20] and bin [8, 10) is empty, so the classes
+        # open at 0, 10 and 12. A val/test value falls into the class whose
+        # lowest occupied bin it passed, not into one bounded by the previous
+        # class's upper edge, so 9.0 is released as the low class.
+        x = np.array([0.0] * 2 + [10.0] * 6 + [20.0] * 2)
+        g = PrivacyManager.fit_generalization(x, bins=5, k=2)
+        np.testing.assert_allclose(g.boundaries, [10.0, 12.0])
+        assert g.apply(np.array([9.0]))[0] == 0.0
+
+    def test_apply_preserves_shape(self):
+        g = PrivacyManager.fit_generalization(np.arange(100.0), bins=5, k=5)
+        assert g.apply(np.zeros((3, 4))).shape == (3, 4)
+
+    def test_a_fit_record_on_a_class_edge_stays_in_its_own_class(self):
+        # edges are [1, 5, 9]; 5.0 sits on the edge and opens the upper class,
+        # so a record exactly on an edge is released with the class it fell in
+        x = np.arange(1.0, 10.0)
+        g = PrivacyManager.fit_generalization(x, bins=2, k=4)
+        np.testing.assert_array_equal(g.apply(x), [2.5] * 4 + [7.0] * 5)

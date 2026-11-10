@@ -1,5 +1,6 @@
 """Public docs must not reintroduce claims or APIs this project removed."""
 
+import ast
 import re
 from pathlib import Path
 
@@ -33,6 +34,11 @@ REMOVED = (
     "policy learning (RL)",
     "RL policy",
 )
+
+
+PRIVACY_DOCS = (ROOT / "docs" / "PRIVACY.md", ROOT / "docs" / "THREAT-MODEL.md")
+CITED = re.compile(r"tests/(test_\w+\.py)::(\w+)(?:::(\w+))?")
+SPAN = re.compile(r"`([^`]*)`")
 
 
 def _public_docs():
@@ -80,3 +86,40 @@ class TestDocs:
             "DOCUMENTATION_SUMMARY",
         ):
             assert not (ROOT / "docs" / f"{name}.md").exists(), name
+
+    def test_every_cited_privacy_test_exists(self):
+        # A citation that names a test which does not exist is a claim with no
+        # test behind it (spec section 3).
+        missing = []
+        for doc in PRIVACY_DOCS:
+            for fname, cls, method in CITED.findall(doc.read_text()):
+                tree = ast.parse((ROOT / "tests" / fname).read_text())
+                classes = {n.name: n for n in tree.body if isinstance(n, ast.ClassDef)}
+                node = f"tests/{fname}::{cls}" + (f"::{method}" if method else "")
+                methods = (
+                    {
+                        n.name
+                        for n in classes[cls].body
+                        if isinstance(n, ast.FunctionDef)
+                    }
+                    if cls in classes
+                    else set()
+                )
+                if cls not in classes or (method and method not in methods):
+                    missing.append(f"{doc.name}: {node}")
+        assert missing == []
+        # No citation may omit its file (DGNTY-37): a backticked span naming a
+        # Test* class must start with "tests/".
+        bare = [
+            span
+            for doc in PRIVACY_DOCS
+            for span in SPAN.findall(doc.read_text())
+            if re.search(r"\bTest[A-Z]\w*", span) and not span.startswith("tests/")
+        ]
+        assert bare == []
+
+    def test_privacy_docs_state_the_per_split_claim(self):
+        for path in PRIVACY_DOCS:
+            text = path.read_text()
+            assert "parallel composition" in text, path.name
+            assert "k-anonymity holds for the train release only" in text, path.name

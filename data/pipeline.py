@@ -9,9 +9,19 @@ from numpy.lib.stride_tricks import sliding_window_view
 from sklearn.preprocessing import RobustScaler
 
 from core.config import PrivacyConfig
-from core.privacy import PrivacyBudget, PrivacyManager
+from core.privacy import BudgetExhausted, Generalization, PrivacyBudget, PrivacyManager
 from core.signals import SignalProcessor
 from data.labels import forecast_labels, risk_labels, window_meta, window_starts
+
+_ALREADY_RELEASED = (
+    "process_blocks already released this pipeline's data, one release per split; "
+    "build a new TransactionPipeline for a new, disjoint release"
+)
+
+_INSTANCE_ALREADY_RELEASED = (
+    "fit/transform already released this pipeline's data on its instance ledger; "
+    "build a new TransactionPipeline for a new, disjoint release"
+)
 
 
 @dataclass
@@ -95,18 +105,26 @@ class TransactionPipeline:
         self.fitted = False
 
         self.privacy = privacy
+        self.privacy_rng = privacy_rng
+        self._split_released = False
+        self._instance_released = False
         self.privacy_manager = None
         if privacy is not None:
-            key = None
-            if privacy.key_env is not None:
-                key = os.environ.get(privacy.key_env)
-                if key is None:
-                    raise ValueError(
-                        f"privacy.key_env={privacy.key_env!r} is not set in the environment"
-                    )
-            self.privacy_manager = PrivacyManager(
-                PrivacyBudget(privacy.epsilon_total), key=key, rng=privacy_rng
-            )
+            self.privacy_manager = self._new_manager("instance")
+
+    def _new_manager(self, split: str) -> PrivacyManager:
+        """A fresh ledger of ``epsilon_total``. ``split`` is unused until M5.5."""
+        key = None
+        if self.privacy.key_env is not None:
+            key = os.environ.get(self.privacy.key_env)
+            if key is None:
+                raise ValueError(
+                    f"privacy.key_env={self.privacy.key_env!r} is not set in the "
+                    "environment"
+                )
+        return PrivacyManager(
+            PrivacyBudget(self.privacy.epsilon_total), key=key, rng=self.privacy_rng
+        )
 
     def compute_signals(self, df: pd.DataFrame) -> pd.DataFrame:
         """
@@ -145,23 +163,47 @@ class TransactionPipeline:
         """
         if self.privacy_manager is None:
             return df
+        if self._split_released:
+            raise BudgetExhausted(_ALREADY_RELEASED)
+        if self._instance_released:
+            raise BudgetExhausted(_INSTANCE_ALREADY_RELEASED)
+        released = self._release_split(df, self.privacy_manager, None)[0]
+        self._instance_released = True
+        return released
+
+    def _release_split(
+        self,
+        df: pd.DataFrame,
+        manager: PrivacyManager,
+        generalizations: dict[str, Generalization] | None,
+    ) -> tuple[pd.DataFrame, dict[str, Generalization]]:
+        """One privacy release of ``df`` on ``manager``'s ledger.
+
+        With ``generalizations=None`` the classes are fitted on ``df``; otherwise
+        the given ones are applied. Returns the released frame and the classes.
+        """
         result = df.copy()
         missing = [n for n in self.privacy.features if n not in result.columns]
         if missing:
             raise ValueError(
                 f"privacy configured for column {missing[0]!r}, not in data"
             )
+        fitted = {}
         for name, feat in self.privacy.features.items():
             col = result[name].to_numpy(dtype=float)
             if feat.mechanism == "laplace":
-                result[name] = self.privacy_manager.add_laplace_noise(
+                result[name] = manager.add_laplace_noise(
                     col, epsilon=feat.epsilon, bounds=feat.bounds
                 )
-            else:
-                result[name] = PrivacyManager.generalize_amounts(
+                continue
+            if generalizations is None:
+                fitted[name] = PrivacyManager.fit_generalization(
                     col, bins=feat.bins, k=self.privacy.k
                 )
-        return result
+            else:
+                fitted[name] = generalizations[name]
+            result[name] = fitted[name].apply(col)
+        return result, fitted
 
     def fit(self, df: pd.DataFrame) -> "TransactionPipeline":
         """Fit the scaler on training data. Applies the privacy stage once."""
@@ -169,7 +211,12 @@ class TransactionPipeline:
         return self
 
     def transform(self, df: pd.DataFrame) -> np.ndarray:
-        """Transform to a scaled feature array. Applies the privacy stage once."""
+        """Transform to a scaled feature array. Applies the privacy stage once.
+
+        An unfitted pipeline raises before releasing, so the release is kept.
+        """
+        if not self.fitted:
+            raise RuntimeError("Pipeline must be fitted before transform")
         return self._transform_on(self._apply_privacy(df))
 
     def fit_transform(self, df: pd.DataFrame) -> np.ndarray:
@@ -191,10 +238,11 @@ class TransactionPipeline:
         ``df`` is the generator's event record: one row per step with a
         ``block_id`` column plus ``is_anomalous``, ``anomaly_type`` and
         ``anomaly_id``. Blocks are shuffled with ``rng`` (its only use) and split
-        at the block level into train/val/test by the ``split`` fractions. The
-        privacy stage releases once (see ``_release``), the scaler is fit on the
-        train blocks only, and signals and windows are computed inside each
-        block so nothing crosses a joint. Labels come from ``data.labels``.
+        at the block level into train/val/test by the ``split`` fractions.
+        Each split is its own privacy release with its own budget (parallel
+        composition over disjoint blocks); generalize classes and the scaler are
+        fitted on the train release only. Signals and windows are computed inside
+        each block so nothing crosses a joint. Labels come from ``data.labels``.
         """
         ids = np.unique(df["block_id"])
         if len(ids) < 3:
@@ -250,24 +298,30 @@ class TransactionPipeline:
     def _release(
         self, frames: dict[str, pd.DataFrame]
     ) -> tuple[dict[str, pd.DataFrame], dict[str, float]]:
-        """Apply the privacy stage to the split frames; report epsilon per split.
+        """Release each split on its own ledger; report epsilon per split.
 
-        M2: one release over all splits together, so every split reports the
-        epsilon of that single release. No privacy => frames unchanged, ``{}``.
+        Train first, which fits the generalize classes; val and test apply them.
+        No privacy => frames unchanged, ``{}``. A pipeline releases once, by either path.
         """
-        if self.privacy_manager is None:
+        if self.privacy is None:
             return frames, {}
-        before = self.privacy_manager.budget.spent
-        names = list(frames)
-        released = self._apply_privacy(pd.concat([frames[k] for k in names]))
-        spent = self.privacy_manager.budget.spent - before
-        return (
-            {
-                k: released[released["block_id"].isin(frames[k]["block_id"])]
-                for k in names
-            },
-            dict.fromkeys(names, float(spent)),
-        )
+        if self._split_released:
+            raise BudgetExhausted(_ALREADY_RELEASED)
+        if self._instance_released:
+            raise BudgetExhausted(_INSTANCE_ALREADY_RELEASED)
+        released = {}
+        spent = {}
+        classes = None
+        for split in ("train", "val", "test"):
+            manager = self._new_manager(split)
+            released[split], fitted = self._release_split(
+                frames[split], manager, classes
+            )
+            if classes is None:
+                classes = fitted
+            spent[split] = float(manager.budget.spent)
+        self._split_released = True
+        return released, spent
 
     def _windows(self, frame: pd.DataFrame, horizon: int, overlap: float) -> WindowSet:
         """Window every block of ``frame`` and attach labels from the event record."""
@@ -399,3 +453,14 @@ class TransactionPipeline:
         X_seq, y_seq = self.create_sequences(X, labels, stride=stride)
 
         return X_seq, y_seq
+
+
+def describe_privacy(data: SplitData, privacy: PrivacyConfig | None) -> str:
+    """One line for the CLI: the epsilon each split's release spent."""
+    if privacy is None:
+        return "Privacy: off"
+    spent = " ".join(f"{k}={v:.3f}" for k, v in data.epsilon_spent.items())
+    return (
+        f"Privacy: ε spent per split {spent}, each of {privacy.epsilon_total:.3f} "
+        "(parallel composition over disjoint blocks)"
+    )

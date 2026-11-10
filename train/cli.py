@@ -8,6 +8,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from core.config import DignityConfig
+from data.pipeline import describe_privacy
 from train.loop import _selection_metric, fit, prepare_data
 
 
@@ -31,9 +32,7 @@ def main(argv: list[str] | None = None) -> int:
     print("\nGenerating synthetic data...")
     df, data = prepare_data(config)
 
-    if data.epsilon_spent:
-        spent = ", ".join(f"{k} {v:.3f}" for k, v in data.epsilon_spent.items())
-        print(f"Privacy: ε spent per split: {spent}")
+    print(describe_privacy(data, config.privacy))
 
     print(
         f"Train/Val/Test windows: {len(data.train.X)}/{len(data.val.X)}/"

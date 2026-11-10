@@ -1,7 +1,11 @@
 # Privacy Operations
 
 `core/privacy.py` implements two things, and claims exactly two things. Each
-sentence in **bold** below is backed by a named test in `tests/test_privacy.py`.
+sentence in **bold** below is backed by a named test under `tests/`:
+`tests/test_privacy.py` for the primitives, `tests/test_data.py::TestPrivacyStage`
+and `tests/test_data.py::TestSequenceAwareSplit` for the pipeline stage,
+`tests/test_core.py::TestPrivacyConfig` for config, and
+`tests/test_operator.py::TestOperatorLayer` for the operator layer.
 For who these protect and from whom, read [THREAT-MODEL.md](THREAT-MODEL.md).
 
 ## What is claimed
@@ -10,7 +14,7 @@ For who these protect and from whom, read [THREAT-MODEL.md](THREAT-MODEL.md).
 |---|---|---|---|
 | Identifier protection | HMAC-SHA256 with a required key | *keyed pseudonymization* | "anonymized" |
 | Value protection | Clipped Laplace noise, ε ledgered | *input-level ε-differential privacy* | any DP claim about the trained model |
-| Value protection | Quantile bins merged to ≥ k | *k-anonymity for the column as released* | k claims about derived features |
+| Value protection | Quantile bins merged to ≥ k | *k-anonymity for the generalized column of the train release* | k claims about derived features, val or test |
 
 ## Setup
 
@@ -79,7 +83,15 @@ volumes = np.random.default_rng(0).lognormal(3, 1, size=500)
 generalized = PrivacyManager.generalize_amounts(volumes, bins=10, k=5)
 ```
 
-This holds for the generalized column as released. Signals computed from it
+Use `PrivacyManager.fit_generalization` to fit classes on one release and
+`Generalization.apply` to map another release onto them;
+**k-anonymity holds for the train release only** (the release the classes were
+fitted on). Val and test
+values are mapped onto the train classes with no per-split check. Tests:
+`tests/test_privacy.py::TestGeneralization::test_train_classes_hold_at_least_k_fit_records`,
+`tests/test_data.py::TestSequenceAwareSplit::test_generalize_edges_and_scaler_fit_on_train_release_only`.
+
+This holds for the generalized column of the train release. Signals computed from it
 downstream (rolling volatility, momentum) are **not** covered by the k claim.
 
 ## The privacy stage in the pipeline
@@ -87,7 +99,15 @@ downstream (rolling volatility, momentum) are **not** covered by the k claim.
 `TransactionPipeline` applies these mechanisms to raw columns **before**
 computing signals, so derived features inherit the DP guarantee by
 post-processing. The stage runs exactly once per `fit`, `transform`, or
-`fit_transform`. It is driven by a `privacy:` block in the YAML config:
+`fit_transform`, and once per split in `process_blocks`, which makes three
+releases under **parallel composition** over disjoint blocks (see THREAT-MODEL,
+*Per-split releases and parallel composition*; tests
+`tests/test_data.py::TestSequenceAwareSplit::test_each_split_spends_its_own_full_budget`,
+`tests/test_data.py::TestSequenceAwareSplit::test_every_block_lands_in_exactly_one_split`).
+A pipeline releases once on every path: a second `fit`, `transform`,
+`fit_transform` or `process_blocks` raises `BudgetExhausted` (test
+`tests/test_data.py::TestSequenceAwareSplit::test_a_pipeline_never_releases_twice_on_any_pair_of_paths`).
+It is driven by a `privacy:` block in the YAML config:
 
 ```yaml
 privacy:
@@ -110,15 +130,24 @@ past `epsilon_total` — fails at config load, not mid-training.
 `config/train_risk.yaml` is written to exercise the stage, not to train a useful
 model. With `epsilon_total: 1.0` split 0.5/0.5, the Laplace scale is
 width/ε = 2000 for `volume` and 1000 for `price` — far above the synthetic
-signal, so released values carry little information about the source. Because
-the feature epsilons sum to `epsilon_total`, a pipeline instance can release
-**once**: `process_blocks` (what `train/loop.py::prepare_data` calls) spends the whole budget in
-a single release and only then splits train/val/test by block, and any later
-`transform` raises `BudgetExhausted`. `generalize` needs at least `k` rows per
-release, so a fitted pipeline cannot score batches smaller than `k` with the
-stage on.
+signal, so released values carry little information about the source. A pipeline
+instance releases **once**, whatever the epsilons: `process_blocks` (what
+`train/loop.py::prepare_data` calls) splits train/val/test by block and releases
+each split on its own budget (parallel composition over disjoint blocks). Any
+later `fit`, `transform`, `fit_transform` or `process_blocks` raises
+`BudgetExhausted`, whichever path released first. A flag enforces this, so it
+holds for a generalize-only block and for feature epsilons that sum to less than
+`epsilon_total`. A `transform` on an unfitted pipeline raises `RuntimeError`
+before releasing, so the release is kept for a later `fit`. This is deliberate
+(THREAT-MODEL, Known limitations). Tests:
+`tests/test_data.py::TestPrivacyStage::test_budget_exhausted_propagates_from_transform`,
+`tests/test_data.py::TestSequenceAwareSplit::test_a_pipeline_never_releases_twice_on_any_pair_of_paths`,
+`tests/test_data.py::TestSequenceAwareSplit::test_no_further_release_after_process_blocks`,
+`tests/test_data.py::TestPrivacyStage::test_unfitted_transform_fails_before_it_releases_anything`.
+Fitting the generalize classes needs at least `k` rows in the train release; val
+and test values map onto the train classes at any size, with no k claim for them.
 
-`dignity-train` prints `Privacy: ε spent per split: train X, val X, test X`
+`dignity-train` prints `Privacy: ε spent per split train=X val=X test=X, each of E (parallel composition over disjoint blocks)`
 (each to three decimals) after preprocessing so the ledger is visible, not
 theoretical.
 
