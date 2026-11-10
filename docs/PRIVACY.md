@@ -4,7 +4,9 @@
 sentence in **bold** below is backed by a named test under `tests/`:
 `tests/test_privacy.py` for the primitives, `tests/test_data.py::TestPrivacyStage`
 and `tests/test_data.py::TestSequenceAwareSplit` for the pipeline stage,
-`tests/test_core.py::TestPrivacyConfig` for config, and
+`tests/test_core.py::TestPrivacyConfig` for config,
+`tests/test_train.py::TestPrivacyUtility` for the shipped block's utility floor,
+`tests/test_docs.py::TestDocs` for the statement about the measured curve, and
 `tests/test_operator.py::TestOperatorLayer` for the operator layer.
 For who these protect and from whom, read [THREAT-MODEL.md](THREAT-MODEL.md).
 
@@ -181,11 +183,10 @@ block so the policy warm start from a risk checkpoint is accepted) consumes
 `tests/test_train.py::TestPrivacyUtility::test_privacy_config_still_learns` trains the
 risk model on easy-preset data (tuning seed, deterministic mode) with this block and
 asserts validation AUROC >= 0.70 (chance is 0.5). It is a "still learns" guard on easy
-data at the shipped epsilon, not a point on the privacy curve, and it does not test
-sensitivity to epsilon: at these a-priori bounds utility barely depends on epsilon (the
-retained signal comes mostly from the generalized `fee_rate` and `tx_count` columns;
-the numbers will be reported by the privacy sweep, `results/v1.0/privacy.json`). The
-floor was declared from tuning-seed validation
+data at the shipped epsilon, not a point on the privacy curve. It does not test
+sensitivity to epsilon, and it says nothing about harder data: on the hard preset the
+same allocation leaves the model at chance (see *Privacy-versus-utility curve* below).
+The floor was declared from tuning-seed validation
 evidence before the evaluation seed was touched. The path a user runs is pinned
 separately: `tests/test_train.py::TestPrivacyUtility::test_shipped_privacy_config_trains_through_the_cli_in_system_mode`
 runs `dignity-train` on the shipped block in system-randomness mode, checks the
@@ -193,10 +194,10 @@ runs `dignity-train` on the shipped block in system-randomness mode, checks the
 `deterministic_rng` as false. It asserts that the path runs and is labelled, not a score.
 
 The epsilon per released Laplace value is 1.0. That is one of the privacy sweep's grid
-values; each sweep point will apply this block's epsilon allocation, rescaled, on the hard
+values; each sweep point applies this block's epsilon allocation, rescaled, on the hard
 preset. The per-subject cost of a block is `block_len` x 1.0, because a block's rows are
-correlated and each row is a release (THREAT-MODEL). The utility cost will be
-reported by the privacy sweep (`results/v1.0/privacy.json`), not here. A pipeline
+correlated and each row is a release (THREAT-MODEL). The utility cost is
+reported under *Privacy-versus-utility curve* below, not here. A pipeline
 instance releases **once**, whatever the epsilons: `process_blocks` (what
 `train/loop.py::prepare_data` calls) splits train/val/test by block and releases
 each split on its own budget (parallel composition over disjoint blocks). Any
@@ -216,6 +217,57 @@ and test values map onto the train classes at any size, with no k claim for them
 `dignity-train` prints `Privacy: mode=<mode>; ε spent per split train=X val=X test=X, each of E (parallel composition over disjoint blocks)`
 (each to three decimals, with a mode-specific suffix in system and deterministic mode; `tests/test_data.py::TestPrivacyStage::test_describe_privacy_names_the_mode_and_warns_when_unseeded`) after preprocessing so the ledger is visible, not
 theoretical.
+
+## Privacy-versus-utility curve
+
+The curve answers one question: how does a risk model trained and evaluated on
+ε-private inputs score, next to the same model on the same features with no privacy
+stage? Here ε is the Laplace budget on `volume`. `fee_rate` and `tx_count` are released
+by k-anonymous generalization, which ε does not govern, and `price` is not consumed.
+
+![privacy curve](img/privacy_curve.png)
+
+**On the tuning seed, the shipped allocation leaves the risk model not distinguishable
+from chance on the hard preset, at every ε on the grid:** each point's 95% confidence
+interval for PR-AUC contains the prevalence (the chance line) and lies wholly below the
+non-private reference's interval. Test:
+`tests/test_docs.py::TestDocs::test_privacy_curve_statement_matches_the_committed_results`.
+Raising ε a hundredfold, from the smallest grid value to the largest, does not change
+this. Which mechanism removes the signal has not been measured: it may be the noise on
+`volume` at these wide a-priori bounds, the generalization of `fee_rate` and `tx_count`,
+or both. The numbers are in `results/v1.0/privacy.json`; none are quoted here, because
+the release regenerates them on the evaluation seed.
+
+How the curve is produced (`python -m eval.run ... --privacy-sweep`; the Colab runbook
+in [RESULTS.md](RESULTS.md) runs it after the three tasks):
+
+- **Template.** The privacy block and feature list of `config/train_risk.yaml`.
+  `eval.privacy_sweep.privacy_at` rescales the Laplace epsilon to each value of
+  `eval.epsilons`, in seeded mode, and takes the bounds from
+  `public_log1p_volume_bounds` of the swept preset (`config/synthetic_hard.yaml`). Tests:
+  `tests/test_eval.py::TestPrivacySweep::test_privacy_at_keeps_the_allocation_and_spends_exactly_epsilon`,
+  `tests/test_eval.py::TestPrivacySweep::test_eval_run_privacy_sweep_writes_json_and_chart`.
+- **Replicates.** Every point is trained `eval.n_train_seeds` times. Each replicate has
+  its own training seed and its own noise seed. Within a replicate every ε shares one
+  noise draw, rescaled by 1/ε (common random numbers), and the data and the block split
+  are the same for every replicate and every ε. Each split is its own release (parallel
+  composition). Test:
+  `tests/test_eval.py::TestPrivacySweep::test_each_replicate_renoises_the_same_data_and_every_epsilon_shares_it`.
+- **What the chart shows.** The filled points are replicate 0 with a 95% block-bootstrap
+  interval over test blocks. That interval is conditional on replicate 0's noise draw and
+  training seed; the hollow markers are all replicates (`replicate_spread` in the file).
+- **Reference.** The dashed line is a non-private model trained on the privacy feature
+  set (no `price` and no price signals), with the same training seeds. It is not the
+  headline risk model of `results/v1.0/risk.json`, which uses the full feature set, so
+  the gap on the chart is the cost of the privacy stage, not the distance from the
+  headline number.
+- **Baseline.** `window_logistic` on this chart is fit on the released feature windows.
+  The baseline of the same name in `risk.json` is fit on the raw columns.
+- **The shipped config is not a point on this curve.** Its ε of 1.0 is a grid value, but
+  the curve runs on the hard preset and the floor test above runs on the easy preset.
+
+These are tuning-seed results. The release regenerates the file and the chart on the
+evaluation seed.
 
 ## What is not here
 
