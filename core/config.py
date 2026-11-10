@@ -146,6 +146,7 @@ class EvalConfig:
 
 
 _MECHANISMS = ("laplace", "generalize")
+_TRANSFORMS = (None, "log1p")
 
 
 @dataclass
@@ -156,14 +157,24 @@ class PrivacyFeature:
     epsilon: float | None = None
     bounds: tuple[float, float] | None = None
     bins: int = 10
+    transform: str | None = None  # public fixed function applied before noise
 
     def __post_init__(self):
         if self.mechanism not in _MECHANISMS:
             raise ValueError(
                 f"unknown mechanism {self.mechanism!r}; expected one of {_MECHANISMS}"
             )
+        if self.transform not in _TRANSFORMS:
+            raise ValueError(
+                f"unknown transform {self.transform!r}; expected one of "
+                f"{_TRANSFORMS[1:]}"
+            )
+        if self.transform is not None and self.mechanism != "laplace":
+            raise ValueError("transform applies to laplace only")
         if self.bounds is not None:
             self.bounds = (float(self.bounds[0]), float(self.bounds[1]))
+        if self.transform == "log1p" and self.bounds and self.bounds[0] < 0:
+            raise ValueError("log1p bounds must be >= 0 (bounds are in log1p units)")
         if self.mechanism == "laplace":
             if self.epsilon is None or self.epsilon <= 0:
                 raise ValueError("laplace requires epsilon > 0")
@@ -182,6 +193,8 @@ class PrivacyFeature:
         if self.mechanism == "laplace":
             d["epsilon"] = self.epsilon
             d["bounds"] = list(self.bounds)
+            if self.transform is not None:
+                d["transform"] = self.transform
         else:
             d["bins"] = self.bins
         return d

@@ -58,6 +58,12 @@ A seed alone never changes this: the training path always supplies one, and only
 and both shipped training configs leave it off
 (`tests/test_core.py::TestPrivacyConfig::test_shipped_configs_stay_on_system_randomness`).
 
+A column may first pass through a fixed public function (`transform: log1p`,
+laplace only); clipping, sensitivity and `bounds` are then in log1p units, and the
+released column stays in log1p units (the noise is never inverted). A fitted scaler
+is not allowed here; it would derive the transform from the data.
+(`tests/test_data.py::TestPrivacyStage::test_log1p_transform_is_applied_before_clipping_and_noise`.)
+
 **Experiment mode.** `privacy.deterministic_rng: true` plus a seed gives each split
 its own seeded `random.Random`, so the privacy release reproduces exactly. This is seeded
 experiment mode, not DP-grade randomness: reproducibility and DP-grade randomness

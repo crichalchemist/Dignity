@@ -224,6 +224,8 @@ class TransactionPipeline:
         for name, feat in self.privacy.features.items():
             col = result[name].to_numpy(dtype=float)
             if feat.mechanism == "laplace":
+                if feat.transform == "log1p":
+                    col = np.log1p(col)
                 result[name] = manager.add_laplace_noise(
                     col, epsilon=feat.epsilon, bounds=feat.bounds
                 )

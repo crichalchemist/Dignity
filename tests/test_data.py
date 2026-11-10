@@ -357,6 +357,26 @@ class TestPrivacyStage:
         ).process(df)
         assert not np.allclose(x_priv, x_raw)
 
+    def test_log1p_transform_is_applied_before_clipping_and_noise(self):
+        cfg = PrivacyConfig(
+            epsilon_total=1.0,
+            features={
+                "volume": {
+                    "mechanism": "laplace",
+                    "epsilon": 1.0,
+                    "bounds": [4.6, 4.65],
+                    "transform": "log1p",
+                }
+            },
+        )
+        p = TransactionPipeline(
+            seq_len=10, features=["volume"], privacy=cfg, privacy_rng=_ZeroNoise()
+        )
+        out = p._apply_privacy(_frame())["volume"].to_numpy()
+        np.testing.assert_allclose(
+            out, np.clip(np.log1p(_frame()["volume"]), 4.6, 4.65)
+        )
+
     def test_fit_transform_spends_budget_exactly_once(self):
         priv = TransactionPipeline(
             seq_len=10,

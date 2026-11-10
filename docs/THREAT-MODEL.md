@@ -20,6 +20,10 @@ appear in the training data.
   to exceed `epsilon_total`. Tests: `tests/test_privacy.py::TestAddLaplaceNoise`,
   `tests/test_privacy.py::TestPrivacyBudget`,
   `tests/test_data.py::TestPrivacyStage::test_fit_transform_spends_budget_exactly_once`.
+  A column may first pass through a fixed public function (`transform: log1p`);
+  clipping, sensitivity and `bounds` are then in transformed units, and the released
+  column stays in those units. Test:
+  `tests/test_data.py::TestPrivacyStage::test_log1p_transform_is_applied_before_clipping_and_noise`.
 - *k-anonymous generalization* — every value in the generalized column of the
   train release is shared by at least k train records. Tests:
   `tests/test_privacy.py::TestGeneralizeAmounts::test_every_equivalence_class_has_at_least_k`,

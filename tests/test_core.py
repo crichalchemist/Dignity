@@ -14,6 +14,7 @@ from core.config import (
     EvalConfig,
     PolicyConfig,
     PrivacyConfig,
+    PrivacyFeature,
     SyntheticConfig,
     TrainConfig,
 )
@@ -290,6 +291,20 @@ class TestPrivacyConfig:
                 lambda b: b["features"]["volume"].update(epsilon=0.9),
                 "exceeds epsilon_total",
             ),
+            (
+                lambda b: b["features"]["volume"].update(transform="sqrt"),
+                "unknown transform",
+            ),
+            (
+                lambda b: b["features"]["fee_rate"].update(transform="log1p"),
+                "laplace only",
+            ),
+            (
+                lambda b: b["features"]["volume"].update(
+                    transform="log1p", bounds=[-1, 5]
+                ),
+                "log1p bounds",
+            ),
         ],
     )
     def test_rejects_bad_privacy_block(self, mutate, match):
@@ -297,6 +312,19 @@ class TestPrivacyConfig:
         mutate(block)
         with pytest.raises(ValueError, match=match):
             PrivacyConfig(**block)
+
+    def test_transform_is_recorded_so_runs_differing_only_in_it_are_told_apart(self):
+        # load_backbone compares to_dict(); a log-space run must not warm-start
+        # from a linear-space one with the same bounds.
+        plain = {"mechanism": "laplace", "epsilon": 0.5, "bounds": [0, 5]}
+        logged = PrivacyFeature(**plain, transform="log1p").to_dict()
+        assert logged["transform"] == "log1p"
+        assert logged != PrivacyFeature(**plain).to_dict()
+
+    def test_configs_without_a_transform_key_load_as_no_transform(self):
+        feat = PrivacyFeature(mechanism="laplace", epsilon=0.5, bounds=(0, 5))
+        assert feat.transform is None
+        assert "transform" not in feat.to_dict()
 
 
 def _write(tmp_path, **sections):
