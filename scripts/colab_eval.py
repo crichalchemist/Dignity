@@ -45,18 +45,20 @@ def main():
 
     argv = ["--config", "config/synthetic_hard.yaml", "--seed", seed]
     tasks = ["--tasks", "risk,forecast,policy"]
-    assert eval_main([*argv, *tasks, "--privacy-sweep"]) == 0
-
-    subprocess.run(
-        [
-            "tar",
-            "-czf",
-            f"/content/dignity_results_{seed}.tar.gz",
-            "results/v1.0",
-            "docs/img",
-        ],
-        check=True,
-    )
+    try:
+        assert eval_main([*argv, *tasks, "--privacy-sweep"]) == 0
+    finally:
+        # results already on disk are kept even when the sweep (last) fails
+        subprocess.run(
+            [
+                "tar",
+                "-czf",
+                f"/content/dignity_results_{seed}.tar.gz",
+                "results/v1.0",
+                "docs/img",
+            ],
+            check=True,
+        )
 
 
 if __name__ == "__main__":

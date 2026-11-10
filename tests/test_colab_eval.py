@@ -6,6 +6,8 @@ import sys
 import types
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "scripts" / "colab_eval.py"
 RUNBOOK = (
@@ -30,8 +32,10 @@ def _load_script():
 
 
 class TestColabEvalScript:
-    def _run(self, monkeypatch, *, clone_exists, missing_yaml=False):
-        events = []
+    def _run(
+        self, monkeypatch, *, clone_exists, missing_yaml=False, eval_exit=0, events=None
+    ):
+        events = [] if events is None else events
         monkeypatch.setenv("DIGNITY_SHA", "abc123")
         monkeypatch.setenv("DIGNITY_SEED", "tuning")
 
@@ -41,7 +45,9 @@ class TestColabEvalScript:
 
         def fake_main(argv):
             events.append(("main", argv))
-            return 0
+            if eval_exit == "raise":
+                raise RuntimeError("sweep failed")
+            return eval_exit
 
         fake_module = types.ModuleType("eval.run")
         fake_module.main = fake_main
@@ -120,6 +126,17 @@ class TestColabEvalScript:
             "results/v1.0",
             "docs/img",
         ]
+
+    def test_results_on_disk_are_tarred_even_when_the_eval_fails(self, monkeypatch):
+        # the sweep runs last; its failure must not lose the three task results
+        for eval_exit, error in (("raise", RuntimeError), (1, AssertionError)):
+            events = []
+            with pytest.raises(error):
+                self._run(
+                    monkeypatch, clone_exists=True, eval_exit=eval_exit, events=events
+                )
+            assert events[-1][0] == "run"
+            assert events[-1][1][:2] == ["tar", "-czf"]
 
     def test_stack_versions_are_printed_before_the_eval(self, monkeypatch, capsys):
         events = self._run(monkeypatch, clone_exists=True)

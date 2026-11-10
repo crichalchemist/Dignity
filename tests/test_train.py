@@ -1158,7 +1158,8 @@ class TestPrepareData:
         np.testing.assert_array_equal(first.train.X, second.train.X)
 
     def test_the_default_privacy_seed_is_the_data_seed(self, tiny_train_config):
-        # every caller that omits privacy_seed keeps its pre-M5.12 noise
+        # every caller that omits privacy_seed keeps the noise it had before the
+        # argument existed
         config = DignityConfig.from_yaml(tiny_train_config())
         config.privacy = _seeded_volume_privacy()
         _, default = prepare_data(config)

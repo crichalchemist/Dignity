@@ -21,7 +21,8 @@ def privacy_at(
     """Rescale the template's Laplace epsilons so they sum to `epsilon`.
 
     The allocation (each feature's share) is kept. Laplace bounds come from the
-    public `bounds` argument, never from data. Seeded mode is switched on.
+    public `bounds` argument, never from data; they are in the feature's transform
+    units (log1p units for ``transform: log1p``). Seeded mode is switched on.
     Generalize features, k, key_env and transforms are left unchanged.
     """
     laplace = {n: f for n, f in template.features.items() if f.mechanism == "laplace"}
@@ -74,9 +75,15 @@ def sweep(config: DignityConfig, epsilons: list[float], seed: int) -> dict:
     shares that privacy seed. The reference (``privacy=None``, same features)
     trains the same seeds. Replicate 0 carries the bootstrap CI. Test-split scores
     are for reporting; nothing is selected on them.
+
+    A replicate's checkpoint meta records ``synthetic.seed`` and
+    ``deterministic_rng`` but not the privacy seed; the noise of replicate r is
+    reproducible from privacy.json's ``privacy_seeds[r]``.
     """
     if config.privacy is None:
         raise ValueError("sweep needs config.privacy as the allocation template")
+    if not epsilons:
+        raise ValueError("sweep needs at least one epsilon")
     bounds = {"volume": public_log1p_volume_bounds(config.data.synthetic)}
     synthetic = replace(config.data.synthetic, seed=seed)
     base = replace(config, data=replace(config.data, synthetic=synthetic))
@@ -126,7 +133,7 @@ def sweep(config: DignityConfig, epsilons: list[float], seed: int) -> dict:
         )
 
     _, plain = prepare_data(replace(risk_config, privacy=None))
-    print(describe_privacy(plain, None))
+    print(f"reference {describe_privacy(plain, None)}")
     reference = []
     for r in replicates:
         run_dir = root / "reference" / f"train_seed_{config.seed + r}"
@@ -149,7 +156,7 @@ def sweep(config: DignityConfig, epsilons: list[float], seed: int) -> dict:
             "reference": {
                 "epsilon": None,
                 "risk": reference[0],
-                "privacy_mode": "off",
+                "privacy_mode": plain.privacy_mode,
                 "seed_spread": _spreads(reference),
             },
         },
@@ -235,13 +242,14 @@ def plot_curve(result: dict, path: str) -> None:
     )
 
     ref = reference["risk"]["pr_auc"]
-    ax.axhline(float(ref["value"]), linestyle="--", color="C2", label="non-private")
-    low, high = ref.get("ci_low"), ref.get("ci_high")
-    if low is not None and high is not None:
-        ax.axhspan(low, high, color="C2", alpha=0.15)
+    if ref["value"] is not None:
+        ax.axhline(float(ref["value"]), linestyle="--", color="C2", label="non-private")
+        low, high = ref.get("ci_low"), ref.get("ci_high")
+        if low is not None and high is not None:
+            ax.axhspan(low, high, color="C2", alpha=0.15)
     spread = reference.get("seed_spread", {}).get("pr_auc") or {}
     ref_values = [v for v in spread.get("values", []) if v is not None]
-    if ref_values:
+    if ref_values and epsilons:
         ax.scatter(
             [max(epsilons)] * len(ref_values),
             ref_values,
@@ -251,10 +259,12 @@ def plot_curve(result: dict, path: str) -> None:
             alpha=0.8,
         )
     prevalence = reference["risk"]["prevalence"]["value"]
-    ax.axhline(float(prevalence), linestyle=":", color="gray", label="chance")
+    if prevalence is not None:
+        ax.axhline(float(prevalence), linestyle=":", color="gray", label="chance")
 
     ax.plot([], [], "o", mfc="none", color="gray", label="replicates")
-    ax.set_xscale("log")
+    if epsilons:
+        ax.set_xscale("log")
     ax.set_xlabel("epsilon (log scale)")
     ax.set_ylabel("risk PR-AUC")
     ax.set_ylim(0, 1.05)
