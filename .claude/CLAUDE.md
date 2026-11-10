@@ -45,13 +45,14 @@ format that export no longer supports (DGNTY-3, DGNTY-35). No shipped config wri
 ## Commands
 
 ```bash
-# Tests (457 collected: test_core 65, test_data 118, test_models 23, test_privacy 42,
-# test_operator 4, test_docs 7, test_train 78, test_checkpoint 3, test_export 9,
+# Tests (470 collected: test_core 65, test_data 118, test_models 23, test_privacy 42,
+# test_operator 4, test_docs 20, test_train 78, test_checkpoint 3, test_export 9,
 # test_calibration 3, test_labels 7, test_gates 11, test_ci 4, test_eval 72,
 # test_colab_eval 11 — one skips without CUDA)
 # every test is limited to 300 s (pytest.ini; pytest-timeout)
 pytest tests/ -v
 pytest tests/test_models.py -v                       # one file
+pytest tests/test_docs.py -v   # doc numbers, symbols, paths and the README quickstart (M6)
 pytest tests/test_models.py::TestDignityModel::test_risk_model -v   # one test
 pytest tests/ -m "not slow" -v                       # marker filter
 
@@ -197,6 +198,19 @@ a mechanism, it needs a test in `tests/test_privacy.py` or CI's 100% gate on tha
   no privacy stage. `bounds` are public parameters chosen a priori — never derive them from data.
 - `privacy.deterministic_rng: true` (+ `privacy_seed=`) is the seeded experiment mode; shipped
   configs stay on SystemRandom.
+- Doc numbers are machine-checked (`tests/test_docs.py`, `check_numbers`). A quoted number is the
+  token directly followed by a marker: `0.84 <!--num risk.json metrics.pr_auc.value .2f-->`,
+  grammar `<!--num <file>.json <dotted.path> <fmt>-->`, resolved against `results/v1.0/<file>.json`
+  (dicts by key, lists by integer: `pr_auc_by_horizon.4.value`; `fmt` is a Python format spec;
+  a JSON null renders as `n/a` for every `fmt`). A confidence interval is three markers. Text
+  between `<!--results-start-->` and `<!--results-end-->` may hold no number without a marker.
+  Inside a zone a label that contains a digit is a backticked key (`recall_at_1pct_fpr`,
+  `policy.review_budget`), an epsilon or horizon label carries its own marker
+  (`metrics.points.N.epsilon`), source paths are backticked, and "95% CI" lives in prose outside
+  the zone. While `results/v1.0/risk.json` has the tuning seed, README and `docs/RESULTS.md`
+  each carry the `<!--provisional-->` banner line; it goes when the seed is the evaluation seed.
+  Inline-code symbols (`core.privacy.PrivacyManager`) and repo paths are checked the same way
+  (symbol and path checkers land with M6.2).
 - Tests are organized as classes (`TestSignalProcessor`, `TestDignityModel`, …); node ids are
   `file::Class::test_name`. They use root-level fixtures in `tests/conftest.py` (`device`,
   `sample_sequence` `[4,100,9]`, `sample_labels`) and an autouse seed reset. Reuse them rather

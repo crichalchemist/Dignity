@@ -5,6 +5,8 @@ import json
 import re
 from pathlib import Path
 
+import pytest
+
 from core.config import EvalConfig
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -182,3 +184,155 @@ class TestDocs:
         )
         aurocs = [points[e]["risk"]["auroc"] for e in at_chance]
         assert not all(a["ci_low"] <= 0.5 <= a["ci_high"] for a in aurocs)
+
+
+FIX = ROOT / "tests" / "fixtures" / "docs_numbers"
+NUM_RE = re.compile(r"([^\s>]+)\s*<!--num (\S+?)\.json (\S+) (\S+?)-->")
+ZONE_RE = re.compile(r"<!--results-start-->(.*?)<!--results-end-->", re.DOTALL)
+NUMERIC_RE = re.compile(r"\d+(?:\.\d+)?%?")
+COMMENT_RE = re.compile(r"<!--.*?-->", re.DOTALL)
+CODE_RE = re.compile(r"`[^`\n]*`")
+
+
+def _resolve(data, dotted: str):
+    """Index dicts by key and lists by integer; KeyError/IndexError if absent."""
+    for part in dotted.split("."):
+        if isinstance(data, list):
+            try:
+                data = data[int(part)]
+            except ValueError:
+                raise KeyError(part) from None
+        else:
+            data = data[part]
+    return data
+
+
+def _blank(text: str, span: tuple[int, int]) -> str:
+    """Replace a span with spaces, keeping newlines so offsets stay valid."""
+    start, end = span
+    return text[:start] + re.sub(r"[^\n]", " ", text[start:end]) + text[end:]
+
+
+def check_numbers(md_path: Path, results_dir: Path) -> list[str]:
+    """Violations for every quoted number: stale, dangling, or unmarked in a zone."""
+    text = md_path.read_text()
+    problems = []
+    loaded: dict[str, object] = {}
+    covered = []
+
+    def line_of(pos: int) -> int:
+        return text.count("\n", 0, pos) + 1
+
+    for match in NUM_RE.finditer(text):
+        covered.append(match.span(1))
+        token, name, dotted, fmt = match.groups()
+        where = f"{md_path.name}:{line_of(match.start())}"
+        if name not in loaded:
+            path = results_dir / f"{name}.json"
+            loaded[name] = json.loads(path.read_text()) if path.exists() else None
+        if loaded[name] is None:
+            problems.append(f"{where}: no such results file {name}.json")
+            continue
+        try:
+            value = _resolve(loaded[name], dotted)
+        except (KeyError, IndexError):
+            problems.append(f"{where}: no such path {dotted} in {name}.json")
+            continue
+        try:
+            shown = "n/a" if value is None else format(value, fmt)
+        except (TypeError, ValueError) as error:
+            problems.append(
+                f"{where}: {dotted} cannot be formatted with {fmt}: {error}"
+            )
+            continue
+        quoted = token.strip(",])").lstrip("[(")
+        if quoted != shown:
+            problems.append(f"{where}: quoted {quoted} but {name}.json gives {shown}")
+
+    if text.count("<!--results-start-->") != text.count("<!--results-end-->"):
+        problems.append(f"{md_path.name}: results-start and results-end do not pair")
+    scan = text
+    for span in covered:
+        scan = _blank(scan, span)
+    for pattern in (COMMENT_RE, CODE_RE):
+        for match in pattern.finditer(scan):
+            scan = _blank(scan, match.span())
+    for zone in ZONE_RE.finditer(text):
+        for number in NUMERIC_RE.finditer(scan, *zone.span(1)):
+            problems.append(
+                f"{md_path.name}:{line_of(number.start())}: "
+                f"unmarked number {number.group()} in a results zone"
+            )
+    return problems
+
+
+class TestQuotedNumbers:
+    def test_check_numbers_accepts_values_that_match_the_results_file(self):
+        assert check_numbers(FIX / "good.md", FIX) == []
+
+    def test_check_numbers_rejects_stale_unmarked_and_dangling_numbers(self):
+        msgs = check_numbers(FIX / "bad.md", FIX)
+        assert len(msgs) == 3
+        assert any("0.85" in m and "0.84" in m for m in msgs)  # stale
+        assert any("unmarked" in m for m in msgs)  # results zone
+        assert any("no such path" in m for m in msgs)  # dangling marker
+
+    @pytest.mark.parametrize(
+        "line, reason",
+        [
+            ("0.85 <!--num results.json metrics.pr_auc.value .2f-->", "quoted 0.85"),
+            ("0.84 <!--num results.json metrics.nope .2f-->", "no such path"),
+            ("0.84 <!--num results.json metrics.pr_auc_by_horizon.9 .2f-->", "no such"),
+            (
+                "0.84 <!--num nowhere.json metrics.pr_auc.value .2f-->",
+                "no such results",
+            ),
+            ("0.50 <!--num results.json metrics.lead_time .2f-->", "gives n/a"),
+            ("0.84 <!--num results.json metrics.pr_auc .2f-->", "cannot be formatted"),
+        ],
+    )
+    def test_each_violation_kind_is_reported_for_its_own_reason(
+        self, tmp_path, line, reason
+    ):
+        doc = tmp_path / "doc.md"
+        doc.write_text(f"<!--results-start-->{line}<!--results-end-->\n")
+        msgs = check_numbers(doc, FIX)
+        assert len(msgs) == 1 and reason in msgs[0], msgs
+
+    def test_an_unmarked_number_in_a_results_zone_is_the_only_complaint(self, tmp_path):
+        doc = tmp_path / "doc.md"
+        doc.write_text("<!--results-start-->| row | 3 |<!--results-end-->\n")
+        msgs = check_numbers(doc, FIX)
+        assert len(msgs) == 1 and "unmarked number 3" in msgs[0], msgs
+
+    def test_a_zone_that_never_closes_is_not_silently_ignored(self, tmp_path):
+        doc = tmp_path / "doc.md"
+        doc.write_text("<!--results-start-->no end marker\n")
+        msgs = check_numbers(doc, FIX)
+        assert len(msgs) == 1 and "do not pair" in msgs[0], msgs
+
+    def test_a_marker_is_matched_without_swallowing_neighbouring_comments(self):
+        # A greedy pattern read "<!--results-start-->0.10" as the token and
+        # ".2f--><!--results-end" as the format.
+        text = (
+            "<!--results-start-->0.10 <!--num r.json m.v .2f--> "
+            "0.50 <!--num r.json m.w .2f--><!--results-end-->"
+        )
+        assert [m.groups() for m in NUM_RE.finditer(text)] == [
+            ("0.10", "r", "m.v", ".2f"),
+            ("0.50", "r", "m.w", ".2f"),
+        ]
+
+    def test_readme_and_results_numbers_equal_the_committed_results(self):
+        for name in ("README.md", "docs/RESULTS.md"):
+            path = ROOT / name
+            if path.exists():
+                assert check_numbers(path, ROOT / "results" / "v1.0") == [], name
+
+    def test_provisional_banner_is_gone_once_results_use_the_evaluation_seed(self):
+        risk = json.loads((ROOT / "results/v1.0/risk.json").read_text())
+        final = risk["seed"] == EvalConfig().eval_seed
+        for name in ("README.md", "docs/RESULTS.md"):
+            path = ROOT / name
+            if path.exists():
+                assert ("<!--provisional-->" in path.read_text()) != final, name

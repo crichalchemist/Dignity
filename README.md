@@ -1,5 +1,7 @@
 # Dignity Core – Privacy-Preserving Sequence Modeling for Transactional Behavior
 
+<!--provisional-->**Provisional: numbers are from the tuning seed; the final evaluation has not run.**
+
 [![PyTorch](https://img.shields.io/badge/PyTorch-2.5+-ee4c2c.svg)](https://pytorch.org/)
 [![Python](https://img.shields.io/badge/Python-3.10+-blue.svg)](https://python.org/)
 [![CI](https://github.com/crichalchemist/Dignity/actions/workflows/ci.yml/badge.svg)](https://github.com/crichalchemist/Dignity/actions/workflows/ci.yml)

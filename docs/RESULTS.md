@@ -1,5 +1,7 @@
 # Results
 
+<!--provisional-->**Provisional: numbers are from the tuning seed; the final evaluation has not run.**
+
 The evaluation protocol and the numbers arrive in M6 and M7.
 
 ## Colab runbook
