@@ -13,10 +13,13 @@ import numpy as np
 import pytest
 import torch
 import yaml
+from sklearn.metrics import roc_auc_score
 from torch.amp import GradScaler
 
 from core.config import DignityConfig, PolicyConfig, PrivacyConfig
 from data.loader import create_dataloader
+from data.pipeline import TransactionPipeline
+from data.source.synthetic import SyntheticGenerator
 from models.dignity import Dignity
 from models.head.policy import cost_matrix
 from train.checkpoint import build_model_from_meta, load_checkpoint
@@ -1143,3 +1146,94 @@ class TestPrepareData:
         _, first = prepare_data(config)
         _, second = prepare_data(config)
         np.testing.assert_array_equal(first.train.X, second.train.X)
+
+
+# Declared 2026-11-09 from tuning-seed validation evidence, before the evaluation
+# seed was touched (val AUROC min 0.735 at eps 1 over privacy seeds 0-2; chance is
+# 0.5). Easy-preset data: a "still learns" floor, not a point on the privacy curve.
+PRIVACY_AUROC_FLOOR = 0.70
+
+
+class TestPrivacyUtility:
+    def test_privacy_config_still_learns(self, easy_config, tmp_path):
+        # The shipped privacy block, loaded from config/train_risk.yaml itself, must
+        # leave enough signal for the risk model to learn. Easy data isolates the
+        # privacy stage's cost from generator difficulty and keeps this CPU-fast.
+        shipped = DignityConfig.from_yaml(str(ROOT / "config/train_risk.yaml"))
+        cfg = dataclasses.replace(
+            shipped,
+            device="cpu",
+            privacy=dataclasses.replace(shipped.privacy, deterministic_rng=True),
+            data=dataclasses.replace(
+                shipped.data,
+                batch_size=128,
+                num_workers=0,
+                synthetic=dataclasses.replace(
+                    easy_config.data.synthetic,
+                    n_blocks=150,
+                    seed=shipped.eval.tuning_seed,
+                ),
+            ),
+            model=dataclasses.replace(shipped.model, hidden_size=32),
+            train=dataclasses.replace(
+                shipped.train,
+                lr=1e-3,
+                epochs=10,
+                patience=None,
+                chance_guard_auroc=None,
+                checkpoint_dir=str(tmp_path),
+            ),
+        )
+        df = SyntheticGenerator(cfg.data.synthetic).generate()
+        data = TransactionPipeline(
+            seq_len=cfg.data.seq_len,
+            features=cfg.data.features,
+            privacy=cfg.privacy,
+            privacy_seed=0,
+        ).process_blocks(
+            df,
+            cfg.data.split,
+            cfg.model.horizon,
+            cfg.data.label_overlap,
+            np.random.default_rng(0),
+        )
+        result = fit(cfg, data, seed=0, run_dir=str(tmp_path))
+        best = load_checkpoint(result.best_path)
+        model = build_model_from_meta(best["meta"])
+        model.load_state_dict(best["model_state"])
+        loader = create_dataloader(data.val.X, batch_size=128, shuffle=False)
+        scores = predict(model, loader, torch.device("cpu"))["score"]
+        auroc = roc_auc_score(data.val.y_risk, scores)
+        assert auroc >= PRIVACY_AUROC_FLOOR, f"AUROC {auroc:.3f} under privacy"
+
+    def test_shipped_privacy_config_trains_through_the_cli_in_system_mode(
+        self, tmp_path, capsys
+    ):
+        raw = yaml.safe_load((ROOT / "config/train_risk.yaml").read_text())
+        assert "deterministic_rng" not in raw["privacy"]  # shipped = SystemRandom
+        # 80 blocks at contamination 0.5 and a pinned seed: val and test hold both
+        # classes
+        raw["data"]["synthetic"] = {
+            **raw["data"].get("synthetic", {}),
+            "n_blocks": 80,
+            "contamination": 0.5,
+            "seed": 0,
+        }
+        raw["data"].update(num_workers=0, batch_size=128)
+        raw["model"].update(hidden_size=16, n_layers=1)
+        raw["train"].update(
+            epochs=1,
+            checkpoint_dir=str(tmp_path / "run"),
+            chance_guard_auroc=None,
+            patience=None,
+        )
+        raw["device"] = "cpu"
+        (tmp_path / "c.yaml").write_text(yaml.safe_dump(raw))
+        assert main(["--config", str(tmp_path / "c.yaml")]) == 0
+        assert "Privacy: mode=system;" in capsys.readouterr().out
+        meta = load_checkpoint(tmp_path / "run" / "best.pt")["meta"]
+        assert meta.config["privacy"]["deterministic_rng"] is False
+        assert (
+            meta.config["privacy"]["features"].keys()
+            == raw["privacy"]["features"].keys()
+        )

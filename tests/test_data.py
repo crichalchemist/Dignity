@@ -14,9 +14,15 @@ from numpy.lib.stride_tricks import sliding_window_view
 
 from core.config import DignityConfig, PrivacyConfig, SyntheticConfig
 from core.privacy import BudgetExhausted, PrivacyManager
+from core.signals import SignalProcessor
 from data.labels import window_starts
 from data.loader import TransactionDataset, create_dataloader
-from data.pipeline import SplitData, TransactionPipeline, describe_privacy
+from data.pipeline import (
+    SIGNAL_SOURCES,
+    SplitData,
+    TransactionPipeline,
+    describe_privacy,
+)
 from data.source.anomalies import (
     ANOMALY_INJECTORS,
     ANOMALY_TYPES,
@@ -30,7 +36,11 @@ from data.source.dynamics import (
     regime_path,
     tx_counts,
 )
-from data.source.synthetic import RAW_COLUMNS, SyntheticGenerator
+from data.source.synthetic import (
+    RAW_COLUMNS,
+    SyntheticGenerator,
+    public_log1p_volume_bounds,
+)
 from data.stats import CALIBRATION_CHUNK_LEN, calibration_stats, load_reference_stats
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -239,6 +249,58 @@ class TestTransactionPipeline:
         assert "volatility" in df_processed.columns
         assert "momentum" in df_processed.columns
 
+    @staticmethod
+    def _signal_frame():
+        rng = np.random.default_rng(1000)
+        n = 80
+        return pd.DataFrame(
+            {
+                "volume": 100.0 * np.exp(rng.normal(0.0, 0.3, n)),
+                "price": 100.0 * np.exp(np.cumsum(rng.normal(0.0, 0.05, n))),
+            }
+        )
+
+    @staticmethod
+    def _changed_signals(before, after):
+        return {
+            c
+            for c in SIGNAL_SOURCES
+            if not np.array_equal(before[c].to_numpy(), after[c].to_numpy())
+        }
+
+    def test_each_raw_column_feeds_exactly_its_derived_signals(self):
+        # Behavioural pin of SIGNAL_SOURCES: the privacy coverage check trusts it
+        # to know which raw column a model input really reads (DGNTY-28).
+        pipe = TransactionPipeline()
+        df = self._signal_frame()
+        base = pipe.compute_signals(df)
+        bumped_price = pipe.compute_signals(
+            df.assign(price=df["price"] * 1.5 ** df.index.to_series() ** 0.5)
+        )
+        bumped_volume = pipe.compute_signals(
+            df.assign(volume=df["volume"] * 1.5 ** df.index.to_series() ** 0.5)
+        )
+        assert self._changed_signals(base, bumped_price) == {
+            "volatility",
+            "momentum",
+            "directional_change",
+        }
+        assert self._changed_signals(base, bumped_volume) == {"volume_volatility"}
+
+    def test_derived_signals_are_the_named_signal_processor_functions(self):
+        df = self._signal_frame()
+        out = TransactionPipeline().compute_signals(df)
+        expected = {
+            "volume_volatility": SignalProcessor.volatility(df["volume"].values),
+            "volatility": SignalProcessor.volatility(df["price"].values),
+            "momentum": SignalProcessor.price_momentum(df["price"].values),
+            "directional_change": SignalProcessor.directional_change(
+                df["price"].values
+            ),
+        }
+        for name, values in expected.items():
+            np.testing.assert_array_equal(out[name].to_numpy(), values)
+
     def test_fit_transform(self, easy_frame):
         """Test scaling pipeline."""
         df = easy_frame[list(RAW_COLUMNS)]
@@ -345,6 +407,48 @@ class TestPrivacyStage:
             seq_len=10, features=["price", "volatility"]
         ).process(df)
         assert not np.allclose(x_priv, x_raw)
+
+    def test_log1p_transform_is_applied_before_clipping_and_noise(self):
+        cfg = PrivacyConfig(
+            epsilon_total=1.0,
+            features={
+                "volume": {
+                    "mechanism": "laplace",
+                    "epsilon": 1.0,
+                    "bounds": [4.6, 4.65],
+                    "transform": "log1p",
+                }
+            },
+        )
+        p = TransactionPipeline(
+            seq_len=10, features=["volume"], privacy=cfg, privacy_rng=_ZeroNoise()
+        )
+        out = p._apply_privacy(_frame())["volume"].to_numpy()
+        np.testing.assert_allclose(
+            out, np.clip(np.log1p(_frame()["volume"]), 4.6, 4.65)
+        )
+
+    def test_raw_volume_below_minus_one_releases_a_finite_value(self):
+        # log1p of a value < -1 is NaN, and NaN survives clip and noise, so those
+        # rows would stand out in the release. Negative raw volume clamps to 0.
+        cfg = PrivacyConfig(
+            epsilon_total=1.0,
+            features={
+                "volume": {
+                    "mechanism": "laplace",
+                    "epsilon": 1.0,
+                    "bounds": [0.0, 6.0],
+                    "transform": "log1p",
+                }
+            },
+        )
+        p = TransactionPipeline(
+            seq_len=10, features=["volume"], privacy=cfg, privacy_rng=_ZeroNoise()
+        )
+        df = _frame().assign(volume=[-5.0, -1.0, -0.5] + [100.0] * 57)
+        out = p._apply_privacy(df)["volume"].to_numpy()
+        assert np.isfinite(out).all()
+        np.testing.assert_allclose(out[:3], 0.0)
 
     def test_fit_transform_spends_budget_exactly_once(self):
         priv = TransactionPipeline(
@@ -1211,6 +1315,68 @@ class TestNormalProcessPlausibility:
         fee = _normal_frame("config/synthetic_easy.yaml")["fee_rate"].to_numpy()
         out = PrivacyManager.generalize_amounts(fee, bins=bins, k=shipped.k)
         assert len(np.unique(out)) >= bins - 2
+
+
+class TestPublicBounds:
+    """Bounds are public: derived from declared generator parameters, never data."""
+
+    def test_volume_bounds_are_derived_without_generating_data(self, monkeypatch):
+        def reads_data(*args, **kwargs):
+            pytest.fail("bounds must not build a generator or sample data")
+
+        for attr in ("__init__", "generate", "_normal_block"):
+            monkeypatch.setattr(SyntheticGenerator, attr, reads_data)
+        lo, hi = public_log1p_volume_bounds(SyntheticConfig())
+        assert 0.0 <= lo < hi and np.isfinite(hi)
+
+    def test_volume_bounds_do_not_depend_on_sampling_parameters(self):
+        # Bounds are public parameters: anything that only steers sampling must
+        # leave them bit-identical, or they are leaking data-dependent choices.
+        base = SyntheticConfig()
+        expected = public_log1p_volume_bounds(base)
+        for seed in (0, 1, 1000, 31337):
+            for n_blocks in (2, 50):
+                for contamination in (0.0, 0.9):
+                    varied = dataclasses.replace(
+                        base,
+                        seed=seed,
+                        n_blocks=n_blocks,
+                        contamination=contamination,
+                        benign_spike_rate=0.5 if seed % 2 else 0.0,
+                        regime_switch_prob=0.1 if n_blocks > 2 else 0.0,
+                    )
+                    assert public_log1p_volume_bounds(varied) == expected
+
+    def test_volume_bounds_cover_the_hard_preset(self):
+        cfg = DignityConfig.from_yaml(str(ROOT / "config/synthetic_hard.yaml"))
+        syn = dataclasses.replace(cfg.data.synthetic, n_blocks=50, seed=1000)
+        v = np.log1p(SyntheticGenerator(syn).generate()["volume"].to_numpy())
+        lo, hi = public_log1p_volume_bounds(cfg.data.synthetic)
+        assert np.mean((v < lo) | (v > hi)) <= 0.001
+
+    def test_benign_spikes_at_low_severity_stay_inside_the_bounds(self):
+        # The benign spike ignores severity, so a low severity_max must not
+        # shrink the bound below the spike's own multiplier (DGNTY-8).
+        syn = SyntheticConfig(
+            n_blocks=60,
+            seed=1000,
+            severity_range=(0.1, 0.3),
+            benign_spike_rate=1.0,
+        )
+        v = np.log1p(SyntheticGenerator(syn).generate()["volume"].to_numpy())
+        lo, hi = public_log1p_volume_bounds(syn)
+        assert np.mean((v < lo) | (v > hi)) <= 0.001
+        # Deterministic pin: below the crossover the ceiling is the spike's
+        # multiplier alone, so raising severity_max (still below it) is a no-op.
+        assert (
+            hi
+            == public_log1p_volume_bounds(SyntheticConfig(severity_range=(0.1, 0.5)))[1]
+        )
+
+    def test_bounds_widen_with_the_declared_severity_ceiling(self):
+        low = public_log1p_volume_bounds(SyntheticConfig(severity_range=(0.3, 1.0)))
+        mild = public_log1p_volume_bounds(SyntheticConfig(severity_range=(0.1, 0.3)))
+        assert low[0] == mild[0] and low[1] > mild[1]
 
 
 if __name__ == "__main__":

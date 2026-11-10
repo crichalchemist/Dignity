@@ -7,6 +7,7 @@ probability ``contamination`` a block gets typed anomalies at random onsets
 touched (DGNTY-19).
 """
 
+import math
 from dataclasses import replace
 
 import numpy as np
@@ -16,6 +17,8 @@ from core.config import SyntheticConfig
 from data.source.anomalies import (
     ANOMALY_INJECTORS,
     ANOMALY_TYPES,
+    BENIGN_SPIKE_MAX_M,
+    MAX_VOLUME_MULTIPLIER,
     inject_benign_spike,
 )
 from data.source.dynamics import (
@@ -31,6 +34,36 @@ RAW_COLUMNS = ("volume", "price", "fee_rate", "tx_count")
 
 _T0_MS = 1_700_000_000_000
 _STEP_MS = 3_600_000  # hourly rows, ms like every other source
+
+
+def public_log1p_volume_bounds(config: SyntheticConfig) -> tuple[float, float]:
+    """A-priori ``log1p(volume)`` bounds from declared generator parameters.
+
+    These are a public parameter choice (they feed the privacy stage's clipping
+    bounds), so they read only ``DEFAULT_PARAMS`` and ``config.severity_range``
+    and never generated data. Their check against data lives only in the tests.
+    Width: the per-block level (4 sd), the AR(1) log-volume (4 stationary sd)
+    and the regime offset add linearly; the top is scaled by the largest
+    anomaly or benign-spike multiplier.
+    """
+    p = DEFAULT_PARAMS
+    level = 4.0 * p.block_level_sd
+    width = 4.0 * p.log_volume_innov_sd / math.sqrt(1.0 - p.ar1_phi**2)
+    severity_max = config.severity_range[1]
+    mult = max(
+        1.0 + (MAX_VOLUME_MULTIPLIER - 1.0) * severity_max,
+        1.0 + BENIGN_SPIKE_MAX_M,
+    )
+    hi = math.log1p(
+        math.exp(p.log_volume_mean + level + max(p.regime_log_volume) + width) * mult
+    )
+    lo = max(
+        0.0,
+        math.log1p(
+            math.exp(p.log_volume_mean - level + min(p.regime_log_volume) - width)
+        ),
+    )
+    return lo, hi
 
 
 class SyntheticGenerator:

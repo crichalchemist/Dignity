@@ -2,6 +2,7 @@
 
 import os
 import random
+from collections.abc import Callable
 from dataclasses import dataclass
 
 import numpy as np
@@ -13,6 +14,21 @@ from core.config import PrivacyConfig
 from core.privacy import BudgetExhausted, Generalization, PrivacyBudget, PrivacyManager
 from core.signals import SignalProcessor
 from data.labels import forecast_labels, risk_labels, window_meta, window_starts
+
+# Derived signal -> the raw column it is computed from, in column order.
+SIGNAL_SOURCES: dict[str, str] = {
+    "volume_volatility": "volume",
+    "volatility": "price",
+    "momentum": "price",
+    "directional_change": "price",
+}
+
+_SIGNAL_FNS: dict[str, Callable] = {
+    "volume_volatility": SignalProcessor.volatility,
+    "volatility": SignalProcessor.volatility,
+    "momentum": SignalProcessor.price_momentum,
+    "directional_change": SignalProcessor.directional_change,
+}
 
 _ALREADY_RELEASED = (
     "process_blocks already released this pipeline's data, one release per split; "
@@ -165,20 +181,9 @@ class TransactionPipeline:
         """
         result = df.copy()
 
-        # Compute signals if base features exist
-        if "volume" in df.columns:
-            result["volume_volatility"] = self.signal_processor.volatility(
-                df["volume"].values
-            )
-
-        if "price" in df.columns:
-            result["volatility"] = self.signal_processor.volatility(df["price"].values)
-            result["momentum"] = self.signal_processor.price_momentum(
-                df["price"].values
-            )
-            result["directional_change"] = self.signal_processor.directional_change(
-                df["price"].values
-            )
+        for name, source in SIGNAL_SOURCES.items():
+            if source in df.columns:
+                result[name] = _SIGNAL_FNS[name](df[source].values)
 
         return result
 
@@ -219,6 +224,8 @@ class TransactionPipeline:
         for name, feat in self.privacy.features.items():
             col = result[name].to_numpy(dtype=float)
             if feat.mechanism == "laplace":
+                if feat.transform == "log1p":
+                    col = np.log1p(np.maximum(col, 0.0))
                 result[name] = manager.add_laplace_noise(
                     col, epsilon=feat.epsilon, bounds=feat.bounds
                 )

@@ -1,5 +1,6 @@
 """Test core utilities."""
 
+import dataclasses
 from pathlib import Path
 
 import numpy as np
@@ -13,15 +14,37 @@ from core.config import (
     EvalConfig,
     PolicyConfig,
     PrivacyConfig,
+    PrivacyFeature,
     SyntheticConfig,
     TrainConfig,
 )
 from core.signals import SignalProcessor
+from data.pipeline import SIGNAL_SOURCES, TransactionPipeline
 from data.source.anomalies import ANOMALY_TYPES
-from data.source.synthetic import RAW_COLUMNS, SyntheticGenerator
+from data.source.synthetic import (
+    RAW_COLUMNS,
+    SyntheticGenerator,
+    public_log1p_volume_bounds,
+)
 from train.loop import prepare_data
 
 ROOT = Path(__file__).resolve().parents[1]
+
+META = {
+    "timestamp",
+    "block_id",
+    "is_anomalous",
+    "anomaly_type",
+    "anomaly_id",
+    "block_label",
+}
+
+
+def _consumed_raw_columns(features, df):
+    """Raw source columns the model reads: a derived signal counts as its source."""
+    raw = df.drop(columns=[c for c in META if c in df.columns])
+    p = TransactionPipeline(seq_len=8, features=features).fit(raw)
+    return {SIGNAL_SOURCES.get(f, f) for f in p.available_features}
 
 
 class TestSignalProcessor:
@@ -235,15 +258,51 @@ class TestPrivacyConfig:
             cfg = DignityConfig.from_yaml(str(root / name))
             assert cfg.privacy.deterministic_rng is False, name
 
+    def test_shipped_risk_bounds_are_the_public_generator_bounds(self):
+        root = Path(__file__).resolve().parents[1] / "config"
+        cfg = DignityConfig.from_yaml(str(root / "train_risk.yaml"))
+        lo, hi = public_log1p_volume_bounds(cfg.data.synthetic)
+        b = cfg.privacy.features["volume"].bounds
+        assert cfg.privacy.features["volume"].transform == "log1p"
+        assert b[0] <= lo < b[0] + 0.01 and b[1] - 0.01 < hi <= b[1]
+        assert "price" not in cfg.privacy.features
+
+    def test_shipped_block_spends_all_epsilon_on_volume_and_generalizes_the_rest(
+        self,
+    ):
+        root = Path(__file__).resolve().parents[1] / "config"
+        cfg = DignityConfig.from_yaml(str(root / "train_risk.yaml"))
+        assert cfg.data.features == [
+            "volume",
+            "fee_rate",
+            "tx_count",
+            "volume_volatility",
+        ]
+        f = cfg.privacy.features
+        assert cfg.privacy.epsilon_total == 1.0 and cfg.privacy.k == 5
+        assert f["volume"].mechanism == "laplace" and f["volume"].epsilon == 1.0
+        for name in ("fee_rate", "tx_count"):
+            assert f[name].mechanism == "generalize" and f[name].bins == 10
+
     def test_shipped_risk_config_covers_every_raw_model_input(self):
         root = Path(__file__).resolve().parents[1] / "config"
         cfg = DignityConfig.from_yaml(str(root / "train_risk.yaml"))
-        raw_columns = set(RAW_COLUMNS)
-        raw_inputs = raw_columns & set(cfg.data.features)
-        assert raw_inputs, (
+        df = SyntheticGenerator(
+            dataclasses.replace(cfg.data.synthetic, n_blocks=2)
+        ).generate()
+        consumed = _consumed_raw_columns(cfg.data.features, df)
+        assert consumed & set(RAW_COLUMNS), (
             "shipped features must include at least one raw source column"
         )
-        assert raw_inputs <= set(cfg.privacy.features)
+        assert consumed <= set(cfg.privacy.features)
+
+    @pytest.mark.parametrize("signal", ["volatility", "momentum", "directional_change"])
+    def test_coverage_check_sees_price_behind_derived_signals(self, signal):
+        # DGNTY-28: a price signal consumes price even though "price" is not listed
+        df = SyntheticGenerator(
+            dataclasses.replace(SyntheticConfig(), n_blocks=2)
+        ).generate()
+        assert "price" in _consumed_raw_columns(["volume", signal], df)
 
     @pytest.mark.parametrize(
         "mutate,match",
@@ -263,6 +322,20 @@ class TestPrivacyConfig:
                 lambda b: b["features"]["volume"].update(epsilon=0.9),
                 "exceeds epsilon_total",
             ),
+            (
+                lambda b: b["features"]["volume"].update(transform="sqrt"),
+                "unknown transform",
+            ),
+            (
+                lambda b: b["features"]["fee_rate"].update(transform="log1p"),
+                "laplace only",
+            ),
+            (
+                lambda b: b["features"]["volume"].update(
+                    transform="log1p", bounds=[-1, 5]
+                ),
+                "log1p bounds",
+            ),
         ],
     )
     def test_rejects_bad_privacy_block(self, mutate, match):
@@ -270,6 +343,19 @@ class TestPrivacyConfig:
         mutate(block)
         with pytest.raises(ValueError, match=match):
             PrivacyConfig(**block)
+
+    def test_transform_is_recorded_so_runs_differing_only_in_it_are_told_apart(self):
+        # load_backbone compares to_dict(); a log-space run must not warm-start
+        # from a linear-space one with the same bounds.
+        plain = {"mechanism": "laplace", "epsilon": 0.5, "bounds": [0, 5]}
+        logged = PrivacyFeature(**plain, transform="log1p").to_dict()
+        assert logged["transform"] == "log1p"
+        assert logged != PrivacyFeature(**plain).to_dict()
+
+    def test_configs_without_a_transform_key_load_as_no_transform(self):
+        feat = PrivacyFeature(mechanism="laplace", epsilon=0.5, bounds=(0, 5))
+        assert feat.transform is None
+        assert "transform" not in feat.to_dict()
 
 
 def _write(tmp_path, **sections):

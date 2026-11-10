@@ -20,13 +20,18 @@ appear in the training data.
   to exceed `epsilon_total`. Tests: `tests/test_privacy.py::TestAddLaplaceNoise`,
   `tests/test_privacy.py::TestPrivacyBudget`,
   `tests/test_data.py::TestPrivacyStage::test_fit_transform_spends_budget_exactly_once`.
+  A column may first pass through a fixed public function (`transform: log1p`);
+  clipping, sensitivity and `bounds` are then in transformed units, and the released
+  column stays in those units. Test:
+  `tests/test_data.py::TestPrivacyStage::test_log1p_transform_is_applied_before_clipping_and_noise`.
 - *k-anonymous generalization* — every value in the generalized column of the
   train release is shared by at least k train records. Tests:
   `tests/test_privacy.py::TestGeneralizeAmounts::test_every_equivalence_class_has_at_least_k`,
   `tests/test_privacy.py::TestGeneralization::test_train_classes_hold_at_least_k_fit_records`.
 
-Signals derived from a noised column (volatility, momentum, directional change)
-inherit its ε by the post-processing theorem, because the privacy stage runs
+Signals derived from a noised column (`volume_volatility` from `volume` in the
+shipped config; volatility, momentum and directional change from `price` when it is
+noised) inherit its ε by the post-processing theorem, because the privacy stage runs
 before signal computation. Test: `tests/test_data.py::TestPrivacyStage::test_privacy_stage_runs_before_signals`.
 
 **Not defended.**
@@ -34,7 +39,9 @@ before signal computation. Test: `tests/test_data.py::TestPrivacyStage::test_pri
 - Raw model inputs that are not listed under `privacy.features`, and labels. The
   stage covers only what the config names; `train/loop.py::prepare_data` releases labels as-is.
   The shipped `config/train_risk.yaml` lists every raw source column its model
-  consumes (`volume`, `price`, `fee_rate`, `tx_count`). Test:
+  consumes (`volume`, `fee_rate`, `tx_count`; `price` is not consumed). The test maps each
+  derived signal back to its source column through `data.pipeline.SIGNAL_SOURCES`,
+  so `price` would count as consumed whenever a price signal were. Test:
   `tests/test_core.py::TestPrivacyConfig::test_shipped_risk_config_covers_every_raw_model_input`.
 - An adversary who already holds the raw source data. No input mechanism helps
   once the input is theirs.

@@ -22,6 +22,12 @@ ANOMALY_TYPES = (
     "fee_evasion",
 )
 
+# Largest volume multiplier at severity 1 across the injectors above (flash_crash at
+# its first row, 1 + 5s). Update it with the effect table (M2.14).
+MAX_VOLUME_MULTIPLIER = 6.0
+# Largest benign-spike amplitude: volume is multiplied by 1 + m, m ~ U(1, this).
+BENIGN_SPIKE_MAX_M = 4.0
+
 
 def _arrays(frame: pd.DataFrame) -> dict[str, np.ndarray]:
     return {
@@ -134,7 +140,7 @@ def inject_benign_spike(
     n = len(block_frame)
     d = int(rng.integers(3, 21))
     start = int(rng.integers(0, n - d + 1))
-    m = float(rng.uniform(1.0, 4.0))
+    m = float(rng.uniform(1.0, BENIGN_SPIKE_MAX_M))
     a = _arrays(block_frame)
     r = _returns(a)
     span = slice(start, start + d)

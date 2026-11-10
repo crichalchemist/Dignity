@@ -58,6 +58,12 @@ A seed alone never changes this: the training path always supplies one, and only
 and both shipped training configs leave it off
 (`tests/test_core.py::TestPrivacyConfig::test_shipped_configs_stay_on_system_randomness`).
 
+A column may first pass through a fixed public function (`transform: log1p`,
+laplace only); clipping, sensitivity and `bounds` are then in log1p units, and the
+released column stays in log1p units (the noise is never inverted). A fitted scaler
+is not allowed here; it would derive the transform from the data.
+(`tests/test_data.py::TestPrivacyStage::test_log1p_transform_is_applied_before_clipping_and_noise`.)
+
 **Experiment mode.** `privacy.deterministic_rng: true` plus a seed gives each split
 its own seeded `random.Random`, so the privacy release reproduces exactly. This is seeded
 experiment mode, not DP-grade randomness: reproducibility and DP-grade randomness
@@ -135,7 +141,7 @@ privacy:
   k: 5
   deterministic_rng: false           # default; true = seeded experiment mode, NOT DP-grade randomness
   features:
-    volume:   {mechanism: laplace, epsilon: 0.5, bounds: [0, 1000]}
+    volume:   {mechanism: laplace, epsilon: 0.5, transform: log1p, bounds: [0.0, 7.0]}
     price:    {mechanism: laplace, epsilon: 0.5, bounds: [0, 500]}
     fee_rate: {mechanism: generalize, bins: 10}
     tx_count: {mechanism: generalize, bins: 10}
@@ -147,10 +153,50 @@ past `epsilon_total` — fails at config load, not mid-training.
 
 ### What the shipped config does
 
-`config/train_risk.yaml` is written to exercise the stage, not to train a useful
-model. With `epsilon_total: 1.0` split 0.5/0.5, the Laplace scale is
-width/ε = 2000 for `volume` and 1000 for `price` — far above the synthetic
-signal, so released values carry little information about the source. A pipeline
+`config/train_risk.yaml` (and `config/train_policy.yaml`, which carries the same
+block so the policy warm start from a risk checkpoint is accepted) consumes
+`volume`, `fee_rate`, `tx_count` and `volume_volatility`, and releases them under:
+
+- `volume`: Laplace at the whole `epsilon_total: 1.0`, after the public `log1p`
+  transform, with `bounds` equal to `public_log1p_volume_bounds()` of the file's
+  `data.synthetic` rounded outward to two decimals. The bounds come from declared
+  generator parameters, never from data. Pinned by
+  `tests/test_core.py::TestPrivacyConfig::test_shipped_risk_bounds_are_the_public_generator_bounds`,
+  `tests/test_data.py::TestPublicBounds::test_volume_bounds_are_derived_without_generating_data`
+  and
+  `tests/test_data.py::TestPublicBounds::test_volume_bounds_do_not_depend_on_sampling_parameters`.
+- `fee_rate`, `tx_count`: k-anonymous generalization (`bins: 10`, `k: 5`). They are
+  **not** under the Laplace mechanism and are not governed by epsilon. Pinned by
+  `tests/test_core.py::TestPrivacyConfig::test_shipped_block_spends_all_epsilon_on_volume_and_generalizes_the_rest`.
+- `price` is neither released nor consumed, and neither are its three signals
+  (`volatility`, `momentum`, `directional_change`), so the price signature of
+  `flash_crash` (the drop and partial recovery) is invisible to the shipped model;
+  only its volume burst reaches the model, through the noised `volume` column.
+  Pinned by
+  `tests/test_core.py::TestPrivacyConfig::test_shipped_risk_config_covers_every_raw_model_input`
+  and
+  `tests/test_data.py::TestTransactionPipeline::test_each_raw_column_feeds_exactly_its_derived_signals`.
+
+**The shipped block still learns:**
+`tests/test_train.py::TestPrivacyUtility::test_privacy_config_still_learns` trains the
+risk model on easy-preset data (tuning seed, deterministic mode) with this block and
+asserts validation AUROC >= 0.70 (chance is 0.5). It is a "still learns" guard on easy
+data at the shipped epsilon, not a point on the privacy curve, and it does not test
+sensitivity to epsilon: at these a-priori bounds utility barely depends on epsilon (the
+retained signal comes mostly from the generalized `fee_rate` and `tx_count` columns;
+the numbers will be reported by the privacy sweep, `results/v1.0/privacy.json`). The
+floor was declared from tuning-seed validation
+evidence before the evaluation seed was touched. The path a user runs is pinned
+separately: `tests/test_train.py::TestPrivacyUtility::test_shipped_privacy_config_trains_through_the_cli_in_system_mode`
+runs `dignity-train` on the shipped block in system-randomness mode, checks the
+`Privacy: mode=system;` line, and checks that the checkpoint's stored config records
+`deterministic_rng` as false. It asserts that the path runs and is labelled, not a score.
+
+The epsilon per released Laplace value is 1.0. That is one of the privacy sweep's grid
+values; each sweep point will apply this block's epsilon allocation, rescaled, on the hard
+preset. The per-subject cost of a block is `block_len` x 1.0, because a block's rows are
+correlated and each row is a release (THREAT-MODEL). The utility cost will be
+reported by the privacy sweep (`results/v1.0/privacy.json`), not here. A pipeline
 instance releases **once**, whatever the epsilons: `process_blocks` (what
 `train/loop.py::prepare_data` calls) splits train/val/test by block and releases
 each split on its own budget (parallel composition over disjoint blocks). Any

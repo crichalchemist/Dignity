@@ -85,6 +85,7 @@ policy:
 #   deterministic_rng: false   # true = seeded experiment mode (reproducible, NOT DP-grade randomness)
 #   features:
 #     volume:   {mechanism: laplace, epsilon: 0.5, bounds: [0, 10000]}
+#     # per feature, laplace only: add `transform: log1p`; bounds are then in log1p units
 #     price:    {mechanism: laplace, epsilon: 0.5, bounds: [0, 1000]}
 #     fee_rate: {mechanism: generalize, bins: 10}
 
