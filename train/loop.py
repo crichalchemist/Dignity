@@ -62,6 +62,7 @@ def prepare_data(config: DignityConfig) -> tuple[pd.DataFrame, SplitData]:
         seq_len=config.data.seq_len,
         features=config.data.features,
         privacy=config.privacy,
+        privacy_seed=config.data.synthetic.seed,
     )
     split_data = pipeline.process_blocks(
         df,
@@ -147,9 +148,11 @@ def _selection_metric(config: DignityConfig) -> str:
     return "neg_cost" if config.model.task == "policy" else config.train.select_metric
 
 
-# The privacy stage draws its noise from secrets.SystemRandom (deliberately
-# unseeded, core/privacy.py), so two runs of one config fit scalers that differ by
-# a few percent of scale at full size, over 20% at 60 blocks. Under privacy a
+# In system mode (the default) the privacy stage draws its noise from
+# secrets.SystemRandom (deliberately unseeded, core/privacy.py), so two runs of one
+# config fit scalers that differ by a few percent of scale at full size, over 20% at
+# 60 blocks. (privacy.deterministic_rng seeds the noise, so those runs match; the
+# tolerance is not tightened for it.) Under privacy a
 # scaler counts as matching when center and scale agree within this fraction of
 # the run's scale. load_backbone also requires the same data config, so this only
 # has to absorb noise draws, not a different dataset. Without privacy the scaler

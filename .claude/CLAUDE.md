@@ -45,7 +45,7 @@ format that export no longer supports (DGNTY-3, DGNTY-35). No shipped config wri
 ## Commands
 
 ```bash
-# Tests (402 collected: test_core 54, test_data 99, test_models 23, test_privacy 42,
+# Tests (408 collected: test_core 54, test_data 105, test_models 23, test_privacy 42,
 # test_operator 4, test_docs 6, test_train 71, test_checkpoint 3, test_export 9,
 # test_calibration 3, test_labels 7, test_gates 11, test_ci 4, test_eval 56,
 # test_colab_eval 10 — one skips without CUDA)
@@ -160,7 +160,7 @@ a mechanism, it needs a test in `tests/test_privacy.py` or CI's 100% gate on tha
 - **The policy warm-starts from a risk checkpoint.** Trained cold, the spec expected-cost loss
   stalls at "review everything". `config/train_policy.yaml` sets `train.init_backbone_from:
   ./runs/risk/best.pt`, so train risk first; `train/loop.load_backbone` copies only the
-  `backbone.*` tensors (feature names, scaler center/scale, privacy block and shapes must match, else `ValueError` (under privacy the scaler tolerates 25% of scale: its noise is unseeded); the checkpoint must also share the run's `data:` block (same split); the two shipped configs share one `privacy:` block, keep them equal) and `fit` reads
+  `backbone.*` tensors (feature names, scaler center/scale, privacy block and shapes must match, else `ValueError` (under privacy the scaler tolerates 25% of scale: system-mode noise is unseeded; seeded `deterministic_rng` noise would not need it, but the tolerance is not tightened); the checkpoint must also share the run's `data:` block (same split); the two shipped configs share one `privacy:` block, keep them equal) and `fit` reads
   the key only for `task: policy`. Policy selects `best.pt` on val `neg_cost` under the review
   cap and ignores `select_metric`, `pos_weight` and the chance guard; resuming across metrics
   raises `ValueError`.
@@ -192,6 +192,8 @@ a mechanism, it needs a test in `tests/test_privacy.py` or CI's 100% gate on tha
   keys, top-level or nested, raise `TypeError` at load. `data.source` accepts only `synthetic`.
 - A `privacy:` block in YAML is optional and validated at load (`PrivacyConfig`). No block =
   no privacy stage. `bounds` are public parameters chosen a priori — never derive them from data.
+- `privacy.deterministic_rng: true` (+ `privacy_seed=`) is the seeded experiment mode; shipped
+  configs stay on SystemRandom.
 - Tests are organized as classes (`TestSignalProcessor`, `TestDignityModel`, …); node ids are
   `file::Class::test_name`. They use root-level fixtures in `tests/conftest.py` (`device`,
   `sample_sequence` `[4,100,9]`, `sample_labels`) and an autouse seed reset. Reuse them rather
