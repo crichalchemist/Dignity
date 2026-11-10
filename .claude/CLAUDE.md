@@ -45,9 +45,9 @@ format that export no longer supports (DGNTY-3, DGNTY-35). No shipped config wri
 ## Commands
 
 ```bash
-# Tests (441 collected: test_core 65, test_data 118, test_models 23, test_privacy 42,
-# test_operator 4, test_docs 6, test_train 76, test_checkpoint 3, test_export 9,
-# test_calibration 3, test_labels 7, test_gates 11, test_ci 4, test_eval 60,
+# Tests (447 collected: test_core 65, test_data 118, test_models 23, test_privacy 42,
+# test_operator 4, test_docs 6, test_train 78, test_checkpoint 3, test_export 9,
+# test_calibration 3, test_labels 7, test_gates 11, test_ci 4, test_eval 64,
 # test_colab_eval 10 — one skips without CUDA)
 # every test is limited to 300 s (pytest.ini; pytest-timeout)
 pytest tests/ -v
@@ -145,6 +145,8 @@ a mechanism, it needs a test in `tests/test_privacy.py` or CI's 100% gate on tha
   rejects 2-D targets; forecast targets come from `data.labels.forecast_labels`.
   `train/loop.py::prepare_data` uses `TransactionPipeline.process_blocks`: shuffle and split blocks 70/15/15,
   fit the scaler on train blocks only, and compute signals and windows inside each block.
+  `prepare_data(config, privacy_seed=None)` seeds only the privacy noise (default: `synthetic.seed`);
+  the data and the block split always follow `synthetic.seed`.
   With a `privacy:` block each split is its own release on its own budget (generalize classes
   fitted on train), and the pipeline releases once: a later `transform` or `process_blocks` raises
   `BudgetExhausted`. Do not
