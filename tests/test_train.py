@@ -1088,3 +1088,20 @@ class TestPrepareData:
         assert set(split.val.block_index.tolist()).isdisjoint(
             split.test.block_index.tolist()
         )
+
+    def test_seeded_privacy_mode_reproduces_the_privatized_train_windows(
+        self, tiny_train_config
+    ):
+        # prepare_data must hand the data seed to the pipeline: without it the
+        # deterministic_rng config cannot run, and a rerun would not match.
+        config = DignityConfig.from_yaml(tiny_train_config())
+        config.privacy = PrivacyConfig(
+            epsilon_total=1.0,
+            deterministic_rng=True,
+            features={
+                "volume": {"mechanism": "laplace", "epsilon": 0.5, "bounds": [0, 1000]}
+            },
+        )
+        _, first = prepare_data(config)
+        _, second = prepare_data(config)
+        np.testing.assert_array_equal(first.train.X, second.train.X)

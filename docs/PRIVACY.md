@@ -54,7 +54,7 @@ cannot be understated.** **ε is spent from the budget before any sample is draw
 `tests/test_data.py::TestPrivacyStage::test_system_randomness_is_the_default_mode`.)
 
 **Experiment mode.** `privacy.deterministic_rng: true` plus a seed gives each split
-its own seeded `random.Random`, so a run reproduces exactly. This is seeded
+its own seeded `random.Random`, so the privacy release reproduces exactly. This is seeded
 experiment mode, not DP-grade randomness: reproducibility and DP-grade randomness
 are mutually exclusive, so use it for experiments and the published curve, never
 for a release. The CLI prints the active mode. Tests:

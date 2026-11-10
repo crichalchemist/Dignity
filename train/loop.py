@@ -181,7 +181,7 @@ def load_backbone(
     The head is left untouched. ``data`` and ``privacy`` are the current run's
     preprocessing and ``data_config`` its data block. Raises ValueError when the checkpoint was trained on other
     features, on inputs scaled differently (scaler center/scale; within 25% of
-    scale under privacy, whose noise is unseeded) or privatized
+    scale under privacy; noise is unseeded in the default system mode) or privatized
     differently (privacy block), when it was trained on another data config (so
     another train split: risk-train blocks could land in this run's val/test), when its backbone tensors are not exactly the
     model's, or when any has another shape.
