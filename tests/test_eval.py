@@ -8,7 +8,7 @@ import pandas as pd
 import pytest
 
 import eval.metrics as metrics_module
-from core.config import DignityConfig, PolicyConfig
+from core.config import DignityConfig, PolicyConfig, PrivacyConfig
 from eval.baselines import block_tree, risk_score_forecast, threshold_policy
 from eval.metrics import (
     bootstrap_ci,
@@ -26,6 +26,7 @@ from eval.plots import (
     plot_policy_cost,
     plot_pr_curves,
 )
+from eval.privacy_sweep import privacy_at
 from eval.run import (
     _early_warning,
     _fit_risk,
@@ -723,3 +724,57 @@ class TestEvalRunPolicy:
         assert loaded == risk_paths
         # the shared run config is never edited by the per-seed warm start
         assert config.train.init_backbone_from is None
+
+
+def _template() -> PrivacyConfig:
+    return PrivacyConfig(
+        epsilon_total=1.0,
+        features={
+            "volume": {"mechanism": "laplace", "epsilon": 0.75, "bounds": [0, 1]},
+            "price": {"mechanism": "laplace", "epsilon": 0.25, "bounds": [0, 1]},
+            "fee_rate": {"mechanism": "generalize", "bins": 10},
+        },
+    )
+
+
+class TestPrivacySweep:
+    def test_privacy_at_keeps_the_allocation_and_spends_exactly_epsilon(self):
+        t = _template()
+        p = privacy_at(t, 4.0, {"volume": (0.0, 9.0), "price": (1.0, 5.0)})
+        assert p.epsilon_total == 4.0 and p.deterministic_rng
+        assert p.features["volume"].epsilon == pytest.approx(3.0)
+        assert p.features["price"].epsilon == pytest.approx(1.0)
+        assert p.features["volume"].bounds == (0.0, 9.0)
+        assert p.features["price"].bounds == (1.0, 5.0)
+        assert p.features["fee_rate"].to_dict() == t.features["fee_rate"].to_dict()
+        assert (p.k, p.key_env) == (t.k, t.key_env)
+
+    def test_privacy_at_refuses_a_laplace_feature_without_public_bounds(self):
+        with pytest.raises(ValueError, match="'price'"):
+            privacy_at(_template(), 1.0, {"volume": (0.0, 9.0)})
+
+    def test_privacy_at_refuses_a_template_with_nothing_to_rescale(self):
+        t = PrivacyConfig(
+            epsilon_total=1.0,
+            features={"fee_rate": {"mechanism": "generalize", "bins": 10}},
+        )
+        with pytest.raises(ValueError, match="template has no laplace feature"):
+            privacy_at(t, 1.0, {})
+
+    def test_privacy_at_keeps_the_transform_and_leaves_the_template_alone(self):
+        t = PrivacyConfig(
+            epsilon_total=1.0,
+            features={
+                "volume": {
+                    "mechanism": "laplace",
+                    "epsilon": 1.0,
+                    "bounds": [0, 1],
+                    "transform": "log1p",
+                }
+            },
+        )
+        before = t.to_dict()
+        p = privacy_at(t, 0.5, {"volume": (0.0, 9.0)})
+        assert p.features["volume"].transform == "log1p"
+        assert p.features["volume"].epsilon == pytest.approx(0.5)
+        assert t.to_dict() == before
