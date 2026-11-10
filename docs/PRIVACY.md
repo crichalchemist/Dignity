@@ -167,6 +167,20 @@ block so the policy warm start from a risk checkpoint is accepted) consumes
   (`volatility`, `price_change`, `momentum`, `directional_change`), so
   `flash_crash`, a price-only typology, is invisible to the shipped model.
 
+**The shipped block still learns:**
+`tests/test_train.py::TestPrivacyUtility::test_privacy_config_still_learns` trains the
+risk model on easy-preset data (tuning seed, deterministic mode) with this block and
+asserts validation AUROC >= 0.70 (chance is 0.5). It is a "still learns" guard on easy
+data at the shipped epsilon, not a point on the privacy curve, and it does not test
+sensitivity to epsilon: at these a-priori bounds utility barely depends on epsilon (the
+retained signal comes mostly from the generalized `fee_rate` and `tx_count` columns;
+numbers in the privacy sweep, M5.15). The floor was declared from tuning-seed validation
+evidence before the evaluation seed was touched. The path a user runs is pinned
+separately: `tests/test_train.py::TestPrivacyUtility::test_shipped_privacy_config_trains_through_the_cli_in_system_mode`
+runs `dignity-train` on the shipped block in system-randomness mode, checks the
+`Privacy: mode=system;` line, and checks that the checkpoint's stored config records
+`deterministic_rng` as false. It asserts that the path runs and is labelled, not a score.
+
 The per-value epsilon is 1.0 (the eps = 1 point of the evaluation grid); the
 per-subject cost of a block is `block_len` x 1.0, because a block's rows are
 correlated and each row is a release (THREAT-MODEL). The utility cost is
