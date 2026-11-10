@@ -45,7 +45,7 @@ format that export no longer supports (DGNTY-3, DGNTY-35). No shipped config wri
 ## Commands
 
 ```bash
-# Tests (366 collected: test_core 51, test_data 69, test_models 23, test_privacy 41,
+# Tests (371 collected: test_core 51, test_data 74, test_models 23, test_privacy 41,
 # test_operator 4, test_docs 4, test_train 71, test_checkpoint 3, test_export 9,
 # test_calibration 3, test_labels 7, test_gates 11, test_ci 4, test_eval 56,
 # test_colab_eval 10 — one skips without CUDA)
@@ -142,7 +142,10 @@ a mechanism, it needs a test in `tests/test_privacy.py` or CI's 100% gate on tha
   anomalous fraction exceeds `data.label_overlap`, never "label of the last row". `create_sequences`
   rejects 2-D targets; forecast targets come from `data.labels.forecast_labels`.
   `train/loop.py::prepare_data` uses `TransactionPipeline.process_blocks`: shuffle and split blocks 70/15/15,
-  fit the scaler on train blocks only, and compute signals and windows inside each block. Do not
+  fit the scaler on train blocks only, and compute signals and windows inside each block.
+  With a `privacy:` block each split is its own release on its own budget (generalize classes
+  fitted on train), and the pipeline releases once: a later `transform` or `process_blocks` raises
+  `BudgetExhausted`. Do not
   go back to `process()` + a positional slice — that trained on 100% normal and validated on 100%
   anomalous rows (val loss ≈ 42 in the January checkpoints).
 - **AMP and the risk loss.** `RiskHead` ends in a sigmoid and the risk criterion is `BCELoss`,

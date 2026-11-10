@@ -112,13 +112,16 @@ model. With `epsilon_total: 1.0` split 0.5/0.5, the Laplace scale is
 width/ε = 2000 for `volume` and 1000 for `price` — far above the synthetic
 signal, so released values carry little information about the source. Because
 the feature epsilons sum to `epsilon_total`, a pipeline instance can release
-**once**: `process_blocks` (what `train/loop.py::prepare_data` calls) spends the whole budget in
-a single release and only then splits train/val/test by block, and any later
-`transform` raises `BudgetExhausted`. `generalize` needs at least `k` rows per
+**once**: `process_blocks` (what `train/loop.py::prepare_data` calls) splits
+train/val/test by block and releases each split on its own budget (parallel
+composition over disjoint blocks), and any later `transform` or second
+`process_blocks` raises `BudgetExhausted`, as does `process_blocks` after `fit` or
+`transform` (tests `test_no_further_release_after_process_blocks`,
+`test_no_split_release_after_instance_release`). `generalize` needs at least `k` rows per
 release, so a fitted pipeline cannot score batches smaller than `k` with the
 stage on.
 
-`dignity-train` prints `Privacy: ε spent per split: train X, val X, test X`
+`dignity-train` prints `Privacy: ε spent per split train=X val=X test=X, each of E (parallel composition over disjoint blocks)`
 (each to three decimals) after preprocessing so the ledger is visible, not
 theoretical.
 
