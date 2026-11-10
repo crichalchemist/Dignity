@@ -1,13 +1,15 @@
 """Public docs must not reintroduce claims or APIs this project removed."""
 
 import ast
+import dataclasses
+import importlib
 import json
 import re
 from pathlib import Path
 
 import pytest
 
-from core.config import EvalConfig
+from core.config import DataConfig, EvalConfig, SyntheticConfig, TrainConfig
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -96,7 +98,7 @@ class TestDocs:
         # A citation that names a test which does not exist is a claim with no
         # test behind it (spec section 3).
         missing = []
-        for doc in PRIVACY_DOCS:
+        for doc in _public_docs():
             for fname, cls, method in CITED.findall(doc.read_text()):
                 tree = ast.parse((ROOT / "tests" / fname).read_text())
                 classes = {n.name: n for n in tree.body if isinstance(n, ast.ClassDef)}
@@ -117,7 +119,7 @@ class TestDocs:
         # Test* class must start with "tests/".
         bare = [
             span
-            for doc in PRIVACY_DOCS
+            for doc in _public_docs()
             for span in SPAN.findall(doc.read_text())
             if re.search(r"\bTest[A-Z]\w*", span) and not span.startswith("tests/")
         ]
@@ -336,3 +338,156 @@ class TestQuotedNumbers:
             path = ROOT / name
             if path.exists():
                 assert ("<!--provisional-->" in path.read_text()) != final, name
+
+
+SYMBOL_RE = re.compile(r"^(core|data|models|train|export|eval)(\.\w+)+$")
+FENCE_RE = re.compile(r"^[ \t]*```.*?^[ \t]*```", re.DOTALL | re.MULTILINE)
+PATH_EXT = (".py", ".yaml", ".md", ".json", ".png", ".ipynb")
+# Config sections a doc may name as `section.key`; a key is a dataclass field.
+CONFIG_SECTIONS = {
+    "data": DataConfig,
+    "train": TrainConfig,
+    "eval": EvalConfig,
+}
+NESTED_CONFIG = {(DataConfig, "synthetic"): SyntheticConfig}
+
+
+def _spans(text: str) -> list[str]:
+    """Single-backtick spans of prose; fenced blocks are skipped."""
+    return [s.strip() for s in SPAN.findall(FENCE_RE.sub("", text))]
+
+
+def doc_symbols(text: str) -> list[str]:
+    return [span for span in _spans(text) if SYMBOL_RE.match(span)]
+
+
+def _path_like(span: str) -> bool:
+    if re.search(r"[\s*{}<>]", span) or re.match(r"\w+://", span):
+        return False
+    return "/" in span or span.split("::")[0].split("#")[0].endswith(PATH_EXT)
+
+
+def doc_paths(text: str) -> list[str]:
+    spans = [s for s in _spans(text) if _path_like(s)]
+    return [s.split("::")[0].split("#")[0] for s in spans]
+
+
+def doc_nodes(text: str) -> list[tuple[str, str]]:
+    """(file, name) of every non-test `path::name` citation."""
+    nodes = []
+    for span in _spans(text):
+        if _path_like(span) and "::" in span and not span.startswith("tests/"):
+            path, name = span.split("::")[:2]
+            nodes.append((path, name))
+    return nodes
+
+
+def _top_level_names(path: Path) -> set[str]:
+    tree = ast.parse(path.read_text())
+    return {
+        n.name
+        for n in tree.body
+        if isinstance(n, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef)
+    }
+
+
+def _resolve_config_key(dotted: str):
+    section, *keys = dotted.split(".")
+    cls = CONFIG_SECTIONS[section]
+    for key in keys:
+        if cls is None or key not in {f.name for f in dataclasses.fields(cls)}:
+            raise AttributeError(f"{cls.__name__} has no field {key}")
+        cls = NESTED_CONFIG.get((cls, key))
+    return cls
+
+
+def resolve_symbol(dotted: str):
+    """Longest importable module prefix, then getattr; else a config field."""
+    parts = dotted.split(".")
+    for cut in range(len(parts), 0, -1):
+        try:
+            obj = importlib.import_module(".".join(parts[:cut]))
+        except ImportError:
+            continue
+        try:
+            for part in parts[cut:]:
+                obj = getattr(obj, part)
+        except AttributeError:
+            if parts[0] in CONFIG_SECTIONS:
+                return _resolve_config_key(dotted)
+            raise
+        return obj
+    raise ImportError(dotted)
+
+
+class TestDocReferences:
+    def test_every_symbol_the_docs_name_still_exists(self):
+        missing = []
+        for path in _public_docs():
+            for sym in doc_symbols(path.read_text()):
+                try:
+                    resolve_symbol(sym)
+                except (ImportError, AttributeError):
+                    missing.append(f"{path.relative_to(ROOT)}: {sym}")
+        assert missing == []
+
+    def test_every_path_the_docs_name_exists(self):
+        allowed = ("runs/", "checkpoints/")
+        missing = [
+            f"{p.relative_to(ROOT)}: {ref}"
+            for p in _public_docs()
+            for ref in doc_paths(p.read_text())
+            if not ref.startswith(allowed) and not (ROOT / ref).exists()
+        ]
+        assert missing == []
+
+    def test_every_non_test_node_the_docs_name_is_defined_there(self):
+        missing = [
+            f"{p.relative_to(ROOT)}: {ref}::{name}"
+            for p in _public_docs()
+            for ref, name in doc_nodes(p.read_text())
+            if name not in _top_level_names(ROOT / ref)
+        ]
+        assert missing == []
+
+    def test_symbol_extraction_ignores_prose_and_code_fences(self):
+        text = "see `core.privacy.PrivacyManager` and `x.y`\n```\n`data.nope.Q`\n```"
+        # a package-rooted token in prose is returned; x.y has no package root;
+        # fenced text is skipped
+        assert doc_symbols(text) == ["core.privacy.PrivacyManager"]
+
+    def test_path_extraction_strips_suffixes_and_skips_placeholders(self):
+        text = (
+            "`tests/test_core.py::TestX::test_y` `README.md#usage` "
+            "`config/synthetic_{easy,hard}.yaml` `runs/<task>/best.pt` "
+            "`a b/c.py` `docs/*.md` `https://example.org/x.md` `core.privacy`\n"
+            "```\n`fenced/path.py`\n```"
+        )
+        assert doc_paths(text) == ["tests/test_core.py", "README.md"]
+
+    def test_node_extraction_returns_only_non_test_citations(self):
+        text = "`train/loop.py::fit` `tests/test_core.py::TestX` `eval/run.py`"
+        assert doc_nodes(text) == [("train/loop.py", "fit")]
+
+    def test_a_config_key_resolves_through_the_config_dataclasses(self):
+        for key in (
+            "data.label_overlap",
+            "data.synthetic",
+            "data.synthetic.block_len",
+            "eval.epsilons",
+            "eval.n_train_seeds",
+            "train.epochs",
+            "core.privacy.PrivacyManager",
+        ):
+            resolve_symbol(key)
+
+    @pytest.mark.parametrize(
+        "key", ["data.nope", "data.synthetic.nope", "eval.nope", "core.nope.Q"]
+    )
+    def test_a_renamed_symbol_or_config_key_is_reported(self, key):
+        with pytest.raises((ImportError, AttributeError)):
+            resolve_symbol(key)
+
+    def test_a_node_that_is_not_defined_in_its_file_is_reported(self):
+        assert "fit" in _top_level_names(ROOT / "train/loop.py")
+        assert "missing_name" not in _top_level_names(ROOT / "train/loop.py")

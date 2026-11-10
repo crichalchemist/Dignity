@@ -104,7 +104,7 @@ starts inside the window), has a max-min spread of at most 0.1, so position alon
 not predict the label. The gate is a tuning tool: it defaults to the tuning seed 1000, the
 CLI refuses the evaluation seed 2026 (exit code 2), and the test split is never read.
 The values the shipped presets reach on seed 1000 are recorded in
-[`data_gate_tuning.json`](../results/v1.0/data_gate_tuning.json).
+[`results/v1.0/data_gate_tuning.json`](../results/v1.0/data_gate_tuning.json).
 
 **source/crypto.py** - Cryptocurrency data
 ```python
