@@ -19,12 +19,7 @@ data:
     - volume
     - fee_rate
     - tx_count
-    - volatility
-    - price_change
-    - momentum
-    - directional_change
     - volume_volatility
-    - regime
 
 train:
   epochs: 100  # More epochs for risk task
@@ -35,17 +30,14 @@ train:
   checkpoint_dir: ./runs/risk
   save_interval: 10
 
-# Privacy stage (see docs/PRIVACY.md). Runs on raw columns before signals.
-# bounds are public parameters chosen a priori. They predate the v1.0 event-record
-# generator and do not match its output; M5 (DGNTY-8) re-derives them.
-# These values exercise the stage; they are not tuned for model quality
-# (noise scale = width/epsilon: 2000 for volume, 1000 for price).
+# Privacy stage (docs/PRIVACY.md). Bounds are public: public_log1p_volume_bounds()
+# of this file's data.synthetic, from declared generator parameters, never data.
+# Levers used: all epsilon on volume, log1p before noising, price not released.
 privacy:
   epsilon_total: 1.0
   k: 5
   features:
-    volume:   {mechanism: laplace, epsilon: 0.5, bounds: [0, 1000]}
-    price:    {mechanism: laplace, epsilon: 0.5, bounds: [0, 500]}
+    volume:   {mechanism: laplace, epsilon: 1.0, transform: log1p, bounds: [0.12, 13.14]}
     fee_rate: {mechanism: generalize, bins: 10}
     tx_count: {mechanism: generalize, bins: 10}
 

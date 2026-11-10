@@ -21,7 +21,11 @@ from core.config import (
 from core.signals import SignalProcessor
 from data.pipeline import SIGNAL_SOURCES, TransactionPipeline
 from data.source.anomalies import ANOMALY_TYPES
-from data.source.synthetic import RAW_COLUMNS, SyntheticGenerator
+from data.source.synthetic import (
+    RAW_COLUMNS,
+    SyntheticGenerator,
+    public_log1p_volume_bounds,
+)
 from train.loop import prepare_data
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -253,6 +257,32 @@ class TestPrivacyConfig:
         for name in ("train_risk.yaml", "train_policy.yaml"):
             cfg = DignityConfig.from_yaml(str(root / name))
             assert cfg.privacy.deterministic_rng is False, name
+
+    def test_shipped_risk_bounds_are_the_public_generator_bounds(self):
+        root = Path(__file__).resolve().parents[1] / "config"
+        cfg = DignityConfig.from_yaml(str(root / "train_risk.yaml"))
+        lo, hi = public_log1p_volume_bounds(cfg.data.synthetic)
+        b = cfg.privacy.features["volume"].bounds
+        assert cfg.privacy.features["volume"].transform == "log1p"
+        assert b[0] <= lo < b[0] + 0.01 and b[1] - 0.01 < hi <= b[1]
+        assert "price" not in cfg.privacy.features
+
+    def test_shipped_block_spends_all_epsilon_on_volume_and_generalizes_the_rest(
+        self,
+    ):
+        root = Path(__file__).resolve().parents[1] / "config"
+        cfg = DignityConfig.from_yaml(str(root / "train_risk.yaml"))
+        assert cfg.data.features == [
+            "volume",
+            "fee_rate",
+            "tx_count",
+            "volume_volatility",
+        ]
+        f = cfg.privacy.features
+        assert cfg.privacy.epsilon_total == 1.0 and cfg.privacy.k == 5
+        assert f["volume"].mechanism == "laplace" and f["volume"].epsilon == 1.0
+        for name in ("fee_rate", "tx_count"):
+            assert f[name].mechanism == "generalize" and f[name].bins == 10
 
     def test_shipped_risk_config_covers_every_raw_model_input(self):
         root = Path(__file__).resolve().parents[1] / "config"

@@ -153,10 +153,24 @@ past `epsilon_total` — fails at config load, not mid-training.
 
 ### What the shipped config does
 
-`config/train_risk.yaml` is written to exercise the stage, not to train a useful
-model. With `epsilon_total: 1.0` split 0.5/0.5, the Laplace scale is
-width/ε = 2000 for `volume` and 1000 for `price` — far above the synthetic
-signal, so released values carry little information about the source. A pipeline
+`config/train_risk.yaml` (and `config/train_policy.yaml`, which carries the same
+block so the policy warm start from a risk checkpoint is accepted) consumes
+`volume`, `fee_rate`, `tx_count` and `volume_volatility`, and releases them under:
+
+- `volume`: Laplace at the whole `epsilon_total: 1.0`, after the public `log1p`
+  transform, with `bounds` equal to `public_log1p_volume_bounds()` of the file's
+  `data.synthetic` rounded outward to two decimals. The bounds come from declared
+  generator parameters, never from data.
+- `fee_rate`, `tx_count`: k-anonymous generalization (`bins: 10`, `k: 5`). They are
+  **not** under the Laplace mechanism and are not governed by epsilon.
+- `price` is neither released nor consumed, and neither are its three signals
+  (`volatility`, `price_change`, `momentum`, `directional_change`), so
+  `flash_crash`, a price-only typology, is invisible to the shipped model.
+
+The per-value epsilon is 1.0 (the eps = 1 point of the evaluation grid); the
+per-subject cost of a block is `block_len` x 1.0, because a block's rows are
+correlated and each row is a release (THREAT-MODEL). The utility cost is
+reported with the privacy sweep, not here. A pipeline
 instance releases **once**, whatever the epsilons: `process_blocks` (what
 `train/loop.py::prepare_data` calls) splits train/val/test by block and releases
 each split on its own budget (parallel composition over disjoint blocks). Any
