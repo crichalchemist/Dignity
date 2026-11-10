@@ -49,7 +49,26 @@ your own datasets while making the pseudonyms useless to anyone without the key.
 
 **Values are clipped to `bounds` before noising, so sensitivity is `hi - lo` and
 cannot be understated.** **ε is spent from the budget before any sample is drawn.**
-**Noise comes from `secrets.SystemRandom`, not a seedable PRNG.**
+**By default, noise comes from `secrets.SystemRandom`, not a seedable PRNG.**
+(`tests/test_privacy.py::TestAddLaplaceNoise::test_default_rng_is_system_random`,
+`tests/test_data.py::TestPrivacyStage::test_system_randomness_is_the_default_mode`.)
+A seed alone never changes this: the training path always supplies one, and only
+`deterministic_rng` turns it into a seeded stream
+(`tests/test_data.py::TestPrivacyStage::test_system_mode_ignores_a_supplied_seed`),
+and both shipped training configs leave it off
+(`tests/test_core.py::TestPrivacyConfig::test_shipped_configs_stay_on_system_randomness`).
+
+**Experiment mode.** `privacy.deterministic_rng: true` plus a seed gives each split
+its own seeded `random.Random`, so the privacy release reproduces exactly. This is seeded
+experiment mode, not DP-grade randomness: reproducibility and DP-grade randomness
+are mutually exclusive, so use it for experiments and the published curve, never
+for a release. The CLI prints the active mode, and a real release records it
+(`tests/test_data.py::TestPrivacyStage::test_a_real_release_records_system_mode_and_says_it_is_not_reproducible`,
+`tests/test_data.py::TestPrivacyStage::test_a_release_through_the_rng_seam_records_injected_mode`). Tests:
+`tests/test_data.py::TestPrivacyStage::test_deterministic_mode_reproduces_the_release`,
+`tests/test_data.py::TestPrivacyStage::test_deterministic_splits_draw_distinct_noise`,
+`tests/test_data.py::TestPrivacyStage::test_deterministic_mode_without_seed_is_refused`,
+`tests/test_data.py::TestPrivacyStage::test_describe_privacy_names_the_mode_and_warns_when_unseeded`.
 
 ```python
 amounts = np.array([123.4, 789.0, 456.7, 5000.0])  # 5000 will be clipped to 1000
@@ -114,6 +133,7 @@ privacy:
   key_env: DIGNITY_PRIVACY_KEY       # env var NAME; only used if you call pseudonymize() yourself
   epsilon_total: 1.0
   k: 5
+  deterministic_rng: false           # default; true = seeded experiment mode, NOT DP-grade randomness
   features:
     volume:   {mechanism: laplace, epsilon: 0.5, bounds: [0, 1000]}
     price:    {mechanism: laplace, epsilon: 0.5, bounds: [0, 500]}
@@ -147,8 +167,8 @@ before releasing, so the release is kept for a later `fit`. This is deliberate
 Fitting the generalize classes needs at least `k` rows in the train release; val
 and test values map onto the train classes at any size, with no k claim for them.
 
-`dignity-train` prints `Privacy: ε spent per split train=X val=X test=X, each of E (parallel composition over disjoint blocks)`
-(each to three decimals) after preprocessing so the ledger is visible, not
+`dignity-train` prints `Privacy: mode=<mode>; ε spent per split train=X val=X test=X, each of E (parallel composition over disjoint blocks)`
+(each to three decimals, with a mode-specific suffix in system and deterministic mode; `tests/test_data.py::TestPrivacyStage::test_describe_privacy_names_the_mode_and_warns_when_unseeded`) after preprocessing so the ledger is visible, not
 theoretical.
 
 ## What is not here

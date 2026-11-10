@@ -82,6 +82,7 @@ policy:
 #                                     # pseudonymize(), no column mechanism reads it
 #   epsilon_total: 1.0
 #   k: 5
+#   deterministic_rng: false   # true = seeded experiment mode (reproducible, NOT DP-grade randomness)
 #   features:
 #     volume:   {mechanism: laplace, epsilon: 0.5, bounds: [0, 10000]}
 #     price:    {mechanism: laplace, epsilon: 0.5, bounds: [0, 1000]}

@@ -892,6 +892,26 @@ class TestLoadBackbone:
                 self._policy_model(), best, doubled, privacy, tiny_fit_config.data
             )
 
+    def test_warm_start_refuses_a_seeded_checkpoint_for_a_system_mode_run(
+        self, tiny_split, tiny_fit_config, tmp_path
+    ):
+        # seeded-stream noise and system noise are different releases; a backbone
+        # fitted on one must not silently warm-start a run on the other
+        features = {
+            "volume": {"mechanism": "laplace", "epsilon": 0.5, "bounds": [0, 10]}
+        }
+        tiny_fit_config.privacy = PrivacyConfig(
+            epsilon_total=1.0, deterministic_rng=True, features=features
+        )
+        tiny_fit_config.model.task = "risk"
+        tiny_fit_config.train.epochs = 1
+        best = fit(tiny_fit_config, tiny_split, 0, str(tmp_path)).best_path
+        system = PrivacyConfig(epsilon_total=1.0, features=features)
+        with pytest.raises(ValueError, match="privacy"):
+            load_backbone(
+                self._policy_model(), best, tiny_split, system, tiny_fit_config.data
+            )
+
     @pytest.mark.parametrize(
         "change, key",
         [
@@ -1088,3 +1108,38 @@ class TestPrepareData:
         assert set(split.val.block_index.tolist()).isdisjoint(
             split.test.block_index.tolist()
         )
+
+    def test_the_pipeline_is_seeded_with_exactly_the_data_seed(
+        self, tiny_train_config, monkeypatch
+    ):
+        import train.loop as loop
+
+        seen = {}
+
+        class Spy(loop.TransactionPipeline):
+            def __init__(self, *args, **kwargs):
+                seen.update(kwargs)
+                super().__init__(*args, **kwargs)
+
+        monkeypatch.setattr(loop, "TransactionPipeline", Spy)
+        config = DignityConfig.from_yaml(tiny_train_config())
+        config.data.synthetic.seed = 7
+        prepare_data(config)
+        assert seen["privacy_seed"] == 7
+
+    def test_seeded_privacy_mode_reproduces_the_privatized_train_windows(
+        self, tiny_train_config
+    ):
+        # prepare_data must hand the data seed to the pipeline: without it the
+        # deterministic_rng config cannot run, and a rerun would not match.
+        config = DignityConfig.from_yaml(tiny_train_config())
+        config.privacy = PrivacyConfig(
+            epsilon_total=1.0,
+            deterministic_rng=True,
+            features={
+                "volume": {"mechanism": "laplace", "epsilon": 0.5, "bounds": [0, 1000]}
+            },
+        )
+        _, first = prepare_data(config)
+        _, second = prepare_data(config)
+        np.testing.assert_array_equal(first.train.X, second.train.X)

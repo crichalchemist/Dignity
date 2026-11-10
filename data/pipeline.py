@@ -1,6 +1,7 @@
 """Data pipeline for preprocessing transaction sequences."""
 
 import os
+import random
 from dataclasses import dataclass
 
 import numpy as np
@@ -47,6 +48,7 @@ class SplitData:
     scaler_center: np.ndarray
     scaler_scale: np.ndarray
     epsilon_spent: dict[str, float]  # per split; {} if no privacy
+    privacy_mode: str = "off"  # off | injected | deterministic | system
 
 
 class TransactionPipeline:
@@ -67,6 +69,7 @@ class TransactionPipeline:
         scaler_type: str = "robust",
         privacy: PrivacyConfig | None = None,
         privacy_rng=None,
+        privacy_seed: int | None = None,
     ):
         """
         Args:
@@ -75,6 +78,8 @@ class TransactionPipeline:
             scaler_type: Scaler type ('robust', 'standard', 'minmax')
             privacy: Optional privacy stage config. None => no stage runs.
             privacy_rng: Test seam forwarded to PrivacyManager(rng=...). Leave None.
+            privacy_seed: Seed for the per-split streams of ``privacy.deterministic_rng``
+                (seeded experiment mode, not DP-grade randomness). Required then.
         """
         self.seq_len = seq_len
         self.features = features or [
@@ -104,16 +109,35 @@ class TransactionPipeline:
         self.signal_processor = SignalProcessor()
         self.fitted = False
 
+        if privacy is not None and privacy.deterministic_rng and privacy_seed is None:
+            raise ValueError("privacy.deterministic_rng requires privacy_seed")
         self.privacy = privacy
         self.privacy_rng = privacy_rng
+        self.privacy_seed = privacy_seed
         self._split_released = False
         self._instance_released = False
         self.privacy_manager = None
         if privacy is not None:
             self.privacy_manager = self._new_manager("instance")
 
+    @property
+    def privacy_mode(self) -> str:
+        """off | injected (test seam) | deterministic (seeded) | system (default)."""
+        if self.privacy is None:
+            return "off"
+        if self.privacy_rng is not None:
+            return "injected"
+        if self.privacy.deterministic_rng:
+            return "deterministic"
+        return "system"
+
     def _new_manager(self, split: str) -> PrivacyManager:
-        """A fresh ledger of ``epsilon_total``. ``split`` is unused until M5.5."""
+        """A fresh ledger of ``epsilon_total`` with this stream's rng.
+
+        ``split`` names the stream in deterministic mode ("train", "val", "test",
+        or "instance" for the process/fit/transform path), so no two releases share
+        noise. An injected rng is shared by all; system mode uses SystemRandom.
+        """
         key = None
         if self.privacy.key_env is not None:
             key = os.environ.get(self.privacy.key_env)
@@ -122,8 +146,11 @@ class TransactionPipeline:
                     f"privacy.key_env={self.privacy.key_env!r} is not set in the "
                     "environment"
                 )
+        rng = self.privacy_rng
+        if self.privacy_mode == "deterministic":
+            rng = random.Random(f"dignity-privacy:{self.privacy_seed}:{split}")
         return PrivacyManager(
-            PrivacyBudget(self.privacy.epsilon_total), key=key, rng=self.privacy_rng
+            PrivacyBudget(self.privacy.epsilon_total), key=key, rng=rng
         )
 
     def compute_signals(self, df: pd.DataFrame) -> pd.DataFrame:
@@ -293,6 +320,7 @@ class TransactionPipeline:
             scaler_center=self.scaler.center_.copy(),
             scaler_scale=self.scaler.scale_.copy(),
             epsilon_spent=epsilon_spent,
+            privacy_mode=self.privacy_mode,
         )
 
     def _release(
@@ -456,11 +484,19 @@ class TransactionPipeline:
 
 
 def describe_privacy(data: SplitData, privacy: PrivacyConfig | None) -> str:
-    """One line for the CLI: the epsilon each split's release spent."""
+    """One line for the CLI: the privacy mode and the epsilon each split spent."""
     if privacy is None:
         return "Privacy: off"
     spent = " ".join(f"{k}={v:.3f}" for k, v in data.epsilon_spent.items())
-    return (
-        f"Privacy: ε spent per split {spent}, each of {privacy.epsilon_total:.3f} "
-        "(parallel composition over disjoint blocks)"
+    line = (
+        f"Privacy: mode={data.privacy_mode}; ε spent per split {spent}, each of "
+        f"{privacy.epsilon_total:.3f} (parallel composition over disjoint blocks)"
     )
+    if data.privacy_mode == "system":
+        line += (
+            "; not reproducible from seed, set privacy.deterministic_rng for "
+            "experiments"
+        )
+    elif data.privacy_mode == "deterministic":
+        line += "; seeded experiment mode, not DP-grade randomness"
+    return line

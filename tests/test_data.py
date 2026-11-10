@@ -1,6 +1,8 @@
 """Test data pipeline."""
 
 import dataclasses
+import random
+import secrets
 from pathlib import Path
 
 import numpy as np
@@ -454,12 +456,160 @@ class TestPrivacyStage:
         )
         spent = {"train": 1.0, "val": 1.0, "test": 1.0}
         released = dataclasses.replace(data, epsilon_spent=spent)
-        assert describe_privacy(released, _laplace_price()) == (
-            "Privacy: ε spent per split train=1.000 val=1.000 test=1.000, each of "
-            "1.000 (parallel composition over disjoint blocks)"
+        injected = dataclasses.replace(released, privacy_mode="injected")
+        assert describe_privacy(injected, _laplace_price()) == (
+            "Privacy: mode=injected; ε spent per split train=1.000 val=1.000 "
+            "test=1.000, each of 1.000 (parallel composition over disjoint blocks)"
         )
         assert isinstance(data, SplitData)
         assert describe_privacy(data, None) == "Privacy: off"
+
+    def test_describe_privacy_names_the_mode_and_warns_when_unseeded(self, easy_config):
+        data = _process_easy(
+            TransactionPipeline(seq_len=easy_config.data.seq_len, features=["volume"]),
+            easy_config,
+        )
+        spent = {"train": 1.0, "val": 1.0, "test": 1.0}
+        system = dataclasses.replace(data, epsilon_spent=spent, privacy_mode="system")
+        assert describe_privacy(system, _laplace_price()) == (
+            "Privacy: mode=system; ε spent per split train=1.000 val=1.000 "
+            "test=1.000, each of 1.000 (parallel composition over disjoint blocks); "
+            "not reproducible from seed, set privacy.deterministic_rng for "
+            "experiments"
+        )
+        seeded = dataclasses.replace(
+            data, epsilon_spent=spent, privacy_mode="deterministic"
+        )
+        assert describe_privacy(seeded, _laplace_price()).endswith(
+            "; seeded experiment mode, not DP-grade randomness"
+        )
+
+    def test_deterministic_mode_reproduces_the_release(self, easy_config):
+        cfg = PrivacyConfig(
+            epsilon_total=1.0,
+            deterministic_rng=True,
+            features={
+                "volume": {
+                    "mechanism": "laplace",
+                    "epsilon": 1.0,
+                    "bounds": [50.0, 150.0],
+                }
+            },
+        )
+        df = _easy_blocks(easy_config)
+
+        def run(seed):
+            pipeline = TransactionPipeline(
+                seq_len=easy_config.data.seq_len,
+                features=["volume"],
+                privacy=cfg,
+                privacy_seed=seed,
+            )
+            return _process_easy(pipeline, easy_config, df)
+
+        a, b, other = run(7), run(7), run(8)
+        np.testing.assert_array_equal(a.train.X, b.train.X)
+        np.testing.assert_array_equal(a.test.X, b.test.X)
+        assert not np.array_equal(a.train.X, other.train.X)
+        assert a.privacy_mode == "deterministic"
+
+    def test_deterministic_splits_draw_distinct_noise(self):
+        # identical streams would put identical noise on train, val and test
+        cfg = dataclasses.replace(_laplace_price(), deterministic_rng=True)
+        p = TransactionPipeline(seq_len=10, privacy=cfg, privacy_seed=7)
+        names = ("train", "val", "test", "instance")
+        draws = {s: p._new_manager(s)._rng.random() for s in names}
+        assert len(set(draws.values())) == 4
+        # the stream is a function of (seed, split) only, so a rerun repeats it
+        again = TransactionPipeline(seq_len=10, privacy=cfg, privacy_seed=7)
+        assert again._new_manager("val")._rng.random() == draws["val"]
+
+    def test_system_randomness_is_the_default_mode(self):
+        p = TransactionPipeline(
+            seq_len=10, features=["price"], privacy=_laplace_price()
+        )
+        assert p.privacy_mode == "system"
+        assert isinstance(p._new_manager("train")._rng, secrets.SystemRandom)
+
+    def test_system_mode_ignores_a_supplied_seed(self):
+        # prepare_data always passes the data seed; only deterministic_rng may turn
+        # it into a seeded stream, or a default run would silently become seeded
+        p = TransactionPipeline(
+            seq_len=10, features=["price"], privacy=_laplace_price(), privacy_seed=7
+        )
+        assert p.privacy_mode == "system"
+        for split in ("train", "val", "test", "instance"):
+            assert isinstance(p._new_manager(split)._rng, secrets.SystemRandom), split
+
+    def test_instance_stream_is_its_own_seeded_stream(self):
+        cfg = dataclasses.replace(_laplace_price(), deterministic_rng=True)
+        p = TransactionPipeline(seq_len=10, privacy=cfg, privacy_seed=7)
+        first = p.privacy_manager._rng.random()
+        assert first == random.Random("dignity-privacy:7:instance").random()
+        assert first != p._new_manager("train")._rng.random()
+
+    def test_a_real_release_records_system_mode_and_says_it_is_not_reproducible(
+        self, easy_config
+    ):
+        cfg = _laplace_price()
+        data = _process_easy(
+            TransactionPipeline(
+                seq_len=easy_config.data.seq_len,
+                features=["volume"],
+                privacy=PrivacyConfig(
+                    epsilon_total=1.0,
+                    features={
+                        "volume": {
+                            "mechanism": "laplace",
+                            "epsilon": 1.0,
+                            "bounds": [50.0, 150.0],
+                        }
+                    },
+                ),
+                privacy_seed=7,
+            ),
+            easy_config,
+        )
+        assert data.privacy_mode == "system"
+        assert describe_privacy(data, cfg).endswith(
+            "; not reproducible from seed, set privacy.deterministic_rng for "
+            "experiments"
+        )
+
+    def test_a_release_through_the_rng_seam_records_injected_mode(self, easy_config):
+        data = _process_easy(
+            TransactionPipeline(
+                seq_len=easy_config.data.seq_len,
+                features=["volume"],
+                privacy=PrivacyConfig(
+                    epsilon_total=1.0,
+                    features={
+                        "volume": {
+                            "mechanism": "laplace",
+                            "epsilon": 1.0,
+                            "bounds": [50.0, 150.0],
+                        }
+                    },
+                ),
+                privacy_rng=_ZeroNoise(),
+            ),
+            easy_config,
+        )
+        assert data.privacy_mode == "injected"
+
+    def test_privacy_mode_is_off_without_a_block_and_injected_with_a_seam(self):
+        assert TransactionPipeline(seq_len=10).privacy_mode == "off"
+        seeded = dataclasses.replace(_laplace_price(), deterministic_rng=True)
+        p = TransactionPipeline(
+            seq_len=10, privacy=seeded, privacy_seed=7, privacy_rng=_ZeroNoise()
+        )
+        assert p.privacy_mode == "injected"
+        assert p._new_manager("train")._rng is p.privacy_rng
+
+    def test_deterministic_mode_without_seed_is_refused(self):
+        cfg = dataclasses.replace(_laplace_price(), deterministic_rng=True)
+        with pytest.raises(ValueError, match="privacy_seed"):
+            TransactionPipeline(seq_len=10, privacy=cfg)
 
 
 class _ReversedOrder:
