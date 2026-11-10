@@ -193,7 +193,7 @@ runs `dignity-train` on the shipped block in system-randomness mode, checks the
 `deterministic_rng` as false. It asserts that the path runs and is labelled, not a score.
 
 The epsilon per released Laplace value is 1.0. That is one of the privacy sweep's grid
-values; each sweep point applies this block's epsilon allocation, rescaled, on the hard
+values; each sweep point will apply this block's epsilon allocation, rescaled, on the hard
 preset. The per-subject cost of a block is `block_len` x 1.0, because a block's rows are
 correlated and each row is a release (THREAT-MODEL). The utility cost will be
 reported by the privacy sweep (`results/v1.0/privacy.json`), not here. A pipeline
