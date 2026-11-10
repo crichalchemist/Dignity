@@ -5,6 +5,8 @@ import json
 import re
 from pathlib import Path
 
+from core.config import EvalConfig
+
 ROOT = Path(__file__).resolve().parents[1]
 
 # Removed claims and removed API names. Matching is case-insensitive. The design
@@ -126,20 +128,57 @@ class TestDocs:
             assert "k-anonymity holds for the train release only" in text, path.name
 
     def test_privacy_curve_statement_matches_the_committed_results(self):
-        # PRIVACY.md says the private model is not distinguishable from chance at
-        # any epsilon on the grid. If regenerated results stop supporting that
-        # sentence, the sentence has to change with them.
+        # PRIVACY.md says which grid points are at chance and which are above it.
+        # If regenerated results stop supporting those sentences, they have to
+        # change with them.
         text = " ".join((ROOT / "docs/PRIVACY.md").read_text().split())
-        assert "PR-AUC not distinguishable from chance on the hard preset" in text
-        assert "Raising ε a hundredfold" in text
-        metrics = json.loads((ROOT / "results/v1.0/privacy.json").read_text())[
-            "metrics"
-        ]
+        for sentence in (
+            "On the tuning seed, the shipped allocation leaves the risk model's "
+            "PR-AUC not distinguishable from chance on the hard preset at every ε "
+            "on the grid up to 10, and above chance at the two largest grid values, "
+            "30 and 100",
+            "contains the prevalence",
+            "wholly below the non-private reference's interval",
+            "the interval lies wholly above the prevalence",
+            "PR-AUC is higher at 100 than at 30",
+            "both point estimates are below the reference's",
+            "every PR-AUC at ε = 100 is above every PR-AUC at a smaller ε",
+            "At ε = 30 the replicates spread more widely than the gap",
+            "the same allocation at ε = 1.0 leaves the model's PR-AUC not "
+            "distinguishable from chance on the tuning seed",
+            "up to ε = 10 its intervals do not all contain 0.5",
+            "Only the noise on `volume` changes along the curve",
+            "The rise at the two largest ε therefore comes from less noise on `volume`",
+        ):
+            assert sentence in text, sentence
+        payload = json.loads((ROOT / "results/v1.0/privacy.json").read_text())
+        assert payload["seed"] == EvalConfig().tuning_seed
+        metrics = payload["metrics"]
         reference = metrics["reference"]["risk"]
         chance = reference["prevalence"]["value"]
-        epsilons = [point["epsilon"] for point in metrics["points"]]
-        assert len(epsilons) >= 5 and max(epsilons) >= 100 * min(epsilons)
-        for point in metrics["points"]:
-            pr_auc = point["risk"]["pr_auc"]
-            assert pr_auc["ci_low"] <= chance <= pr_auc["ci_high"], point["epsilon"]
-            assert pr_auc["ci_high"] < reference["pr_auc"]["ci_low"], point["epsilon"]
+        points = {point["epsilon"]: point for point in metrics["points"]}
+        at_chance = [epsilon for epsilon in points if epsilon <= 10]
+        grid = "the sentences name the grid: every value up to 10, then 30 and 100"
+        assert max(at_chance) == 10 and 1.0 in at_chance, grid
+        assert sorted(points)[len(at_chance) :] == [30, 100], grid
+
+        def replicates(epsilon):
+            return points[epsilon]["replicate_spread"]["pr_auc"]["values"]
+
+        for epsilon in at_chance:
+            pr_auc = points[epsilon]["risk"]["pr_auc"]
+            assert pr_auc["ci_low"] <= chance <= pr_auc["ci_high"], epsilon
+            assert pr_auc["ci_high"] < reference["pr_auc"]["ci_low"], epsilon
+        for epsilon in (30, 100):
+            pr_auc = points[epsilon]["risk"]["pr_auc"]
+            assert pr_auc["ci_low"] > chance, epsilon
+            assert pr_auc["value"] < reference["pr_auc"]["value"], epsilon
+        values = {e: points[e]["risk"]["pr_auc"]["value"] for e in points}
+        assert values[100] > values[30] > max(values[e] for e in at_chance)
+        below_30 = max(max(replicates(e)) for e in at_chance)
+        assert min(replicates(100)) > max(below_30, max(replicates(30)))
+        assert (
+            max(replicates(30)) - min(replicates(30)) > min(replicates(30)) - below_30
+        )
+        aurocs = [points[e]["risk"]["auroc"] for e in at_chance]
+        assert not all(a["ci_low"] <= 0.5 <= a["ci_high"] for a in aurocs)
