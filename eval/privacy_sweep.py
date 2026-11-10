@@ -8,6 +8,7 @@ from data.pipeline import describe_privacy
 from data.source.synthetic import public_log1p_volume_bounds
 from eval.baselines import window_logistic
 from eval.metrics import risk_metrics
+from eval.plots import _pyplot
 from eval.run import _predict, _spread, _task_config
 from train.loop import fit, prepare_data
 
@@ -162,3 +163,109 @@ def sweep(config: DignityConfig, epsilons: list[float], seed: int) -> dict:
             }
         },
     }
+
+
+def _bar(ax, x: float, entry: dict, **style) -> None:
+    """Draw a point's CI bar; no bar when either bound is None."""
+    low, high = entry.get("ci_low"), entry.get("ci_high")
+    if low is None or high is None:
+        return
+    v = float(entry["value"])
+    err = [[max(v - low, 0.0)], [max(high - v, 0.0)]]
+    ax.errorbar([x], [v], yerr=err, capsize=3, **style)
+
+
+def plot_curve(result: dict, path: str) -> None:
+    """Risk PR-AUC against epsilon, with the non-private reference.
+
+    ``result`` is a privacy.json payload. Bars are replicate 0's block-bootstrap
+    CI; small unfilled markers are every replicate's PR-AUC (training seed and
+    noise draw). The dashed line and band are the reference, the dotted line is
+    the test prevalence (chance).
+    """
+    plt = _pyplot()
+    metrics = result["metrics"]
+    points = metrics["points"]
+    reference = metrics["reference"]
+    fig, ax = plt.subplots(figsize=(6.5, 4.8))
+
+    def draw(label: str, epsilons, entries, spreads, color: str, marker: str):
+        known = [
+            (e, p)
+            for e, p in zip(epsilons, entries, strict=True)
+            if p["value"] is not None
+        ]
+        ax.plot(
+            [e for e, _ in known],
+            [float(p["value"]) for _, p in known],
+            marker=marker,
+            color=color,
+            label=label,
+        )
+        for e, p in known:
+            _bar(ax, e, p, color=color)
+        for e, spread in zip(epsilons, spreads, strict=True):
+            values = [v for v in (spread or {}).get("values", []) if v is not None]
+            ax.scatter(
+                [e] * len(values),
+                values,
+                s=14,
+                facecolors="none",
+                edgecolors=color,
+                alpha=0.6,
+            )
+
+    epsilons = [p["epsilon"] for p in points]
+    draw(
+        "model",
+        epsilons,
+        [p["risk"]["pr_auc"] for p in points],
+        [p.get("replicate_spread", {}).get("pr_auc") for p in points],
+        "C0",
+        "o",
+    )
+    logistic = result["baselines"]["window_logistic"]["points"]
+    draw(
+        "window_logistic",
+        [p["epsilon"] for p in logistic],
+        [p["pr_auc"] for p in logistic],
+        [p.get("replicate_spread", {}).get("pr_auc") for p in logistic],
+        "C1",
+        "s",
+    )
+
+    ref = reference["risk"]["pr_auc"]
+    ax.axhline(float(ref["value"]), linestyle="--", color="C2", label="non-private")
+    low, high = ref.get("ci_low"), ref.get("ci_high")
+    if low is not None and high is not None:
+        ax.axhspan(low, high, color="C2", alpha=0.15)
+    spread = reference.get("seed_spread", {}).get("pr_auc") or {}
+    ref_values = [v for v in spread.get("values", []) if v is not None]
+    if ref_values:
+        ax.scatter(
+            [max(epsilons)] * len(ref_values),
+            ref_values,
+            s=14,
+            marker="_",
+            color="C2",
+            alpha=0.8,
+        )
+    prevalence = reference["risk"]["prevalence"]["value"]
+    ax.axhline(float(prevalence), linestyle=":", color="gray", label="chance")
+
+    ax.plot([], [], "o", mfc="none", color="gray", label="replicates")
+    ax.set_xscale("log")
+    ax.set_xlabel("epsilon (log scale)")
+    ax.set_ylabel("risk PR-AUC")
+    ax.set_ylim(0, 1.05)
+    ax.set_title("Risk PR-AUC vs \u03b5 (test split, 95% block-bootstrap CI)")
+    ax.legend(loc="lower right", fontsize=8)
+    fig.text(
+        0.5,
+        -0.02,
+        "markers: replicates (training seed and noise draw)",
+        ha="center",
+        fontsize=8,
+    )
+    fig.savefig(path, dpi=150, bbox_inches="tight")
+    plt.close(fig)

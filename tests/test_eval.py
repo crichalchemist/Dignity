@@ -26,7 +26,7 @@ from eval.plots import (
     plot_policy_cost,
     plot_pr_curves,
 )
-from eval.privacy_sweep import privacy_at, sweep
+from eval.privacy_sweep import plot_curve, privacy_at, sweep
 from eval.run import (
     _early_warning,
     _fit_risk,
@@ -903,3 +903,50 @@ class TestPrivacySweep:
             assert len(m["reference"]["seed_spread"][key]["values"]) == 2
         for p in out["baselines"]["window_logistic"]["points"]:
             assert len(p["replicate_spread"]["pr_auc"]["values"]) == 2
+
+
+def _curve_result(*, with_spread: bool = True) -> dict:
+    ci = {"value": 0.5, "ci_low": 0.4, "ci_high": 0.6}
+    no_ci = {"value": 0.45, "ci_low": None, "ci_high": None}
+    spread = {"pr_auc": {"values": [0.5, 0.48, 0.53], "mean": 0.5, "std": 0.02}}
+    one = {"pr_auc": {"values": [0.5], "mean": 0.5, "std": None}}
+    risk = {"pr_auc": ci, "prevalence": {"value": 0.2, "ci_low": 0.1, "ci_high": 0.3}}
+    points = [
+        {"epsilon": 0.5, "risk": risk, "replicate_spread": spread},
+        {"epsilon": 1.0, "risk": risk},
+        {"epsilon": 2.0, "risk": {**risk, "pr_auc": no_ci}, "replicate_spread": one},
+    ]
+    if not with_spread:
+        for p in points:
+            p.pop("replicate_spread", None)
+    reference = {"risk": risk}
+    if with_spread:
+        reference["seed_spread"] = spread
+    return {
+        "metrics": {"points": points, "reference": reference},
+        "baselines": {
+            "window_logistic": {
+                "points": [
+                    {"epsilon": e, "pr_auc": ci if e < 2 else no_ci}
+                    for e in (0.5, 1.0, 2.0)
+                ]
+            }
+        },
+    }
+
+
+class TestPrivacyCurve:
+    PNG = b"\x89PNG\r\n\x1a\n"
+
+    def test_privacy_curve_is_written_as_png(self, tmp_path):
+        plot_curve(_curve_result(), str(tmp_path / "c.png"))
+        assert (tmp_path / "c.png").read_bytes()[:8] == self.PNG
+
+    def test_curve_is_drawn_when_replicate_spreads_are_missing(self, tmp_path):
+        plot_curve(_curve_result(with_spread=False), str(tmp_path / "c.png"))
+        assert (tmp_path / "c.png").read_bytes()[:8] == self.PNG
+
+    def test_curve_survives_points_whose_ci_is_none(self, tmp_path):
+        # point eps=2.0 and its baseline carry ci_low/ci_high None: no bar, no crash
+        plot_curve(_curve_result(), str(tmp_path / "c.png"))
+        assert (tmp_path / "c.png").stat().st_size > 0
