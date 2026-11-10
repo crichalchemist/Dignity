@@ -1,5 +1,6 @@
 """Test core utilities."""
 
+import dataclasses
 from pathlib import Path
 
 import numpy as np
@@ -17,11 +18,28 @@ from core.config import (
     TrainConfig,
 )
 from core.signals import SignalProcessor
+from data.pipeline import SIGNAL_SOURCES, TransactionPipeline
 from data.source.anomalies import ANOMALY_TYPES
 from data.source.synthetic import RAW_COLUMNS, SyntheticGenerator
 from train.loop import prepare_data
 
 ROOT = Path(__file__).resolve().parents[1]
+
+META = {
+    "timestamp",
+    "block_id",
+    "is_anomalous",
+    "anomaly_type",
+    "anomaly_id",
+    "block_label",
+}
+
+
+def _consumed_raw_columns(features, df):
+    """Raw source columns the model reads: a derived signal counts as its source."""
+    raw = df.drop(columns=[c for c in META if c in df.columns])
+    p = TransactionPipeline(seq_len=8, features=features).fit(raw)
+    return {SIGNAL_SOURCES.get(f, f) for f in p.available_features}
 
 
 class TestSignalProcessor:
@@ -238,12 +256,21 @@ class TestPrivacyConfig:
     def test_shipped_risk_config_covers_every_raw_model_input(self):
         root = Path(__file__).resolve().parents[1] / "config"
         cfg = DignityConfig.from_yaml(str(root / "train_risk.yaml"))
-        raw_columns = set(RAW_COLUMNS)
-        raw_inputs = raw_columns & set(cfg.data.features)
-        assert raw_inputs, (
+        df = SyntheticGenerator(
+            dataclasses.replace(cfg.data.synthetic, n_blocks=2)
+        ).generate()
+        consumed = _consumed_raw_columns(cfg.data.features, df)
+        assert consumed & set(RAW_COLUMNS), (
             "shipped features must include at least one raw source column"
         )
-        assert raw_inputs <= set(cfg.privacy.features)
+        assert consumed <= set(cfg.privacy.features)
+
+    def test_coverage_check_sees_price_behind_derived_signals(self):
+        # DGNTY-28: "volatility" consumes price even though "price" is not listed
+        df = SyntheticGenerator(
+            dataclasses.replace(SyntheticConfig(), n_blocks=2)
+        ).generate()
+        assert "price" in _consumed_raw_columns(["volume", "volatility"], df)
 
     @pytest.mark.parametrize(
         "mutate,match",

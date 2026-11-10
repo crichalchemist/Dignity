@@ -16,7 +16,12 @@ from core.config import DignityConfig, PrivacyConfig, SyntheticConfig
 from core.privacy import BudgetExhausted, PrivacyManager
 from data.labels import window_starts
 from data.loader import TransactionDataset, create_dataloader
-from data.pipeline import SplitData, TransactionPipeline, describe_privacy
+from data.pipeline import (
+    SIGNAL_SOURCES,
+    SplitData,
+    TransactionPipeline,
+    describe_privacy,
+)
 from data.source.anomalies import (
     ANOMALY_INJECTORS,
     ANOMALY_TYPES,
@@ -238,6 +243,12 @@ class TestTransactionPipeline:
         assert "volume_volatility" in df_processed.columns
         assert "volatility" in df_processed.columns
         assert "momentum" in df_processed.columns
+
+    def test_signal_sources_match_what_compute_signals_derives(self):
+        for source in ("volume", "price"):
+            out = TransactionPipeline().compute_signals(_frame()[[source]])
+            derived = set(out.columns) - {source}
+            assert derived == {s for s, src in SIGNAL_SOURCES.items() if src == source}
 
     def test_fit_transform(self, easy_frame):
         """Test scaling pipeline."""

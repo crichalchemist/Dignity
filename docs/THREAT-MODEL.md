@@ -34,7 +34,9 @@ before signal computation. Test: `tests/test_data.py::TestPrivacyStage::test_pri
 - Raw model inputs that are not listed under `privacy.features`, and labels. The
   stage covers only what the config names; `train/loop.py::prepare_data` releases labels as-is.
   The shipped `config/train_risk.yaml` lists every raw source column its model
-  consumes (`volume`, `price`, `fee_rate`, `tx_count`). Test:
+  consumes (`volume`, `price`, `fee_rate`, `tx_count`). The test maps each
+  derived signal back to its source column through `data.pipeline.SIGNAL_SOURCES`,
+  so `price` counts as consumed whenever a price signal is. Test:
   `tests/test_core.py::TestPrivacyConfig::test_shipped_risk_config_covers_every_raw_model_input`.
 - An adversary who already holds the raw source data. No input mechanism helps
   once the input is theirs.
