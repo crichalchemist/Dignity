@@ -194,6 +194,7 @@ class PrivacyConfig:
     epsilon_total: float
     k: int = 5
     key_env: str | None = None
+    deterministic_rng: bool = False  # True = seeded experiment mode, NOT DP-grade
     features: dict = field(default_factory=dict)
 
     def __post_init__(self):
@@ -218,6 +219,7 @@ class PrivacyConfig:
             "epsilon_total": self.epsilon_total,
             "k": self.k,
             "key_env": self.key_env,
+            "deterministic_rng": self.deterministic_rng,
             "features": {n: f.to_dict() for n, f in self.features.items()},
         }
 

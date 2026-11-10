@@ -114,6 +114,7 @@ privacy:
   key_env: DIGNITY_PRIVACY_KEY       # env var NAME; only used if you call pseudonymize() yourself
   epsilon_total: 1.0
   k: 5
+  deterministic_rng: false           # default; true = seeded experiment mode, NOT DP-grade randomness
   features:
     volume:   {mechanism: laplace, epsilon: 0.5, bounds: [0, 1000]}
     price:    {mechanism: laplace, epsilon: 0.5, bounds: [0, 500]}

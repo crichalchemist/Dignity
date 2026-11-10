@@ -201,6 +201,27 @@ class TestPrivacyConfig:
         again = DignityConfig.from_yaml(str(out))
         assert again.privacy.to_dict() == cfg.privacy.to_dict()
 
+    def test_deterministic_rng_round_trips_and_defaults_off(self, tmp_path):
+        block = {**_valid_privacy_block(), "deterministic_rng": True}
+        path = tmp_path / "c.yaml"
+        path.write_text(yaml.dump({"privacy": block}))
+        cfg = DignityConfig.from_yaml(str(path))
+        assert cfg.privacy.deterministic_rng is True
+        cfg.to_yaml(str(tmp_path / "o.yaml"))
+        again = DignityConfig.from_yaml(str(tmp_path / "o.yaml"))
+        assert again.privacy.deterministic_rng is True
+        assert PrivacyConfig(**_valid_privacy_block()).deterministic_rng is False
+
+    def test_runs_differing_only_in_rng_mode_are_told_apart(self):
+        # load_backbone compares to_dict(); a seeded run must not pass as a DP run.
+        seeded = PrivacyConfig(**{**_valid_privacy_block(), "deterministic_rng": True})
+        real = PrivacyConfig(**_valid_privacy_block())
+        assert seeded.to_dict() != real.to_dict()
+
+    def test_checkpoint_privacy_meta_without_the_key_still_loads_as_off(self):
+        old_meta = _valid_privacy_block()  # written before the field existed
+        assert PrivacyConfig(**old_meta).deterministic_rng is False
+
     def test_shipped_configs_match_spec(self):
         root = Path(__file__).resolve().parents[1] / "config"
         assert (
