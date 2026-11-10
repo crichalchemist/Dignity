@@ -105,7 +105,8 @@ releases under **parallel composition** over disjoint blocks (see THREAT-MODEL,
 `tests/test_data.py::TestSequenceAwareSplit::test_each_split_spends_its_own_full_budget`,
 `tests/test_data.py::TestSequenceAwareSplit::test_every_block_lands_in_exactly_one_split`).
 A pipeline releases once on every path: a second `fit`, `transform`,
-`fit_transform` or `process_blocks` raises `BudgetExhausted`.
+`fit_transform` or `process_blocks` raises `BudgetExhausted` (test
+`tests/test_data.py::TestSequenceAwareSplit::test_a_pipeline_never_releases_twice_on_any_pair_of_paths`).
 It is driven by a `privacy:` block in the YAML config:
 
 ```yaml
@@ -130,18 +131,19 @@ past `epsilon_total` — fails at config load, not mid-training.
 model. With `epsilon_total: 1.0` split 0.5/0.5, the Laplace scale is
 width/ε = 2000 for `volume` and 1000 for `price` — far above the synthetic
 signal, so released values carry little information about the source. A pipeline
-instance releases **once**, whatever the epsilons: `process_blocks` (what `train/loop.py::prepare_data`
-calls) splits train/val/test by block and releases each split on its own budget
-(parallel composition over disjoint blocks), and any later `transform`, `fit`,
-`fit_transform` or second `process_blocks` raises `BudgetExhausted`, as does
-`process_blocks` after `fit`, `transform` or `fit_transform`. A flag enforces this, so it
+instance releases **once**, whatever the epsilons: `process_blocks` (what
+`train/loop.py::prepare_data` calls) splits train/val/test by block and releases
+each split on its own budget (parallel composition over disjoint blocks). Any
+later `fit`, `transform`, `fit_transform` or `process_blocks` raises
+`BudgetExhausted`, whichever path released first. A flag enforces this, so it
 holds for a generalize-only block and for feature epsilons that sum to less than
-`epsilon_total`. This is deliberate (THREAT-MODEL, Known limitations). Tests:
+`epsilon_total`. A `transform` on an unfitted pipeline raises `RuntimeError`
+before releasing, so the release is kept for a later `fit`. This is deliberate
+(THREAT-MODEL, Known limitations). Tests:
 `tests/test_data.py::TestPrivacyStage::test_budget_exhausted_propagates_from_transform`,
-`tests/test_data.py::TestPrivacyStage::test_generalize_only_pipeline_releases_once_across_fit_and_transform`,
-`tests/test_data.py::TestPrivacyStage::test_under_allocated_laplace_pipeline_releases_once_across_fit_and_transform`,
+`tests/test_data.py::TestSequenceAwareSplit::test_a_pipeline_never_releases_twice_on_any_pair_of_paths`,
 `tests/test_data.py::TestSequenceAwareSplit::test_no_further_release_after_process_blocks`,
-`tests/test_data.py::TestSequenceAwareSplit::test_no_split_release_after_instance_release`.
+`tests/test_data.py::TestPrivacyStage::test_unfitted_transform_fails_before_it_releases_anything`.
 Fitting the generalize classes needs at least `k` rows in the train release; val
 and test values map onto the train classes at any size, with no k claim for them.
 

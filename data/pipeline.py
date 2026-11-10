@@ -211,7 +211,12 @@ class TransactionPipeline:
         return self
 
     def transform(self, df: pd.DataFrame) -> np.ndarray:
-        """Transform to a scaled feature array. Applies the privacy stage once."""
+        """Transform to a scaled feature array. Applies the privacy stage once.
+
+        An unfitted pipeline raises before releasing, so the release is kept.
+        """
+        if not self.fitted:
+            raise RuntimeError("Pipeline must be fitted before transform")
         return self._transform_on(self._apply_privacy(df))
 
     def fit_transform(self, df: pd.DataFrame) -> np.ndarray:
