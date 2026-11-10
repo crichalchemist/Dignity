@@ -35,7 +35,11 @@ from data.source.dynamics import (
     regime_path,
     tx_counts,
 )
-from data.source.synthetic import RAW_COLUMNS, SyntheticGenerator
+from data.source.synthetic import (
+    RAW_COLUMNS,
+    SyntheticGenerator,
+    public_log1p_volume_bounds,
+)
 from data.stats import CALIBRATION_CHUNK_LEN, calibration_stats, load_reference_stats
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -1242,6 +1246,50 @@ class TestNormalProcessPlausibility:
         fee = _normal_frame("config/synthetic_easy.yaml")["fee_rate"].to_numpy()
         out = PrivacyManager.generalize_amounts(fee, bins=bins, k=shipped.k)
         assert len(np.unique(out)) >= bins - 2
+
+
+class TestPublicBounds:
+    """Bounds are public: derived from declared generator parameters, never data."""
+
+    def test_volume_bounds_are_derived_without_generating_data(self, monkeypatch):
+        monkeypatch.setattr(
+            SyntheticGenerator,
+            "generate",
+            lambda self: pytest.fail("bounds must not read data"),
+        )
+        lo, hi = public_log1p_volume_bounds(SyntheticConfig())
+        assert 0.0 <= lo < hi and np.isfinite(hi)
+
+    def test_volume_bounds_cover_the_hard_preset(self):
+        cfg = DignityConfig.from_yaml(str(ROOT / "config/synthetic_hard.yaml"))
+        syn = dataclasses.replace(cfg.data.synthetic, n_blocks=50, seed=1000)
+        v = np.log1p(SyntheticGenerator(syn).generate()["volume"].to_numpy())
+        lo, hi = public_log1p_volume_bounds(cfg.data.synthetic)
+        assert np.mean((v < lo) | (v > hi)) <= 0.001
+
+    def test_benign_spikes_at_low_severity_stay_inside_the_bounds(self):
+        # The benign spike ignores severity, so a low severity_max must not
+        # shrink the bound below the spike's own multiplier (K12).
+        syn = SyntheticConfig(
+            n_blocks=60,
+            seed=1000,
+            severity_range=(0.1, 0.3),
+            benign_spike_rate=1.0,
+        )
+        v = np.log1p(SyntheticGenerator(syn).generate()["volume"].to_numpy())
+        lo, hi = public_log1p_volume_bounds(syn)
+        assert np.mean((v < lo) | (v > hi)) <= 0.001
+        # Deterministic pin: below the crossover the ceiling is the spike's
+        # multiplier alone, so raising severity_max (still below it) is a no-op.
+        assert (
+            hi
+            == public_log1p_volume_bounds(SyntheticConfig(severity_range=(0.1, 0.5)))[1]
+        )
+
+    def test_bounds_widen_with_the_declared_severity_ceiling(self):
+        low = public_log1p_volume_bounds(SyntheticConfig(severity_range=(0.3, 1.0)))
+        mild = public_log1p_volume_bounds(SyntheticConfig(severity_range=(0.1, 0.3)))
+        assert low[0] == mild[0] and low[1] > mild[1]
 
 
 if __name__ == "__main__":
