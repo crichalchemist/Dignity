@@ -185,7 +185,8 @@ risk model on easy-preset data (tuning seed, deterministic mode) with this block
 asserts validation AUROC >= 0.70 (chance is 0.5). It is a "still learns" guard on easy
 data at the shipped epsilon, not a point on the privacy curve. It does not test
 sensitivity to epsilon, and it says nothing about harder data: on the hard preset the
-same allocation leaves the model at chance (see *Privacy-versus-utility curve* below).
+same allocation leaves the model's PR-AUC not distinguishable from chance on the tuning
+seed (see *Privacy-versus-utility curve* below).
 The floor was declared from tuning-seed validation
 evidence before the evaluation seed was touched. The path a user runs is pinned
 separately: `tests/test_train.py::TestPrivacyUtility::test_shipped_privacy_config_trains_through_the_cli_in_system_mode`
@@ -227,13 +228,14 @@ by k-anonymous generalization, which ε does not govern, and `price` is not cons
 
 ![privacy curve](img/privacy_curve.png)
 
-**On the tuning seed, the shipped allocation leaves the risk model not distinguishable
-from chance on the hard preset, at every ε on the grid:** each point's 95% confidence
-interval for PR-AUC contains the prevalence (the chance line) and lies wholly below the
-non-private reference's interval. Test:
+**On the tuning seed, the shipped allocation leaves the risk model's PR-AUC not
+distinguishable from chance on the hard preset, at every ε on the grid:** each point's
+95% confidence interval for PR-AUC contains the prevalence (the chance line) and lies
+wholly below the non-private reference's interval. Test:
 `tests/test_docs.py::TestDocs::test_privacy_curve_statement_matches_the_committed_results`.
 Raising ε a hundredfold, from the smallest grid value to the largest, does not change
-this. Which mechanism removes the signal has not been measured: it may be the noise on
+this. The statement is about PR-AUC. The file also carries AUROC, whose intervals sit
+close to 0.5 but do not all contain it. Which mechanism removes the signal has not been measured: it may be the noise on
 `volume` at these wide a-priori bounds, the generalization of `fee_rate` and `tx_count`,
 or both. The numbers are in `results/v1.0/privacy.json`; none are quoted here, because
 the release regenerates them on the evaluation seed.
@@ -264,7 +266,9 @@ in [RESULTS.md](RESULTS.md) runs it after the three tasks):
 - **Baseline.** `window_logistic` on this chart is fit on the released feature windows.
   The baseline of the same name in `risk.json` is fit on the raw columns.
 - **The shipped config is not a point on this curve.** Its ε of 1.0 is a grid value, but
-  the curve runs on the hard preset and the floor test above runs on the easy preset.
+  the curve runs on the hard preset with that preset's training settings
+  (`config/synthetic_hard.yaml`), not those of `config/train_risk.yaml`, and the floor
+  test above runs on the easy preset.
 
 These are tuning-seed results. The release regenerates the file and the chart on the
 evaluation seed.

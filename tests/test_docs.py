@@ -129,14 +129,16 @@ class TestDocs:
         # PRIVACY.md says the private model is not distinguishable from chance at
         # any epsilon on the grid. If regenerated results stop supporting that
         # sentence, the sentence has to change with them.
-        text = (ROOT / "docs/PRIVACY.md").read_text()
-        assert "not distinguishable\nfrom chance on the hard preset" in text
+        text = " ".join((ROOT / "docs/PRIVACY.md").read_text().split())
+        assert "PR-AUC not distinguishable from chance on the hard preset" in text
+        assert "Raising ε a hundredfold" in text
         metrics = json.loads((ROOT / "results/v1.0/privacy.json").read_text())[
             "metrics"
         ]
         reference = metrics["reference"]["risk"]
         chance = reference["prevalence"]["value"]
-        assert len(metrics["points"]) >= 5
+        epsilons = [point["epsilon"] for point in metrics["points"]]
+        assert len(epsilons) >= 5 and max(epsilons) >= 100 * min(epsilons)
         for point in metrics["points"]:
             pr_auc = point["risk"]["pr_auc"]
             assert pr_auc["ci_low"] <= chance <= pr_auc["ci_high"], point["epsilon"]
