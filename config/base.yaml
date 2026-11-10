@@ -64,7 +64,7 @@ eval:
   eval_seed: 2026  # frozen; the model never sees eval_seed before M7
   n_train_seeds: 3
   n_bootstrap: 1000
-  epsilons: [0.1, 0.3, 1.0, 3.0, 10.0]
+  epsilons: [0.1, 0.3, 1.0, 3.0, 10.0, 30.0, 100.0]
   out_dir: results/v1.0
   img_dir: docs/img
 
