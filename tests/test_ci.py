@@ -46,6 +46,7 @@ class TestCiWorkflow:
         assert "dignity-export --checkpoint runs/smoke/train/best.pt" in runs
         eval_run = (
             "python -m eval.run --smoke --seed tuning --tasks risk,forecast,policy"
+            " --privacy-sweep"
         )
         assert eval_run in runs
         assert 'test -z "$(git status --porcelain)"' in runs  # outputs stay in runs/

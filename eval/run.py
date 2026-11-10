@@ -48,6 +48,7 @@ from train.engine import predict
 from train.loop import FitResult, fit, prepare_data
 
 _ROOT = Path(__file__).resolve().parent.parent
+PRIVACY_TEMPLATE = _ROOT / "config" / "train_risk.yaml"
 _PRINTED_METRICS = ("auroc", "pr_auc", "recall_at_1pct_fpr", "brier")
 
 
@@ -479,6 +480,32 @@ def run_policy(
     return result
 
 
+def run_privacy_sweep(config: DignityConfig, run_ctx: dict) -> dict:
+    """Sweep epsilon on the shipped privacy template; write privacy.json and the curve.
+
+    The sweep trains its own risk models, so it needs no ``--tasks risk``. The
+    generator seed is the run's (tuning or evaluation) seed; ``config_hash`` is of
+    the loaded run config, so every results file of a run shares one hash.
+    """
+    from eval.privacy_sweep import plot_curve, sweep  # imports helpers from this module
+
+    template = DignityConfig.from_yaml(str(PRIVACY_TEMPLATE))
+    swept = dataclasses.replace(
+        config,
+        privacy=template.privacy,
+        data=dataclasses.replace(config.data, features=template.data.features),
+    )
+    result = sweep(swept, config.eval.epsilons, config.data.synthetic.seed)
+    path = _write_result(
+        config, "privacy", result["metrics"], result["baselines"], run_ctx
+    )
+    img_dir = Path(config.eval.img_dir)
+    img_dir.mkdir(parents=True, exist_ok=True)
+    plot_curve(_payload(**result, run_ctx=run_ctx), str(img_dir / "privacy_curve.png"))
+    print(f"wrote {path}")
+    return result
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Run the Dignity evaluation.")
     source = parser.add_mutually_exclusive_group(required=True)
@@ -488,6 +515,11 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--seed", choices=("tuning", "eval"), required=True)
     parser.add_argument("--tasks", default="risk,forecast,policy")
+    parser.add_argument(
+        "--privacy-sweep",
+        action="store_true",
+        help="also write privacy.json and the privacy-versus-utility curve",
+    )
     args = parser.parse_args(argv)
 
     tasks = {t.strip() for t in args.tasks.split(",")}
@@ -512,6 +544,8 @@ def main(argv: list[str] | None = None) -> int:
         run_forecast(config, args.seed, data, risk, run_ctx)
     if "policy" in tasks:
         run_policy(config, args.seed, data, risk, run_ctx)
+    if args.privacy_sweep:
+        run_privacy_sweep(config, run_ctx)
     return 0
 
 

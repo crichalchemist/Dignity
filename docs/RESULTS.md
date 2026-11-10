@@ -18,4 +18,6 @@ tar -xzf runs/colab/dignity_results_$SEED.tar.gz -C runs/colab
 
 Tested with google-colab-cli 0.7.2. `--timeout` is required, because the default of 30 s kills the run.
 
+The run executes `python -m eval.run --privacy-sweep` after the three tasks. It will write `privacy.json` beside the other results and `privacy_curve.png` beside the other charts, in the downloaded archive.
+
 `risk.json` records `git_sha` and `config_hash`, so a reader can check which commit and config produced a result.

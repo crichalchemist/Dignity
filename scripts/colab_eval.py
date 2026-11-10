@@ -44,7 +44,8 @@ def main():
     print(f"pandas {pandas.__version__}")
 
     argv = ["--config", "config/synthetic_hard.yaml", "--seed", seed]
-    assert eval_main([*argv, "--tasks", "risk,forecast,policy"]) == 0
+    tasks = ["--tasks", "risk,forecast,policy"]
+    assert eval_main([*argv, *tasks, "--privacy-sweep"]) == 0
 
     subprocess.run(
         [

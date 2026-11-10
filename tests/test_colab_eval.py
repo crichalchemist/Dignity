@@ -105,6 +105,7 @@ class TestColabEvalScript:
             "tuning",
             "--tasks",
             "risk,forecast,policy",
+            "--privacy-sweep",
         ]
         assert sys.path[0] == "/content/Dignity"
 

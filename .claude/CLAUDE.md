@@ -45,9 +45,9 @@ format that export no longer supports (DGNTY-3, DGNTY-35). No shipped config wri
 ## Commands
 
 ```bash
-# Tests (450 collected: test_core 65, test_data 118, test_models 23, test_privacy 42,
+# Tests (452 collected: test_core 65, test_data 118, test_models 23, test_privacy 42,
 # test_operator 4, test_docs 6, test_train 78, test_checkpoint 3, test_export 9,
-# test_calibration 3, test_labels 7, test_gates 11, test_ci 4, test_eval 67,
+# test_calibration 3, test_labels 7, test_gates 11, test_ci 4, test_eval 69,
 # test_colab_eval 10 — one skips without CUDA)
 # every test is limited to 300 s (pytest.ini; pytest-timeout)
 pytest tests/ -v
@@ -66,6 +66,7 @@ pytest tests/ --cov --cov-fail-under=100
 python -m eval.gates --seed 1000   # data gate; tuning seed only, refuses 2026
 python -m eval.run --smoke --seed tuning  # CI-sized, all three tasks (--tasks defaults to risk,forecast,policy); outputs under runs/smoke/
 python -m eval.run --smoke --seed tuning --tasks risk,forecast  # --tasks forecast also fits risk (baseline) but writes only forecast.json; unknown names exit 2
+python -m eval.run --smoke --seed tuning --privacy-sweep  # also trains risk per epsilon on the config/train_risk.yaml privacy template (own models, so works without --tasks risk); writes privacy.json + privacy_curve.png
 python -m eval.run --config config/synthetic_hard.yaml --seed tuning  # full run on a Colab GPU; see docs/RESULTS.md
 
 # Train
@@ -103,7 +104,7 @@ train/loop.py fit                  →  shared loop (cli, notebook, eval.run); b
 train/checkpoint.py                 →  self-describing checkpoints (FORMAT_VERSION 2) / build_model_from_meta
 train/losses.py                     →  risk_loss, forecast_loss (masked per-horizon BCE),
                                        expected_cost_loss (policy: softmax-weighted cost table)
-eval/{metrics,baselines,plots,run}.py → risk.json, forecast.json, policy.json + charts; CIs bootstrap blocks, not windows
+eval/{metrics,baselines,plots,run,privacy_sweep}.py → risk.json, forecast.json, policy.json (+ privacy.json with --privacy-sweep) + charts; CIs bootstrap blocks, not windows
 export/to_onnx.py                   →  export + verify + benchmark
 ```
 

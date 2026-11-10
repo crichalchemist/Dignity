@@ -904,6 +904,34 @@ class TestPrivacySweep:
         for p in out["baselines"]["window_logistic"]["points"]:
             assert len(p["replicate_spread"]["pr_auc"]["values"]) == 2
 
+    def test_eval_run_privacy_sweep_writes_json_and_chart(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)  # out_dir/img_dir are relative
+        rc = main(["--smoke", "--seed", "tuning", "--tasks", "risk", "--privacy-sweep"])
+        assert rc == 0
+        cfg = DignityConfig.from_yaml(str(ROOT / "config/smoke.yaml"))
+        out = tmp_path / cfg.eval.out_dir
+        js = json.loads((out / "privacy.json").read_text())
+        assert set(js) == {"config_hash", "seed", "git_sha", "metrics", "baselines"}
+        assert js["seed"] == cfg.eval.tuning_seed
+        risk = json.loads((out / "risk.json").read_text())
+        assert js["config_hash"] == risk["config_hash"]  # one run, one config
+        assert [p["epsilon"] for p in js["metrics"]["points"]] == [1.0]
+        assert (tmp_path / cfg.eval.img_dir / "privacy_curve.png").exists()
+
+    def test_privacy_sweep_runs_without_the_risk_task(self, tmp_path, monkeypatch):
+        # the sweep trains its own risk models, so it does not need --tasks risk
+        monkeypatch.chdir(tmp_path)
+        rc = main(
+            ["--smoke", "--seed", "tuning", "--tasks", "forecast", "--privacy-sweep"]
+        )
+        assert rc == 0
+        out = (
+            tmp_path
+            / DignityConfig.from_yaml(str(ROOT / "config/smoke.yaml")).eval.out_dir
+        )
+        assert (out / "privacy.json").exists()
+        assert not (out / "risk.json").exists()
+
 
 def _curve_result(*, with_spread: bool = True) -> dict:
     ci = {"value": 0.5, "ci_low": 0.4, "ci_high": 0.6}
