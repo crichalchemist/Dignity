@@ -1,7 +1,11 @@
 # Privacy Operations
 
 `core/privacy.py` implements two things, and claims exactly two things. Each
-sentence in **bold** below is backed by a named test in `tests/test_privacy.py`.
+sentence in **bold** below is backed by a named test under `tests/`:
+`tests/test_privacy.py` for the primitives, `tests/test_data.py::TestPrivacyStage`
+and `tests/test_data.py::TestSequenceAwareSplit` for the pipeline stage,
+`tests/test_core.py::TestPrivacyConfig` for config, and
+`tests/test_operator.py::TestOperatorLayer` for the operator layer.
 For who these protect and from whom, read [THREAT-MODEL.md](THREAT-MODEL.md).
 
 ## What is claimed
@@ -79,6 +83,14 @@ volumes = np.random.default_rng(0).lognormal(3, 1, size=500)
 generalized = PrivacyManager.generalize_amounts(volumes, bins=10, k=5)
 ```
 
+Use `PrivacyManager.fit_generalization` to fit classes on one release and
+`Generalization.apply` to map another release onto them; 
+**k-anonymity holds for the train release only** (the release the classes were
+fitted on). Val and test
+values are mapped onto the train classes with no per-split check. Tests:
+`tests/test_privacy.py::TestGeneralization::test_train_classes_hold_at_least_k_fit_records`,
+`tests/test_data.py::TestSequenceAwareSplit::test_generalize_edges_and_scaler_fit_on_train_release_only`.
+
 This holds for the generalized column as released. Signals computed from it
 downstream (rolling volatility, momentum) are **not** covered by the k claim.
 
@@ -87,7 +99,11 @@ downstream (rolling volatility, momentum) are **not** covered by the k claim.
 `TransactionPipeline` applies these mechanisms to raw columns **before**
 computing signals, so derived features inherit the DP guarantee by
 post-processing. The stage runs exactly once per `fit`, `transform`, or
-`fit_transform`. It is driven by a `privacy:` block in the YAML config:
+`fit_transform`, and once per split in `process_blocks`, which makes three
+releases under **parallel composition** (see THREAT-MODEL, *Per-split releases
+and parallel composition*; test
+`tests/test_data.py::TestSequenceAwareSplit::test_each_split_spends_its_own_full_budget`).
+It is driven by a `privacy:` block in the YAML config:
 
 ```yaml
 privacy:
@@ -116,8 +132,10 @@ the feature epsilons sum to `epsilon_total`, a pipeline instance can release
 train/val/test by block and releases each split on its own budget (parallel
 composition over disjoint blocks), and any later `transform` or second
 `process_blocks` raises `BudgetExhausted`, as does `process_blocks` after `fit` or
-`transform` (tests `test_no_further_release_after_process_blocks`,
-`test_no_split_release_after_instance_release`). `generalize` needs at least `k` rows per
+`transform`. This is deliberate (THREAT-MODEL, Known limitations). Tests:
+`tests/test_data.py::TestPrivacyStage::test_budget_exhausted_propagates_from_transform`,
+`tests/test_data.py::TestSequenceAwareSplit::test_no_further_release_after_process_blocks`,
+`tests/test_data.py::TestSequenceAwareSplit::test_no_split_release_after_instance_release`. `generalize` needs at least `k` rows per
 release, so a fitted pipeline cannot score batches smaller than `k` with the
 stage on.
 

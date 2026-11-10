@@ -45,8 +45,8 @@ format that export no longer supports (DGNTY-3, DGNTY-35). No shipped config wri
 ## Commands
 
 ```bash
-# Tests (371 collected: test_core 51, test_data 74, test_models 23, test_privacy 41,
-# test_operator 4, test_docs 4, test_train 71, test_checkpoint 3, test_export 9,
+# Tests (373 collected: test_core 51, test_data 74, test_models 23, test_privacy 41,
+# test_operator 4, test_docs 6, test_train 71, test_checkpoint 3, test_export 9,
 # test_calibration 3, test_labels 7, test_gates 11, test_ci 4, test_eval 56,
 # test_colab_eval 10 — one skips without CUDA)
 # every test is limited to 300 s (pytest.ini; pytest-timeout)
@@ -92,7 +92,7 @@ One data path, one backbone, three interchangeable heads. The pieces only make s
 data/source/synthetic.py            →  event-record frame: raw columns + block_id, is_anomalous,
                                        anomaly_type, anomaly_id, block_label
 data/source/crypto.py               →  raw DataFrame (volume, price[, fee_rate, tx_count]), no labels
-core/privacy.py                     →  privacy stage: runs once per fit/transform, BEFORE signals
+core/privacy.py                     →  privacy stage: one release per block split (train/val/test), BEFORE signals
 data/pipeline.py TransactionPipeline→  compute_signals → RobustScaler → sliding windows
                                        (process_blocks: block split 70/15/15 → SplitData)
 data/labels.py                      →  risk/forecast labels from the event record
@@ -120,7 +120,9 @@ Adding a task = a head in `models/head/`, a branch in `Dignity.__init__`, a loss
 
 `core/signals.SignalProcessor` is an **all-static utility class**. `core/privacy.PrivacyManager`
 is **instance-based**: it is bound to a `PrivacyBudget` (ε ledger), an optional HMAC key, and
-an injectable `rng`. `TransactionPipeline` builds one per instance from `DignityConfig.privacy`.
+an injectable `rng`. `TransactionPipeline.process_blocks` builds one
+`PrivacyManager`+`PrivacyBudget` per split (parallel composition); the instance-level manager
+serves only `fit`/`transform`/`process`.
 Every public privacy claim is backed by a named test — see `docs/THREAT-MODEL.md`. If you add
 a mechanism, it needs a test in `tests/test_privacy.py` or CI's 100% gate on that file fails.
 
@@ -198,7 +200,7 @@ a mechanism, it needs a test in `tests/test_privacy.py` or CI's 100% gate on tha
   `test (3.12)`; no deletion, no force-push); `dev` is the integration branch. Branch feature
   work from `dev` and open PRs against `dev`; `dev` → `main` is the release step. CI runs on
   pushes to both and on every PR; the `smoke` job (installed console scripts, all three tasks)
-  also runs but is not yet a required check. PR titles carry `DGNTY-n`; merged branches are deleted
+  is also a required check (on `dev` and `main` since 2026-11-09). PR titles carry `DGNTY-n`; merged branches are deleted
   automatically.
 - `.env` holds API keys (COGNEE, FRED, TWELVEDATA) and is gitignored. `.internal/` is gitignored
   local design notes — read it for background, never cite it as public documentation.
