@@ -140,7 +140,9 @@ class EvalConfig:
     eval_seed: int = 2026  # frozen
     n_train_seeds: int = 3
     n_bootstrap: int = 1000
-    epsilons: list[float] = field(default_factory=lambda: [0.1, 0.3, 1.0, 3.0, 10.0])
+    epsilons: list[float] = field(
+        default_factory=lambda: [0.1, 0.3, 1.0, 3.0, 10.0, 30.0, 100.0]
+    )
     out_dir: str = "results/v1.0"
     img_dir: str = "docs/img"
 
