@@ -260,7 +260,9 @@ def plot_curve(result: dict, path: str) -> None:
         )
     prevalence = reference["risk"]["prevalence"]["value"]
     if prevalence is not None:
-        ax.axhline(float(prevalence), linestyle=":", color="gray", label="chance")
+        ax.axhline(
+            float(prevalence), linestyle=":", color="gray", label="chance (prevalence)"
+        )
 
     ax.plot([], [], "o", mfc="none", color="gray", label="replicates")
     if epsilons:
@@ -269,7 +271,8 @@ def plot_curve(result: dict, path: str) -> None:
     ax.set_ylabel("risk PR-AUC")
     ax.set_ylim(0, 1.05)
     ax.set_title("Risk PR-AUC vs \u03b5 (test split, 95% block-bootstrap CI)")
-    ax.legend(loc="lower right", fontsize=8)
+    # outside the axes: the curve can sit anywhere between chance and the reference
+    ax.legend(loc="center left", bbox_to_anchor=(1.02, 0.5), fontsize=8)
     fig.text(
         0.5,
         -0.02,
