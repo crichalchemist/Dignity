@@ -1148,10 +1148,9 @@ class TestPrepareData:
         np.testing.assert_array_equal(first.train.X, second.train.X)
 
 
-# Declared from tuning-seed validation evidence before M7 (user decision K1,
-# 2026-11-09: floor-replica val AUROC min 0.735 at eps 1 over privacy seeds 0-2;
-# chance is 0.5). Easy-preset data: a "still learns" floor, not a point on the
-# privacy curve.
+# Declared 2026-11-09 from tuning-seed validation evidence, before the evaluation
+# seed was touched (val AUROC min 0.735 at eps 1 over privacy seeds 0-2; chance is
+# 0.5). Easy-preset data: a "still learns" floor, not a point on the privacy curve.
 PRIVACY_AUROC_FLOOR = 0.70
 
 
@@ -1199,8 +1198,9 @@ class TestPrivacyUtility:
             np.random.default_rng(0),
         )
         result = fit(cfg, data, seed=0, run_dir=str(tmp_path))
-        model = build_model_from_meta(load_checkpoint(result.best_path)["meta"])
-        model.load_state_dict(load_checkpoint(result.best_path)["model_state"])
+        best = load_checkpoint(result.best_path)
+        model = build_model_from_meta(best["meta"])
+        model.load_state_dict(best["model_state"])
         loader = create_dataloader(data.val.X, batch_size=128, shuffle=False)
         scores = predict(model, loader, torch.device("cpu"))["score"]
         auroc = roc_auc_score(data.val.y_risk, scores)

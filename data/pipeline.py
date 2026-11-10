@@ -225,7 +225,7 @@ class TransactionPipeline:
             col = result[name].to_numpy(dtype=float)
             if feat.mechanism == "laplace":
                 if feat.transform == "log1p":
-                    col = np.log1p(col)
+                    col = np.log1p(np.maximum(col, 0.0))
                 result[name] = manager.add_laplace_noise(
                     col, epsilon=feat.epsilon, bounds=feat.bounds
                 )

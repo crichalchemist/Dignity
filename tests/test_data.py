@@ -14,6 +14,7 @@ from numpy.lib.stride_tricks import sliding_window_view
 
 from core.config import DignityConfig, PrivacyConfig, SyntheticConfig
 from core.privacy import BudgetExhausted, PrivacyManager
+from core.signals import SignalProcessor
 from data.labels import window_starts
 from data.loader import TransactionDataset, create_dataloader
 from data.pipeline import (
@@ -248,11 +249,57 @@ class TestTransactionPipeline:
         assert "volatility" in df_processed.columns
         assert "momentum" in df_processed.columns
 
-    def test_signal_sources_match_what_compute_signals_derives(self):
-        for source in ("volume", "price"):
-            out = TransactionPipeline().compute_signals(_frame()[[source]])
-            derived = set(out.columns) - {source}
-            assert derived == {s for s, src in SIGNAL_SOURCES.items() if src == source}
+    @staticmethod
+    def _signal_frame():
+        rng = np.random.default_rng(1000)
+        n = 80
+        return pd.DataFrame(
+            {
+                "volume": 100.0 * np.exp(rng.normal(0.0, 0.3, n)),
+                "price": 100.0 * np.exp(np.cumsum(rng.normal(0.0, 0.05, n))),
+            }
+        )
+
+    @staticmethod
+    def _changed_signals(before, after):
+        return {
+            c
+            for c in SIGNAL_SOURCES
+            if not np.array_equal(before[c].to_numpy(), after[c].to_numpy())
+        }
+
+    def test_each_raw_column_feeds_exactly_its_derived_signals(self):
+        # Behavioural pin of SIGNAL_SOURCES: the privacy coverage check trusts it
+        # to know which raw column a model input really reads (DGNTY-28).
+        pipe = TransactionPipeline()
+        df = self._signal_frame()
+        base = pipe.compute_signals(df)
+        bumped_price = pipe.compute_signals(
+            df.assign(price=df["price"] * 1.5 ** df.index.to_series() ** 0.5)
+        )
+        bumped_volume = pipe.compute_signals(
+            df.assign(volume=df["volume"] * 1.5 ** df.index.to_series() ** 0.5)
+        )
+        assert self._changed_signals(base, bumped_price) == {
+            "volatility",
+            "momentum",
+            "directional_change",
+        }
+        assert self._changed_signals(base, bumped_volume) == {"volume_volatility"}
+
+    def test_derived_signals_are_the_named_signal_processor_functions(self):
+        df = self._signal_frame()
+        out = TransactionPipeline().compute_signals(df)
+        expected = {
+            "volume_volatility": SignalProcessor.volatility(df["volume"].values),
+            "volatility": SignalProcessor.volatility(df["price"].values),
+            "momentum": SignalProcessor.price_momentum(df["price"].values),
+            "directional_change": SignalProcessor.directional_change(
+                df["price"].values
+            ),
+        }
+        for name, values in expected.items():
+            np.testing.assert_array_equal(out[name].to_numpy(), values)
 
     def test_fit_transform(self, easy_frame):
         """Test scaling pipeline."""
@@ -380,6 +427,28 @@ class TestPrivacyStage:
         np.testing.assert_allclose(
             out, np.clip(np.log1p(_frame()["volume"]), 4.6, 4.65)
         )
+
+    def test_raw_volume_below_minus_one_releases_a_finite_value(self):
+        # log1p of a value < -1 is NaN, and NaN survives clip and noise, so those
+        # rows would stand out in the release. Negative raw volume clamps to 0.
+        cfg = PrivacyConfig(
+            epsilon_total=1.0,
+            features={
+                "volume": {
+                    "mechanism": "laplace",
+                    "epsilon": 1.0,
+                    "bounds": [0.0, 6.0],
+                    "transform": "log1p",
+                }
+            },
+        )
+        p = TransactionPipeline(
+            seq_len=10, features=["volume"], privacy=cfg, privacy_rng=_ZeroNoise()
+        )
+        df = _frame().assign(volume=[-5.0, -1.0, -0.5] + [100.0] * 57)
+        out = p._apply_privacy(df)["volume"].to_numpy()
+        assert np.isfinite(out).all()
+        np.testing.assert_allclose(out[:3], 0.0)
 
     def test_fit_transform_spends_budget_exactly_once(self):
         priv = TransactionPipeline(
@@ -1252,13 +1321,31 @@ class TestPublicBounds:
     """Bounds are public: derived from declared generator parameters, never data."""
 
     def test_volume_bounds_are_derived_without_generating_data(self, monkeypatch):
-        monkeypatch.setattr(
-            SyntheticGenerator,
-            "generate",
-            lambda self: pytest.fail("bounds must not read data"),
-        )
+        def reads_data(*args, **kwargs):
+            pytest.fail("bounds must not build a generator or sample data")
+
+        for attr in ("__init__", "generate", "_normal_block"):
+            monkeypatch.setattr(SyntheticGenerator, attr, reads_data)
         lo, hi = public_log1p_volume_bounds(SyntheticConfig())
         assert 0.0 <= lo < hi and np.isfinite(hi)
+
+    def test_volume_bounds_do_not_depend_on_sampling_parameters(self):
+        # Bounds are public parameters: anything that only steers sampling must
+        # leave them bit-identical, or they are leaking data-dependent choices.
+        base = SyntheticConfig()
+        expected = public_log1p_volume_bounds(base)
+        for seed in (0, 1, 1000, 31337):
+            for n_blocks in (2, 50):
+                for contamination in (0.0, 0.9):
+                    varied = dataclasses.replace(
+                        base,
+                        seed=seed,
+                        n_blocks=n_blocks,
+                        contamination=contamination,
+                        benign_spike_rate=0.5 if seed % 2 else 0.0,
+                        regime_switch_prob=0.1 if n_blocks > 2 else 0.0,
+                    )
+                    assert public_log1p_volume_bounds(varied) == expected
 
     def test_volume_bounds_cover_the_hard_preset(self):
         cfg = DignityConfig.from_yaml(str(ROOT / "config/synthetic_hard.yaml"))
@@ -1269,7 +1356,7 @@ class TestPublicBounds:
 
     def test_benign_spikes_at_low_severity_stay_inside_the_bounds(self):
         # The benign spike ignores severity, so a low severity_max must not
-        # shrink the bound below the spike's own multiplier (K12).
+        # shrink the bound below the spike's own multiplier (DGNTY-8).
         syn = SyntheticConfig(
             n_blocks=60,
             seed=1000,

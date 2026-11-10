@@ -29,8 +29,9 @@ appear in the training data.
   `tests/test_privacy.py::TestGeneralizeAmounts::test_every_equivalence_class_has_at_least_k`,
   `tests/test_privacy.py::TestGeneralization::test_train_classes_hold_at_least_k_fit_records`.
 
-Signals derived from a noised column (volatility, momentum, directional change)
-inherit its ε by the post-processing theorem, because the privacy stage runs
+Signals derived from a noised column (`volume_volatility` from `volume` in the
+shipped config; volatility, momentum and directional change from `price` when it is
+noised) inherit its ε by the post-processing theorem, because the privacy stage runs
 before signal computation. Test: `tests/test_data.py::TestPrivacyStage::test_privacy_stage_runs_before_signals`.
 
 **Not defended.**

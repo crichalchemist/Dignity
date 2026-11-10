@@ -296,12 +296,13 @@ class TestPrivacyConfig:
         )
         assert consumed <= set(cfg.privacy.features)
 
-    def test_coverage_check_sees_price_behind_derived_signals(self):
-        # DGNTY-28: "volatility" consumes price even though "price" is not listed
+    @pytest.mark.parametrize("signal", ["volatility", "momentum", "directional_change"])
+    def test_coverage_check_sees_price_behind_derived_signals(self, signal):
+        # DGNTY-28: a price signal consumes price even though "price" is not listed
         df = SyntheticGenerator(
             dataclasses.replace(SyntheticConfig(), n_blocks=2)
         ).generate()
-        assert "price" in _consumed_raw_columns(["volume", "volatility"], df)
+        assert "price" in _consumed_raw_columns(["volume", signal], df)
 
     @pytest.mark.parametrize(
         "mutate,match",

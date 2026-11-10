@@ -141,7 +141,7 @@ privacy:
   k: 5
   deterministic_rng: false           # default; true = seeded experiment mode, NOT DP-grade randomness
   features:
-    volume:   {mechanism: laplace, epsilon: 0.5, bounds: [0, 1000]}
+    volume:   {mechanism: laplace, epsilon: 0.5, transform: log1p, bounds: [0.0, 7.0]}
     price:    {mechanism: laplace, epsilon: 0.5, bounds: [0, 500]}
     fee_rate: {mechanism: generalize, bins: 10}
     tx_count: {mechanism: generalize, bins: 10}
@@ -160,12 +160,22 @@ block so the policy warm start from a risk checkpoint is accepted) consumes
 - `volume`: Laplace at the whole `epsilon_total: 1.0`, after the public `log1p`
   transform, with `bounds` equal to `public_log1p_volume_bounds()` of the file's
   `data.synthetic` rounded outward to two decimals. The bounds come from declared
-  generator parameters, never from data.
+  generator parameters, never from data. Pinned by
+  `tests/test_core.py::TestPrivacyConfig::test_shipped_risk_bounds_are_the_public_generator_bounds`,
+  `tests/test_data.py::TestPublicBounds::test_volume_bounds_are_derived_without_generating_data`
+  and
+  `tests/test_data.py::TestPublicBounds::test_volume_bounds_do_not_depend_on_sampling_parameters`.
 - `fee_rate`, `tx_count`: k-anonymous generalization (`bins: 10`, `k: 5`). They are
-  **not** under the Laplace mechanism and are not governed by epsilon.
+  **not** under the Laplace mechanism and are not governed by epsilon. Pinned by
+  `tests/test_core.py::TestPrivacyConfig::test_shipped_block_spends_all_epsilon_on_volume_and_generalizes_the_rest`.
 - `price` is neither released nor consumed, and neither are its three signals
-  (`volatility`, `price_change`, `momentum`, `directional_change`), so
-  `flash_crash`, a price-only typology, is invisible to the shipped model.
+  (`volatility`, `momentum`, `directional_change`), so the price signature of
+  `flash_crash` (the drop and partial recovery) is invisible to the shipped model;
+  only its volume burst reaches the model, through the noised `volume` column.
+  Pinned by
+  `tests/test_core.py::TestPrivacyConfig::test_shipped_risk_config_covers_every_raw_model_input`
+  and
+  `tests/test_data.py::TestTransactionPipeline::test_each_raw_column_feeds_exactly_its_derived_signals`.
 
 **The shipped block still learns:**
 `tests/test_train.py::TestPrivacyUtility::test_privacy_config_still_learns` trains the
@@ -174,17 +184,19 @@ asserts validation AUROC >= 0.70 (chance is 0.5). It is a "still learns" guard o
 data at the shipped epsilon, not a point on the privacy curve, and it does not test
 sensitivity to epsilon: at these a-priori bounds utility barely depends on epsilon (the
 retained signal comes mostly from the generalized `fee_rate` and `tx_count` columns;
-numbers in the privacy sweep, M5.15). The floor was declared from tuning-seed validation
+the numbers will be reported by the privacy sweep, `results/v1.0/privacy.json`). The
+floor was declared from tuning-seed validation
 evidence before the evaluation seed was touched. The path a user runs is pinned
 separately: `tests/test_train.py::TestPrivacyUtility::test_shipped_privacy_config_trains_through_the_cli_in_system_mode`
 runs `dignity-train` on the shipped block in system-randomness mode, checks the
 `Privacy: mode=system;` line, and checks that the checkpoint's stored config records
 `deterministic_rng` as false. It asserts that the path runs and is labelled, not a score.
 
-The per-value epsilon is 1.0 (the eps = 1 point of the evaluation grid); the
-per-subject cost of a block is `block_len` x 1.0, because a block's rows are
-correlated and each row is a release (THREAT-MODEL). The utility cost is
-reported with the privacy sweep, not here. A pipeline
+The epsilon per released Laplace value is 1.0. That is one of the privacy sweep's grid
+values; each sweep point applies this block's epsilon allocation, rescaled, on the hard
+preset. The per-subject cost of a block is `block_len` x 1.0, because a block's rows are
+correlated and each row is a release (THREAT-MODEL). The utility cost will be
+reported by the privacy sweep (`results/v1.0/privacy.json`), not here. A pipeline
 instance releases **once**, whatever the epsilons: `process_blocks` (what
 `train/loop.py::prepare_data` calls) splits train/val/test by block and releases
 each split on its own budget (parallel composition over disjoint blocks). Any
