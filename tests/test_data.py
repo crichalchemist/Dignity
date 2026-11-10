@@ -365,6 +365,36 @@ class TestPrivacyStage:
         with pytest.raises(BudgetExhausted):
             priv.process(_frame(), fit=False)
 
+    def test_generalize_only_pipeline_releases_once_across_fit_and_transform(self):
+        # Generalize spends no epsilon, so the ledger cannot notice a second
+        # release of the same rows; only the instance flag can.
+        cfg = PrivacyConfig(
+            epsilon_total=1.0,
+            k=5,
+            features={"fee_rate": {"mechanism": "generalize", "bins": 2}},
+        )
+        priv = TransactionPipeline(seq_len=10, features=["fee_rate"], privacy=cfg)
+        priv.fit(_frame())
+        assert priv.privacy_manager.budget.spent == 0.0
+        with pytest.raises(BudgetExhausted, match="already released"):
+            priv.transform(_frame())
+
+    def test_under_allocated_laplace_pipeline_releases_once_across_fit_and_transform(
+        self,
+    ):
+        # Feature epsilons sum to 1.0 of a 2.0 total: the ledger still has room,
+        # yet a second release of the same rows must be refused.
+        priv = TransactionPipeline(
+            seq_len=10,
+            features=["price"],
+            privacy=_laplace_price(eps_total=2.0, eps=1.0),
+            privacy_rng=_ZeroNoise(),
+        )
+        priv.fit(_frame())
+        assert priv.privacy_manager.budget.spent < 2.0
+        with pytest.raises(BudgetExhausted, match="already released"):
+            priv.transform(_frame())
+
     def test_absent_privacy_block_is_a_noop(self):
         plain = TransactionPipeline(seq_len=10, features=["price"])
         df = _frame()
@@ -463,6 +493,13 @@ def _split(pipeline, df, rng):
 def _easy_blocks(easy_config, n_blocks=12):
     syn = dataclasses.replace(easy_config.data.synthetic, n_blocks=n_blocks)
     return SyntheticGenerator(syn).generate()
+
+
+def _transform_unfitted(pipeline, df):
+    # transform() releases the rows (privacy runs first) and only then finds
+    # the scaler unfitted; the release has happened by the time it raises.
+    with pytest.raises(RuntimeError, match="fitted"):
+        pipeline.transform(df)
 
 
 def _process_easy(pipeline, easy_config, df=None):
@@ -730,23 +767,47 @@ class TestSequenceAwareSplit:
         _process_easy(plain, easy_config, df)
         _process_easy(plain, easy_config, df)
 
-    def test_no_split_release_after_instance_release(self, easy_config):
-        # fit() already spent epsilon on these rows; process_blocks releasing them
-        # again on fresh per-split ledgers would be a second full-epsilon release.
-        privacy = PrivacyConfig(
-            epsilon_total=1.0,
-            features={
-                "volume": {"mechanism": "laplace", "epsilon": 1.0, "bounds": [0, 1e6]}
-            },
-        )
+    @pytest.mark.parametrize(
+        "mechanism, release",
+        [
+            ("laplace", lambda p, df: p.fit(df)),
+            ("generalize", lambda p, df: p.fit(df)),
+            ("laplace", _transform_unfitted),
+            ("generalize", _transform_unfitted),
+            ("laplace", lambda p, df: p.fit_transform(df)),
+            ("generalize", lambda p, df: p.fit_transform(df)),
+        ],
+        ids=[
+            "laplace-fit",
+            "generalize-fit",
+            "laplace-transform",
+            "generalize-transform",
+            "laplace-fit_transform",
+            "generalize-fit_transform",
+        ],
+    )
+    def test_no_split_release_after_instance_release(
+        self, easy_config, mechanism, release
+    ):
+        # fit/transform/fit_transform already released these rows on the instance
+        # ledger; process_blocks releasing them again on fresh per-split ledgers
+        # would be a second release. The generalize case spends no epsilon, so the
+        # guard must be a flag, not the ledger.
+        if mechanism == "laplace":
+            feature = {"mechanism": "laplace", "epsilon": 1.0, "bounds": [0, 1e6]}
+            name = "volume"
+        else:
+            feature = {"mechanism": "generalize", "bins": 2}
+            name = "fee_rate"
+        privacy = PrivacyConfig(epsilon_total=1.0, k=5, features={name: feature})
         df = _easy_blocks(easy_config)
         pipeline = TransactionPipeline(
             seq_len=easy_config.data.seq_len,
-            features=["volume"],
+            features=[name],
             privacy=privacy,
             privacy_rng=_ZeroNoise(),
         )
-        pipeline.fit(df)
+        release(pipeline, df)
         with pytest.raises(BudgetExhausted, match="already released"):
             _process_easy(pipeline, easy_config, df)
 

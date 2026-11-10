@@ -15,7 +15,7 @@ appear in the training data.
 
 - *Bounded Laplace noise* — ε-differential privacy at the level of each released
   value. Values are clipped to public `bounds`, sensitivity is the width of those
-  bounds, and every call spends ε from a per-release ledger that refuses to
+  bounds, and every call spends ε from a ledger (a ledger per split in `process_blocks`, and one per pipeline on the fit/transform path) that refuses to
   exceed `epsilon_total`. Tests: `tests/test_privacy.py::TestAddLaplaceNoise`,
   `tests/test_privacy.py::TestPrivacyBudget`,
   `tests/test_data.py::TestPrivacyStage::test_fit_transform_spends_budget_exactly_once`.
@@ -40,11 +40,12 @@ before signal computation. Test: `tests/test_data.py::TestPrivacyStage::test_pri
 - Memorization inside the trained weights beyond what input noise suppresses.
   Training is ordinary SGD; the trained model carries no DP guarantee of its own.
 - k-anonymity of features *derived* from a generalized column. Rolling windows
-  can re-split equivalence classes. The k claim is for the column as released.
+  can re-split equivalence classes. The k claim is for the generalized column of the
+  train release, not for derived features and not for val or test.
 
 ### Per-split releases and parallel composition
 
-`TransactionPipeline.process_blocks` makes three privacy releases, one per block split (train, val, test). Each has its own `PrivacyManager` and `PrivacyBudget` and spends the full `epsilon_total`. The splits are disjoint sets of blocks, and in the synthetic path every subject's rows lie in one block. No released value therefore belongs to two releases, and by parallel composition the three releases together are ε-differentially private per released Laplace value, not 3ε. Per subject the bound stays m·ε by group privacy, with m = `block_len`. The RobustScaler and the `generalize` class boundaries and representatives are fitted on the train release only and then applied to val and test.
+`TransactionPipeline.process_blocks` makes three privacy releases, one per block split (train, val, test). Each has its own `PrivacyManager` and `PrivacyBudget` and spends the full `epsilon_total`. The splits are disjoint sets of blocks (test: `tests/test_data.py::TestSequenceAwareSplit::test_every_block_lands_in_exactly_one_split`), and in the synthetic path every subject's rows lie in one block. No released value therefore belongs to two releases, and by parallel composition the three releases together are ε-differentially private per released Laplace value, not 3ε. Per subject the bound stays m·ε by group privacy, with m = `block_len`. The RobustScaler and the `generalize` class boundaries and representatives are fitted on the train release only and then applied to val and test.
 
 k-anonymity holds for the train release only: every class has at least k train records. The fitted boundaries and representatives are computed from raw train values, so they are part of what the train release discloses. Val and test values are mapped onto those train classes with no per-split check, so a class can hold fewer than k val or test records, and no k claim is made for val or test. Tests: `tests/test_data.py::TestSequenceAwareSplit::test_each_split_spends_its_own_full_budget`, `tests/test_data.py::TestSequenceAwareSplit::test_generalize_edges_and_scaler_fit_on_train_release_only`, `tests/test_privacy.py::TestGeneralization::test_train_classes_hold_at_least_k_fit_records`.
 
@@ -80,7 +81,7 @@ Someone watching the person who runs the model. This is the **operator layer**.
   shipped synthetic path every subject contributes one block of
   `synthetic.block_len` rows (160 by default). User-level
   accounting is not implemented; the CLI's "ε spent" line is the per-value ledger.
-- **A fitted pipeline cannot release further data, by design.** `TransactionPipeline.transform` re-applies the privacy stage against the instance's ledger; when the feature epsilons sum to `epsilon_total` it raises `BudgetExhausted` after the first release, and after `process_blocks` both `transform` and a second `process_blocks` raise it. v1.0 has no inference-time release path. New data would be a new, disjoint release with its own budget (parallel composition again), noised at collection with the same `privacy:` block, so the model would see inputs from the distribution it was trained on. That path is not implemented. Tests: `tests/test_data.py::TestPrivacyStage::test_budget_exhausted_propagates_from_transform`, `tests/test_data.py::TestSequenceAwareSplit::test_no_further_release_after_process_blocks`.
+- **A pipeline releases once, on every path.** A `TransactionPipeline` with a `privacy:` block makes exactly one release of data: either one `fit`, `transform` or `fit_transform` call (one ledger on the instance), or one `process_blocks` call (three releases, one ledger per split). Any further `fit`, `transform`, `fit_transform` or `process_blocks` raises `BudgetExhausted`. A flag on the instance enforces this, not the ledger, so it holds for a generalize-only block (which spends no ε) and for a Laplace block whose feature epsilons sum to less than `epsilon_total`. A `transform` on an unfitted pipeline releases before it finds the scaler unfitted, and counts as the release. v1.0 has no inference-time release path. New data would be a new, disjoint release with its own budget (parallel composition again), noised at collection with the same `privacy:` block, so the model would see inputs from the distribution it was trained on. That path is not implemented. Tests: `tests/test_data.py::TestPrivacyStage::test_budget_exhausted_propagates_from_transform`, `tests/test_data.py::TestPrivacyStage::test_generalize_only_pipeline_releases_once_across_fit_and_transform`, `tests/test_data.py::TestPrivacyStage::test_under_allocated_laplace_pipeline_releases_once_across_fit_and_transform`, `tests/test_data.py::TestSequenceAwareSplit::test_no_further_release_after_process_blocks`, `tests/test_data.py::TestSequenceAwareSplit::test_no_split_release_after_instance_release` (generalize and Laplace; `fit`, `transform` and `fit_transform` legs).
 - **Pseudonymization is a primitive, not a pipeline stage.** No current data
   source carries identifier columns, so `PrivacyManager.pseudonymize` is exposed
   and tested but not wired into `TransactionPipeline`.

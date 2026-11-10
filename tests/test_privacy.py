@@ -290,6 +290,16 @@ class TestGeneralization:
         assert g.boundaries.size == 0
         np.testing.assert_array_equal(g.apply(np.array([-5.0, 42.0, 1e6])), 42.0)
 
+    def test_a_value_in_an_empty_interior_bin_joins_the_class_below_it(self):
+        # edges are [0, 8, 10, 12, 20] and bin [8, 10) is empty, so the classes
+        # open at 0, 10 and 12. A val/test value falls into the class whose
+        # lowest occupied bin it passed, not into one bounded by the previous
+        # class's upper edge, so 9.0 is released as the low class.
+        x = np.array([0.0] * 2 + [10.0] * 6 + [20.0] * 2)
+        g = PrivacyManager.fit_generalization(x, bins=5, k=2)
+        np.testing.assert_allclose(g.boundaries, [10.0, 12.0])
+        assert g.apply(np.array([9.0]))[0] == 0.0
+
     def test_apply_preserves_shape(self):
         g = PrivacyManager.fit_generalization(np.arange(100.0), bins=5, k=5)
         assert g.apply(np.zeros((3, 4))).shape == (3, 4)

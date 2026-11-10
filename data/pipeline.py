@@ -165,6 +165,8 @@ class TransactionPipeline:
             return df
         if self._split_released:
             raise BudgetExhausted(_ALREADY_RELEASED)
+        if self._instance_released:
+            raise BudgetExhausted(_INSTANCE_ALREADY_RELEASED)
         released = self._release_split(df, self.privacy_manager, None)[0]
         self._instance_released = True
         return released
@@ -231,7 +233,7 @@ class TransactionPipeline:
         ``df`` is the generator's event record: one row per step with a
         ``block_id`` column plus ``is_anomalous``, ``anomaly_type`` and
         ``anomaly_id``. Blocks are shuffled with ``rng`` (its only use) and split
-        at the block level into train/val/test by the ``split`` fractions. The
+        at the block level into train/val/test by the ``split`` fractions.
         Each split is its own privacy release with its own budget (parallel
         composition over disjoint blocks); generalize classes and the scaler are
         fitted on the train release only. Signals and windows are computed inside
