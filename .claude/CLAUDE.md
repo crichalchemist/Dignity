@@ -45,10 +45,10 @@ format that export no longer supports (DGNTY-3, DGNTY-35). No shipped config wri
 ## Commands
 
 ```bash
-# Tests (437 collected: test_core 65, test_data 118, test_models 23, test_privacy 42,
-# test_operator 4, test_docs 6, test_train 76, test_checkpoint 3, test_export 9,
-# test_calibration 3, test_labels 7, test_gates 11, test_ci 4, test_eval 56,
-# test_colab_eval 10 — one skips without CUDA)
+# Tests (457 collected: test_core 65, test_data 118, test_models 23, test_privacy 42,
+# test_operator 4, test_docs 7, test_train 78, test_checkpoint 3, test_export 9,
+# test_calibration 3, test_labels 7, test_gates 11, test_ci 4, test_eval 72,
+# test_colab_eval 11 — one skips without CUDA)
 # every test is limited to 300 s (pytest.ini; pytest-timeout)
 pytest tests/ -v
 pytest tests/test_models.py -v                       # one file
@@ -66,6 +66,7 @@ pytest tests/ --cov --cov-fail-under=100
 python -m eval.gates --seed 1000   # data gate; tuning seed only, refuses 2026
 python -m eval.run --smoke --seed tuning  # CI-sized, all three tasks (--tasks defaults to risk,forecast,policy); outputs under runs/smoke/
 python -m eval.run --smoke --seed tuning --tasks risk,forecast  # --tasks forecast also fits risk (baseline) but writes only forecast.json; unknown names exit 2
+python -m eval.run --smoke --seed tuning --privacy-sweep  # also trains risk per epsilon on the config/train_risk.yaml privacy template (own models, so works without --tasks risk); writes privacy.json + privacy_curve.png
 python -m eval.run --config config/synthetic_hard.yaml --seed tuning  # full run on a Colab GPU; see docs/RESULTS.md
 
 # Train
@@ -103,7 +104,7 @@ train/loop.py fit                  →  shared loop (cli, notebook, eval.run); b
 train/checkpoint.py                 →  self-describing checkpoints (FORMAT_VERSION 2) / build_model_from_meta
 train/losses.py                     →  risk_loss, forecast_loss (masked per-horizon BCE),
                                        expected_cost_loss (policy: softmax-weighted cost table)
-eval/{metrics,baselines,plots,run}.py → risk.json, forecast.json, policy.json + charts; CIs bootstrap blocks, not windows
+eval/{metrics,baselines,plots,run,privacy_sweep}.py → risk.json, forecast.json, policy.json (+ privacy.json with --privacy-sweep) + charts; CIs bootstrap blocks, not windows
 export/to_onnx.py                   →  export + verify + benchmark
 ```
 
@@ -145,6 +146,8 @@ a mechanism, it needs a test in `tests/test_privacy.py` or CI's 100% gate on tha
   rejects 2-D targets; forecast targets come from `data.labels.forecast_labels`.
   `train/loop.py::prepare_data` uses `TransactionPipeline.process_blocks`: shuffle and split blocks 70/15/15,
   fit the scaler on train blocks only, and compute signals and windows inside each block.
+  `prepare_data(config, privacy_seed=None)` seeds only the privacy noise (default: `synthetic.seed`);
+  the data and the block split always follow `synthetic.seed`.
   With a `privacy:` block each split is its own release on its own budget (generalize classes
   fitted on train), and the pipeline releases once: a later `transform` or `process_blocks` raises
   `BudgetExhausted`. Do not

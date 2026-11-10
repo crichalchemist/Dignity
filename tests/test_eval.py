@@ -8,7 +8,7 @@ import pandas as pd
 import pytest
 
 import eval.metrics as metrics_module
-from core.config import DignityConfig, PolicyConfig
+from core.config import DignityConfig, PolicyConfig, PrivacyConfig
 from eval.baselines import block_tree, risk_score_forecast, threshold_policy
 from eval.metrics import (
     bootstrap_ci,
@@ -26,7 +26,9 @@ from eval.plots import (
     plot_policy_cost,
     plot_pr_curves,
 )
+from eval.privacy_sweep import plot_curve, privacy_at, sweep
 from eval.run import (
+    PRIVACY_TEMPLATE,
     _early_warning,
     _fit_risk,
     _spread,
@@ -723,3 +725,350 @@ class TestEvalRunPolicy:
         assert loaded == risk_paths
         # the shared run config is never edited by the per-seed warm start
         assert config.train.init_backbone_from is None
+
+
+def _template() -> PrivacyConfig:
+    return PrivacyConfig(
+        epsilon_total=1.0,
+        k=7,
+        key_env="SWEEP_TEST_KEY",
+        features={
+            "volume": {"mechanism": "laplace", "epsilon": 0.75, "bounds": [0, 1]},
+            "price": {"mechanism": "laplace", "epsilon": 0.25, "bounds": [0, 1]},
+            "fee_rate": {"mechanism": "generalize", "bins": 10},
+        },
+    )
+
+
+def _sweep_config(tmp_path, n_train_seeds=1) -> DignityConfig:
+    """Smoke-sized data with the shipped privacy block and its feature list."""
+    cfg = DignityConfig.from_yaml(str(ROOT / "config/smoke.yaml"))
+    shipped = DignityConfig.from_yaml(str(ROOT / "config/train_risk.yaml"))
+    cfg.privacy = shipped.privacy
+    cfg.data.features = list(shipped.data.features)
+    cfg.train.checkpoint_dir = str(tmp_path)
+    cfg.eval.n_train_seeds = n_train_seeds
+    cfg.eval.n_bootstrap = 5
+    cfg.device = "cpu"
+    return cfg
+
+
+def _spy_sweep_calls(monkeypatch):
+    """Wrap the real prepare_data and fit that sweep calls; record their arguments."""
+    import eval.privacy_sweep as module
+
+    calls = {"data": [], "fit": [], "datas": [], "scores": [], "logistic": []}
+    real_prepare, real_fit = module.prepare_data, module.fit
+    real_scores, real_logistic = module._scores, module.window_logistic
+
+    def prepare(config, privacy_seed=None):
+        eps = None if config.privacy is None else config.privacy.epsilon_total
+        calls["data"].append(
+            {
+                "generator_seed": config.data.synthetic.seed,
+                "privacy_seed": privacy_seed,
+                "epsilon": eps,
+            }
+        )
+        result = real_prepare(config, privacy_seed=privacy_seed)
+        calls["datas"].append(result[1])
+        return result
+
+    def fit_spy(config, data, seed, run_dir, *args, **kwargs):
+        calls["fit"].append(
+            {"seed": seed, "run_dir": run_dir, "privacy": config.privacy}
+        )
+        return real_fit(config, data, seed, run_dir, *args, **kwargs)
+
+    def scores_spy(*args, **kwargs):
+        score = real_scores(*args, **kwargs)
+        calls["scores"].append(score)
+        return score
+
+    def logistic_spy(train, test):
+        calls["logistic"].append((train, test))
+        return real_logistic(train, test)
+
+    monkeypatch.setattr(module, "prepare_data", prepare)
+    monkeypatch.setattr(module, "fit", fit_spy)
+    monkeypatch.setattr(module, "_scores", scores_spy)
+    monkeypatch.setattr(module, "window_logistic", logistic_spy)
+    return calls
+
+
+class TestPrivacySweep:
+    def test_privacy_at_keeps_the_allocation_and_spends_exactly_epsilon(self):
+        t = _template()
+        p = privacy_at(t, 4.0, {"volume": (0.0, 9.0), "price": (1.0, 5.0)})
+        assert p.epsilon_total == 4.0 and p.deterministic_rng
+        assert p.features["volume"].epsilon == pytest.approx(3.0)
+        assert p.features["price"].epsilon == pytest.approx(1.0)
+        assert p.features["volume"].bounds == (0.0, 9.0)
+        assert p.features["price"].bounds == (1.0, 5.0)
+        assert p.features["fee_rate"].to_dict() == t.features["fee_rate"].to_dict()
+        assert (p.k, p.key_env) == (7, "SWEEP_TEST_KEY")
+
+    def test_privacy_at_refuses_a_laplace_feature_without_public_bounds(self):
+        with pytest.raises(ValueError, match="'price'"):
+            privacy_at(_template(), 1.0, {"volume": (0.0, 9.0)})
+
+    def test_privacy_at_refuses_a_template_with_nothing_to_rescale(self):
+        t = PrivacyConfig(
+            epsilon_total=1.0,
+            features={"fee_rate": {"mechanism": "generalize", "bins": 10}},
+        )
+        with pytest.raises(ValueError, match="template has no laplace feature"):
+            privacy_at(t, 1.0, {})
+
+    def test_privacy_at_keeps_the_transform_and_leaves_the_template_alone(self):
+        t = PrivacyConfig(
+            epsilon_total=1.0,
+            features={
+                "volume": {
+                    "mechanism": "laplace",
+                    "epsilon": 1.0,
+                    "bounds": [0, 1],
+                    "transform": "log1p",
+                }
+            },
+        )
+        before = t.to_dict()
+        p = privacy_at(t, 0.5, {"volume": (0.0, 9.0)})
+        assert p.features["volume"].transform == "log1p"
+        assert p.features["volume"].epsilon == pytest.approx(0.5)
+        assert t.to_dict() == before
+
+    def test_sweep_reports_every_epsilon_plus_a_non_private_reference(self, tmp_path):
+        cfg = _sweep_config(tmp_path)
+        out = sweep(cfg, [1.0], seed=cfg.eval.tuning_seed)
+        m = out["metrics"]
+        assert m["epsilons"] == [1.0]
+        assert m["features"] == cfg.data.features
+        assert m["template"] == cfg.privacy.to_dict()
+        assert [p["epsilon"] for p in m["points"]] == [1.0]
+        p = m["points"][0]
+        assert p["privacy_mode"] == "deterministic"
+        assert p["epsilon_spent"] == pytest.approx(
+            {"train": 1.0, "val": 1.0, "test": 1.0}
+        )
+        assert 0.0 <= m["reference"]["risk"]["pr_auc"]["value"] <= 1.0
+        assert m["reference"]["epsilon"] is None
+        assert m["reference"]["privacy_mode"] == "off"
+        assert len(out["baselines"]["window_logistic"]["points"]) == 1
+        assert set(out["baselines"]["window_logistic"]["reference"]) == {
+            "auroc",
+            "pr_auc",
+        }
+        json.dumps(out, allow_nan=False)
+
+    def test_sweep_needs_a_privacy_template_to_rescale(self, tmp_path):
+        cfg = _sweep_config(tmp_path)
+        cfg.privacy = None
+        with pytest.raises(ValueError, match="privacy"):
+            sweep(cfg, [1.0], seed=cfg.eval.tuning_seed)
+
+    def test_sweep_without_epsilons_refuses_before_training(
+        self, tmp_path, monkeypatch
+    ):
+        cfg = _sweep_config(tmp_path)
+        calls = _spy_sweep_calls(monkeypatch)
+        with pytest.raises(ValueError, match="epsilon"):
+            sweep(cfg, [], seed=cfg.eval.tuning_seed)
+        assert calls["data"] == [] and calls["fit"] == []
+
+    def test_sweep_is_reproducible_from_seeds(self, tmp_path):
+        # a published curve must be re-derivable: same seeds, same numbers
+        first = sweep(_sweep_config(tmp_path / "a"), [1.0], seed=1000)
+        second = sweep(_sweep_config(tmp_path / "b"), [1.0], seed=1000)
+        assert first["metrics"]["points"] == second["metrics"]["points"]
+        assert first["metrics"]["reference"] == second["metrics"]["reference"]
+        assert first["baselines"] == second["baselines"]
+
+    def test_each_replicate_renoises_the_same_data_and_every_epsilon_shares_it(
+        self, tmp_path, monkeypatch
+    ):
+        cfg = _sweep_config(tmp_path, n_train_seeds=2)
+        tuning = cfg.eval.tuning_seed
+        calls = _spy_sweep_calls(monkeypatch)
+        out = sweep(cfg, [0.5, 1.0], seed=tuning)
+
+        # the generator (and so the block split) is the tuning seed in every call
+        assert {c["generator_seed"] for c in calls["data"]} == {tuning}
+        private = [c for c in calls["data"] if c["epsilon"] is not None]
+        assert len(private) == 4
+        # replicate r noises with seed + r, identically for every epsilon
+        for eps in (0.5, 1.0):
+            assert [c["privacy_seed"] for c in private if c["epsilon"] == eps] == [
+                tuning,
+                tuning + 1,
+            ]
+        # training seeds follow config.seed + r, for every point and the reference
+        assert [c["seed"] for c in calls["fit"]] == [cfg.seed, cfg.seed + 1] * 3
+        for c in calls["fit"]:
+            assert c["run_dir"].endswith(f"train_seed_{c['seed']}")
+        assert (
+            sum("/privacy_sweep/reference/" in c["run_dir"] for c in calls["fit"]) == 2
+        )
+        assert sum("/privacy_sweep/eps_0.5/" in c["run_dir"] for c in calls["fit"]) == 2
+        # the checkpoint records the privacy that produced its data, not the template
+        for c in calls["fit"]:
+            if "/privacy_sweep/reference/" in c["run_dir"]:
+                assert c["privacy"] is None
+            else:
+                eps = 0.5 if "/eps_0.5/" in c["run_dir"] else 1.0
+                assert c["privacy"].epsilon_total == eps
+                assert c["privacy"].deterministic_rng
+
+        m = out["metrics"]
+        assert m["train_seeds"] == [cfg.seed, cfg.seed + 1]
+        assert m["privacy_seeds"] == [tuning, tuning + 1]
+        for p in m["points"]:
+            for key in ("pr_auc", "auroc"):
+                assert len(p["replicate_spread"][key]["values"]) == 2
+        for key in ("pr_auc", "auroc"):
+            assert len(m["reference"]["seed_spread"][key]["values"]) == 2
+        for p in out["baselines"]["window_logistic"]["points"]:
+            assert len(p["replicate_spread"]["pr_auc"]["values"]) == 2
+
+        # one non-private prepare_data (and no privacy seed) plus one per point
+        # and replicate; the reference is the only call without privacy
+        assert len(calls["data"]) == 2 * 2 + 1
+        plain_calls = [c for c in calls["data"] if c["epsilon"] is None]
+        assert len(plain_calls) == 1 and plain_calls[0]["privacy_seed"] is None
+        datas = calls["datas"]
+        assert datas[4].privacy_mode == "off"
+        assert all(d.privacy_mode == "deterministic" for d in datas[:4])
+        assert m["reference"]["privacy_mode"] == "off"
+
+        # every score is recomputed on the split it was trained for: values[r]
+        # is replicate r's own score, not replicate 0's or the last one's
+        def pr_auc(k):
+            test = datas[min(k, 4)].test
+            return risk_metrics(
+                test.y_risk, calls["scores"][k], test.block_index, 0, 0
+            )["pr_auc"]["value"]
+
+        for i, p in enumerate(m["points"]):
+            spread = p["replicate_spread"]["pr_auc"]["values"]
+            assert spread == pytest.approx([pr_auc(2 * i), pr_auc(2 * i + 1)])
+            assert p["risk"]["pr_auc"]["value"] == spread[0]
+            assert p["risk"]["pr_auc"]["ci_low"] is not None
+            e = p["epsilon"]
+            assert p["epsilon_spent"] == pytest.approx(
+                {"train": e, "val": e, "test": e}
+            )
+        ref = m["reference"]
+        ref_values = ref["seed_spread"]["pr_auc"]["values"]
+        assert ref_values == pytest.approx([pr_auc(4), pr_auc(5)])
+        assert ref["risk"]["pr_auc"]["value"] == ref_values[0]
+        assert ref["risk"]["pr_auc"]["ci_low"] is not None
+
+        # each baseline is fit on the data its model saw (same split, same noise)
+        assert len(calls["logistic"]) == 5
+        for k in range(4):
+            train, test = calls["logistic"][k]
+            assert train is datas[k].train and test is datas[k].test
+        train, test = calls["logistic"][4]
+        assert train is datas[4].train and test is datas[4].test
+
+    def test_eval_run_privacy_sweep_writes_json_and_chart(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)  # out_dir/img_dir are relative
+        rc = main(["--smoke", "--seed", "tuning", "--tasks", "risk", "--privacy-sweep"])
+        assert rc == 0
+        cfg = DignityConfig.from_yaml(str(ROOT / "config/smoke.yaml"))
+        out = tmp_path / cfg.eval.out_dir
+        js = json.loads((out / "privacy.json").read_text())
+        assert set(js) == {"config_hash", "seed", "git_sha", "metrics", "baselines"}
+        assert js["seed"] == cfg.eval.tuning_seed
+        risk = json.loads((out / "risk.json").read_text())
+        assert js["config_hash"] == risk["config_hash"]  # one run, one config
+        assert [p["epsilon"] for p in js["metrics"]["points"]] == [1.0]
+        assert (tmp_path / cfg.eval.img_dir / "privacy_curve.png").exists()
+        m = js["metrics"]
+        template = DignityConfig.from_yaml(str(PRIVACY_TEMPLATE))
+        # the run's generator seed noises; the run's training seed trains
+        assert m["privacy_seeds"] == [
+            cfg.eval.tuning_seed + r for r in range(cfg.eval.n_train_seeds)
+        ]
+        assert m["train_seeds"][0] == cfg.seed
+        assert m["features"] == template.data.features
+        assert m["template"] == template.privacy.to_dict()
+
+    def test_privacy_sweep_runs_without_the_risk_task(self, tmp_path, monkeypatch):
+        # the sweep trains its own risk models, so it does not need --tasks risk
+        monkeypatch.chdir(tmp_path)
+        rc = main(
+            ["--smoke", "--seed", "tuning", "--tasks", "forecast", "--privacy-sweep"]
+        )
+        assert rc == 0
+        out = (
+            tmp_path
+            / DignityConfig.from_yaml(str(ROOT / "config/smoke.yaml")).eval.out_dir
+        )
+        assert (out / "privacy.json").exists()
+        assert not (out / "risk.json").exists()
+
+
+def _curve_result(*, with_spread: bool = True) -> dict:
+    ci = {"value": 0.5, "ci_low": 0.4, "ci_high": 0.6}
+    no_ci = {"value": 0.45, "ci_low": None, "ci_high": None}
+    spread = {"pr_auc": {"values": [0.5, 0.48, 0.53], "mean": 0.5, "std": 0.02}}
+    one = {"pr_auc": {"values": [0.5], "mean": 0.5, "std": None}}
+    risk = {"pr_auc": ci, "prevalence": {"value": 0.2, "ci_low": 0.1, "ci_high": 0.3}}
+    points = [
+        {"epsilon": 0.5, "risk": risk, "replicate_spread": spread},
+        {"epsilon": 1.0, "risk": risk},
+        {"epsilon": 2.0, "risk": {**risk, "pr_auc": no_ci}, "replicate_spread": one},
+    ]
+    if not with_spread:
+        for p in points:
+            p.pop("replicate_spread", None)
+    reference = {"risk": risk}
+    if with_spread:
+        reference["seed_spread"] = spread
+    return {
+        "metrics": {"points": points, "reference": reference},
+        "baselines": {
+            "window_logistic": {
+                "points": [
+                    {"epsilon": e, "pr_auc": ci if e < 2 else no_ci}
+                    for e in (0.5, 1.0, 2.0)
+                ]
+            }
+        },
+    }
+
+
+class TestPrivacyCurve:
+    PNG = b"\x89PNG\r\n\x1a\n"
+
+    def test_privacy_curve_is_written_as_png(self, tmp_path):
+        plot_curve(_curve_result(), str(tmp_path / "c.png"))
+        assert (tmp_path / "c.png").read_bytes()[:8] == self.PNG
+
+    def test_curve_is_drawn_when_replicate_spreads_are_missing(self, tmp_path):
+        plot_curve(_curve_result(with_spread=False), str(tmp_path / "c.png"))
+        assert (tmp_path / "c.png").read_bytes()[:8] == self.PNG
+
+    def test_curve_survives_points_whose_ci_is_none(self, tmp_path):
+        # point eps=2.0 and its baseline carry ci_low/ci_high None: no bar, no crash
+        plot_curve(_curve_result(), str(tmp_path / "c.png"))
+        assert (tmp_path / "c.png").stat().st_size > 0
+
+    def test_curve_survives_a_reference_without_values(self, tmp_path):
+        # no reference line and no chance line are drawn for a missing value
+        result = _curve_result()
+        reference = result["metrics"]["reference"]
+        reference["risk"] = {
+            "pr_auc": {"value": None, "ci_low": None, "ci_high": None},
+            "prevalence": {"value": None, "ci_low": None, "ci_high": None},
+        }
+        plot_curve(result, str(tmp_path / "c.png"))
+        assert (tmp_path / "c.png").read_bytes()[:8] == self.PNG
+
+    def test_curve_survives_an_empty_points_list(self, tmp_path):
+        result = _curve_result()
+        result["metrics"]["points"] = []
+        result["baselines"]["window_logistic"]["points"] = []
+        plot_curve(result, str(tmp_path / "c.png"))
+        assert (tmp_path / "c.png").read_bytes()[:8] == self.PNG

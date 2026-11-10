@@ -54,5 +54,5 @@ jobs:
       - run: pip install -e . --no-deps
       - run: dignity-train --config config/smoke.yaml
       - run: dignity-export --checkpoint runs/smoke/train/best.pt --output "$RUNNER_TEMP/dignity_risk.onnx"
-      - run: python -m eval.run --smoke --seed tuning --tasks risk,forecast,policy
+      - run: python -m eval.run --smoke --seed tuning --tasks risk,forecast,policy --privacy-sweep
       - run: test -z "$(git status --porcelain)"

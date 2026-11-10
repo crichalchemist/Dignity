@@ -55,14 +55,22 @@ def resolve_pos_weight(config_value: float | None, y_train: np.ndarray) -> float
     return float((y_train != 1).sum()) / n_pos
 
 
-def prepare_data(config: DignityConfig) -> tuple[pd.DataFrame, SplitData]:
-    """Generate the synthetic frame and split it into block-level windows."""
+def prepare_data(
+    config: DignityConfig, privacy_seed: int | None = None
+) -> tuple[pd.DataFrame, SplitData]:
+    """Generate the synthetic frame and split it into block-level windows.
+
+    ``privacy_seed`` seeds only the privacy noise (``None``: the data seed); the
+    generator, the block split and the labels always follow ``synthetic.seed``.
+    """
     df = SyntheticGenerator(config.data.synthetic).generate()
     pipeline = TransactionPipeline(
         seq_len=config.data.seq_len,
         features=config.data.features,
         privacy=config.privacy,
-        privacy_seed=config.data.synthetic.seed,
+        privacy_seed=(
+            config.data.synthetic.seed if privacy_seed is None else privacy_seed
+        ),
     )
     split_data = pipeline.process_blocks(
         df,

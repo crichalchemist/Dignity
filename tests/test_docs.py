@@ -1,6 +1,7 @@
 """Public docs must not reintroduce claims or APIs this project removed."""
 
 import ast
+import json
 import re
 from pathlib import Path
 
@@ -123,3 +124,22 @@ class TestDocs:
             text = path.read_text()
             assert "parallel composition" in text, path.name
             assert "k-anonymity holds for the train release only" in text, path.name
+
+    def test_privacy_curve_statement_matches_the_committed_results(self):
+        # PRIVACY.md says the private model is not distinguishable from chance at
+        # any epsilon on the grid. If regenerated results stop supporting that
+        # sentence, the sentence has to change with them.
+        text = " ".join((ROOT / "docs/PRIVACY.md").read_text().split())
+        assert "PR-AUC not distinguishable from chance on the hard preset" in text
+        assert "Raising ε a hundredfold" in text
+        metrics = json.loads((ROOT / "results/v1.0/privacy.json").read_text())[
+            "metrics"
+        ]
+        reference = metrics["reference"]["risk"]
+        chance = reference["prevalence"]["value"]
+        epsilons = [point["epsilon"] for point in metrics["points"]]
+        assert len(epsilons) >= 5 and max(epsilons) >= 100 * min(epsilons)
+        for point in metrics["points"]:
+            pr_auc = point["risk"]["pr_auc"]
+            assert pr_auc["ci_low"] <= chance <= pr_auc["ci_high"], point["epsilon"]
+            assert pr_auc["ci_high"] < reference["pr_auc"]["ci_low"], point["epsilon"]

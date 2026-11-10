@@ -1093,6 +1093,16 @@ class TestNotebook:
         assert missing == []
 
 
+def _seeded_volume_privacy() -> PrivacyConfig:
+    return PrivacyConfig(
+        epsilon_total=1.0,
+        deterministic_rng=True,
+        features={
+            "volume": {"mechanism": "laplace", "epsilon": 0.5, "bounds": [0, 1000]}
+        },
+    )
+
+
 class TestPrepareData:
     def test_every_split_is_windowed_alike_and_blocks_never_straddle_splits(
         self, tiny_train_config
@@ -1146,6 +1156,27 @@ class TestPrepareData:
         _, first = prepare_data(config)
         _, second = prepare_data(config)
         np.testing.assert_array_equal(first.train.X, second.train.X)
+
+    def test_the_default_privacy_seed_is_the_data_seed(self, tiny_train_config):
+        # every caller that omits privacy_seed keeps the noise it had before the
+        # argument existed
+        config = DignityConfig.from_yaml(tiny_train_config())
+        config.privacy = _seeded_volume_privacy()
+        _, default = prepare_data(config)
+        _, explicit = prepare_data(config, privacy_seed=config.data.synthetic.seed)
+        np.testing.assert_array_equal(default.train.X, explicit.train.X)
+
+    def test_a_new_privacy_seed_changes_only_the_noise(self, tiny_train_config):
+        # a sweep replicate must re-noise the same data, never re-draw or re-split it
+        config = DignityConfig.from_yaml(tiny_train_config())
+        config.privacy = _seeded_volume_privacy()
+        seed = config.data.synthetic.seed
+        _, base = prepare_data(config)
+        _, other = prepare_data(config, privacy_seed=seed + 1)
+        assert not np.array_equal(base.train.X, other.train.X)
+        np.testing.assert_array_equal(base.train.y_risk, other.train.y_risk)
+        np.testing.assert_array_equal(base.train.block_index, other.train.block_index)
+        np.testing.assert_array_equal(base.test.block_index, other.test.block_index)
 
 
 # Declared 2026-11-09 from tuning-seed validation evidence, before the evaluation
