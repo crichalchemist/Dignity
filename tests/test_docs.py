@@ -5,9 +5,13 @@ import dataclasses
 import importlib
 import json
 import re
+import shlex
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
+import yaml
 
 from core.config import DataConfig, EvalConfig, SyntheticConfig, TrainConfig
 
@@ -491,3 +495,97 @@ class TestDocReferences:
     def test_a_node_that_is_not_defined_in_its_file_is_reported(self):
         assert "fit" in _top_level_names(ROOT / "train/loop.py")
         assert "missing_name" not in _top_level_names(ROOT / "train/loop.py")
+
+
+FIXQ = ROOT / "tests" / "fixtures" / "docs_quickstart"
+QUICKSTART_FENCE_RE = re.compile(
+    r"^[ \t]*```bash quickstart[ \t]*\n(.*?)^[ \t]*```", re.DOTALL | re.MULTILINE
+)
+
+
+def quickstart_commands(md_text: str) -> list[str]:
+    """One command per logical line of every `bash quickstart` fence."""
+    commands = []
+    for block in QUICKSTART_FENCE_RE.findall(md_text):
+        joined = re.sub(r"\\[ \t]*\n", " ", block)
+        for line in joined.splitlines():
+            line = " ".join(line.split())
+            if line and not line.startswith("#"):
+                commands.append(line)
+    return commands
+
+
+def sandboxed_config(tmp: Path) -> Path:
+    """config/smoke.yaml with every output directory moved under tmp."""
+    cfg = yaml.safe_load((ROOT / "config" / "smoke.yaml").read_text())
+    cfg["train"]["checkpoint_dir"] = f"{tmp}/runs/smoke/train"
+    cfg["eval"]["out_dir"] = f"{tmp}/results"
+    cfg["eval"]["img_dir"] = f"{tmp}/img"
+    out = tmp / "smoke.yaml"
+    out.write_text(yaml.safe_dump(cfg))
+    return out
+
+
+def _git_status_paths() -> list[str]:
+    proc = subprocess.run(
+        ["git", "status", "--porcelain"],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    return proc.stdout.splitlines()
+
+
+def _sandboxed_argv(cmd: str, cfg: Path, tmp: Path) -> list[str]:
+    """Token-wise rewrite so a command only ever writes under tmp."""
+    argv = []
+    for token in shlex.split(cmd):
+        if token == "config/smoke.yaml":
+            token = str(cfg)
+        elif token.startswith("runs/"):
+            token = f"{tmp}/{token}"
+        elif token == "dignity_risk.onnx":
+            token = f"{tmp}/m.onnx"
+        argv.append(token)
+    if argv[0] == "python":
+        argv[0] = sys.executable
+    return argv
+
+
+class TestQuickstart:
+    def test_quickstart_extraction_reads_only_marked_fences(self):
+        assert quickstart_commands((FIXQ / "sample.md").read_text()) == [
+            "python -m train.cli --config config/smoke.yaml",
+            "python -m export.to_onnx --checkpoint runs/smoke/train/best.pt "
+            "--output dignity_risk.onnx",
+        ]
+
+    def test_sandboxed_config_moves_every_output_under_tmp(self, tmp_path):
+        cfg = yaml.safe_load(sandboxed_config(tmp_path).read_text())
+        for out in (
+            cfg["train"]["checkpoint_dir"],
+            cfg["eval"]["out_dir"],
+            cfg["eval"]["img_dir"],
+        ):
+            assert out.startswith(str(tmp_path))
+
+    @pytest.mark.slow
+    @pytest.mark.timeout(900)  # three subprocesses, each capped at 300 s
+    def test_readme_quickstart_runs_end_to_end_without_touching_committed_files(
+        self, tmp_path
+    ):
+        before = _git_status_paths()
+        cfg = sandboxed_config(tmp_path)
+        cmds = quickstart_commands((ROOT / "README.md").read_text())
+        assert cmds, "README has no `bash quickstart` fence"
+        for cmd in cmds:
+            proc = subprocess.run(
+                _sandboxed_argv(cmd, cfg, tmp_path),
+                cwd=ROOT,
+                capture_output=True,
+                text=True,
+                timeout=300,
+            )
+            assert proc.returncode == 0, f"{cmd}\n{proc.stderr[-2000:]}"
+        assert _git_status_paths() == before  # results/ and docs/img untouched

@@ -45,8 +45,8 @@ format that export no longer supports (DGNTY-3, DGNTY-35). No shipped config wri
 ## Commands
 
 ```bash
-# Tests (482 collected: test_core 65, test_data 118, test_models 23, test_privacy 42,
-# test_operator 4, test_docs 32, test_train 78, test_checkpoint 3, test_export 9,
+# Tests (485 collected: test_core 65, test_data 118, test_models 23, test_privacy 42,
+# test_operator 4, test_docs 35, test_train 78, test_checkpoint 3, test_export 9,
 # test_calibration 3, test_labels 7, test_gates 11, test_ci 4, test_eval 72,
 # test_colab_eval 11 — one skips without CUDA)
 # every test is limited to 300 s (pytest.ini; pytest-timeout)
@@ -181,9 +181,9 @@ a mechanism, it needs a test in `tests/test_privacy.py` or CI's 100% gate on tha
 
 ## Known breakage (do not "discover" these again — fix or leave, but don't be confused)
 
-- **`docs/` and `README.md` drift from the code easily.** `tests/test_docs.py` guards removed
-  claims and links to missing files, not stale examples. Trust the source, and when you touch a
-  documented symbol, fix the doc in the same change.
+- **`docs/` and `README.md` drift from the code easily.** `tests/test_docs.py` runs the README
+  quickstart and checks quoted numbers, symbols, paths and removed claims. Trust the source, and
+  when you touch a documented symbol, fix the doc in the same change.
 
 ## Conventions
 

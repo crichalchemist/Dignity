@@ -33,7 +33,22 @@ Dignity Core implements privacy-first sequence modeling:
 - ✅ **Comprehensive Tests**: 31 tests covering core utilities, data pipeline, and model components
 - ✅ **YAML Configuration**: Declarative configs for different tasks and environments
 
+## Quickstart
+
+Train the smoke preset, export it to ONNX and run the evaluation, on CPU and offline. The
+commands run from the repository root with the dependencies installed; `tests/test_docs.py`
+executes this block, so it cannot rot. Outputs stay under `runs/smoke/` (gitignored), apart from
+the ONNX file, which lands in the working directory.
+
+```bash quickstart
+python -m train.cli --config config/smoke.yaml
+python -m export.to_onnx --checkpoint runs/smoke/train/best.pt --output dignity_risk.onnx
+python -m eval.run --config config/smoke.yaml --seed tuning
+```
+
 ## Quick Start
+
+Superseded by the Quickstart section above.
 
 ### Installation
 
