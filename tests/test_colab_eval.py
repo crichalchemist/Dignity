@@ -14,7 +14,7 @@ RUNBOOK = (
     "SHA=$(git rev-parse HEAD)        # must already be pushed to origin\n"
     "SEED=tuning                      # M7 final run only: SEED=eval\n"
     "mkdir -p runs/colab\n"
-    "colab new -s dignity-eval --gpu T4\n"
+    "colab new -s dignity-eval --gpu L4\n"
     "colab exec -s dignity-eval -f scripts/colab_eval.py --timeout 43200 \\\n"
     '    --env DIGNITY_SHA="$SHA" --env DIGNITY_SEED="$SEED"\n'
     "colab download -s dignity-eval /content/dignity_results_$SEED.tar.gz "
