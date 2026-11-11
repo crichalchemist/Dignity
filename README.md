@@ -195,7 +195,7 @@ The core model implements a modular hybrid architecture:
 
 **Backbone** (`models/backbone/hybrid.py`):
 1. **CNN1D**: Multi-scale 1D convolution for local pattern extraction (~80 lines)
-2. **StackedLSTM**: Bidirectional LSTM for temporal dependencies (~100 lines)
+2. **StackedLSTM**: Unidirectional stacked LSTM for temporal dependencies (~100 lines)
 3. **AdditiveAttention**: Attention mechanism for feature weighting (~60 lines)
 
 **Task Heads** (`models/head/`):
@@ -269,12 +269,14 @@ Dignity/
 ├── export/                   # Deployment (1 module)
 │   └── to_onnx.py           # ONNX export with verification
 │
-├── config/                   # YAML configurations (5 files)
-│   ├── base.yaml            # Default configuration template
+├── config/                   # YAML configurations (9 files)
+│   ├── base.yaml            # Default configuration and key-by-key reference
 │   ├── train_risk.yaml      # Risk scoring optimized
 │   ├── train_forecast.yaml  # Early warning (forecast task)
 │   ├── train_policy.yaml    # Triage (allow / review / block)
-│   └── colab.yaml           # Google Colab optimized
+│   ├── colab.yaml           # Google Colab optimized
+│   ├── smoke.yaml           # CI-sized run
+│   └── synthetic_{easy,medium,hard}.yaml  # Difficulty presets
 │
 ├── tests/                    # Test suite (31 tests)
 │   ├── conftest.py          # Pytest fixtures
@@ -283,7 +285,7 @@ Dignity/
 │   └── test_models.py       # Model components (11 tests)
 │
 └── docs/                     # Documentation
-    ├── ARCHITECTURE.md      # Models, backbones, and heads
+    ├── ARCHITECTURE.md      # Data contract, pipeline, backbone, heads, training, export
     ├── PRIVACY.md           # Privacy stage and its guarantees
     ├── THREAT-MODEL.md      # Threat model and the tests that back it
     └── README.md            # Docs index
@@ -291,8 +293,8 @@ Dignity/
 
 **Package Stats:**
 - 28 Python modules (~2,800 lines of code)
-- 89 tests collected; 100% line coverage enforced on core/privacy.py in CI
-- 4 YAML configs for different tasks
+- Test suite under tests/; 100% line coverage enforced on core/privacy.py in CI
+- 9 YAML configs: tasks, presets and a smoke run
 - ~350K parameters (default model)
 
 ## Advanced Usage

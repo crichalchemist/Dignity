@@ -50,16 +50,18 @@ data:
 #     contamination: 0.3          # P(a block contains at least one anomaly)
 #     anomalies_per_block: [1, 3]  # inclusive range, drawn for anomalous blocks
 #     duration_range: [3, 60]     # rows per anomaly, inclusive
-#     severity_range: [0.3, 1.0]  # drawn per block; 0 is invisible, 1 the preset maximum
+#     severity_range: [0.3, 1.0]  # drawn per anomaly; 0 is invisible, 1 the preset maximum
 #     type_weights: {wash_trading: 1.0, pump_and_dump: 1.0, fee_spike: 1.0,
-#                    flash_crash: 1.0, layering: 1.0, fee_evasion: 1.0}
+#                    flash_crash: 1.0, layering: 1.0, fee_evasion: 1.0}  # relative weights of each anomaly's type draw; only these six names (else ValueError when generating)
 #     benign_spike_rate: 0.0      # P(a normal block gets an unlabelled burst)
 #     label_noise: 0.0            # P(a block's label is flipped)
 #     regime_switch_prob: 0.0     # per-row P(the Markov regime changes)
 #     seed: 42                    # generator and block-split seed; eval.run overwrites it from eval.<seed>_seed
 
-# Training loop (train/loop.py fit). Every run writes best.pt, last.pt and
-# history.json under checkpoint_dir.
+# Training loop (train/loop.py fit). A run writes best.pt (once the val metric has
+# improved; a run that never improves raises RuntimeError), last.pt and history.json
+# into its run directory: dignity-train uses checkpoint_dir itself, eval.run and the
+# privacy sweep nest per seed and task under it.
 train:
   epochs: 50  # maximum epochs; the cosine schedule is stretched over exactly this many
   lr: 0.0003  # AdamW learning rate at epoch 1, cosine-decayed towards 0 at the last epoch
@@ -81,7 +83,7 @@ eval:
   eval_seed: 2026  # data seed of `--seed eval`; frozen, the final reported run only, never tune on it
   n_train_seeds: 3  # models trained per task; training seed k is the top-level seed + k
   n_bootstrap: 1000  # bootstrap resamples (of blocks, not windows) for every confidence interval
-  epsilons: [0.1, 0.3, 1.0, 3.0, 10.0, 30.0, 100.0]  # epsilon grid of --privacy-sweep (one risk model per value)
+  epsilons: [0.1, 0.3, 1.0, 3.0, 10.0, 30.0, 100.0]  # epsilon grid of --privacy-sweep (n_train_seeds risk models per value, plus a no-privacy reference)
   out_dir: results/v1.0  # where risk.json, forecast.json, policy.json (and privacy.json) are written
   img_dir: docs/img  # where the charts are written
 
@@ -102,7 +104,8 @@ policy:
 # transform: log1p they are in log1p units. Two more keys are not in the example:
 # deterministic_rng: true is the seeded experiment mode (reproducible, NOT DP-grade
 # randomness, default false), and key_env names an environment variable holding
-# the HMAC key (it must be set when named; only pseudonymize() reads the key).
+# the HMAC key (it must be set, and at least 16 bytes, when named; no pipeline stage
+# calls pseudonymize(), so the key only matters to code that does).
 # privacy:
 #   epsilon_total: 1.0
 #   k: 5

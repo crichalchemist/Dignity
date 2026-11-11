@@ -16,10 +16,11 @@ SplitData(train, val, test)          WindowSet: X [N, T, F] plus every label
 Dignity(task=...)                    DignityBackbone -> context [B, H], attn [B, T]
         |                            + RiskHead | ForecastHead | PolicyHead
         v
-train.loop.fit  ->  best.pt  ->  eval.run (results, charts)  ->  export.to_onnx
+train.loop.fit  ->  best.pt  ->  export.to_onnx
+eval.run (calls fit once per training seed)  ->  results, charts
 ```
 
-Every sentence below names the symbol or the test that carries it. For metric values
+Each section names the symbols and tests that carry its claims. For metric values
 see [RESULTS.md](RESULTS.md); this document quotes none. For the privacy stage see
 [PRIVACY.md](PRIVACY.md) and [THREAT-MODEL.md](THREAT-MODEL.md).
 
@@ -27,7 +28,7 @@ see [RESULTS.md](RESULTS.md); this document quotes none. For the privacy stage s
 
 `data.source` is `synthetic` only in v1.0: `DataConfig` rejects anything else at load
 (`tests/test_core.py::TestDignityConfig::test_unsupported_data_source_is_rejected_not_silently_synthetic`).
-`CryptoSource` in `data/source/crypto.py` is present but unsupported until v1.1.
+`CryptoSource` in `data/source/crypto.py` is present but unsupported until v1.1 (DGNTY-41).
 
 `data/source/synthetic.py::SyntheticGenerator.generate` returns an event record with
 exactly these columns. Every block is an independent normal process
@@ -44,23 +45,27 @@ receives typed anomalies at random onsets.
 | `block_id` | int64 | Which contiguous block the row belongs to; the unit of the train/val/test split. |
 | `is_anomalous` | bool | True on every row inside an injected anomaly. |
 | `anomaly_type` | str (object under pandas 2) | The anomaly's type on anomalous rows, `none` elsewhere. |
-| `anomaly_id` | int64 | Counter of injected anomalies, `-1` on normal rows. Back-to-back anomalies get different ids. |
+| `anomaly_id` | int64 | Counter of injected anomalies, `-1` on normal rows. Every anomaly gets its own id, so back-to-back anomalies stay distinct (`tests/test_labels.py::TestWindowLabels::test_back_to_back_anomalies_count_as_a_new_onset`). |
 | `block_label` | int8 | 1 when the block holds an anomaly, flipped with probability `data.synthetic.label_noise`. Only the block-level baseline trains on it. |
 
-`fee_rate` and `tx_count` are only plausibility-checked against public data, not
-calibrated (see [RESULTS.md](RESULTS.md)).
+`fee_rate` and `tx_count` are not calibrated against public data. They are only kept
+plausible: `fee_rate` has a spread, and `tx_count` tracks volume within a block and is
+overdispersed (`tests/test_data.py::TestNormalProcessPlausibility`).
 
 `data.source.anomalies.ANOMALY_TYPES` holds six types. Each injector edits only
-`volume`, `price`, `fee_rate` and `tx_count`; `severity` scales the effect.
+`volume`, `price`, `fee_rate` and `tx_count`, and the drawn severity scales the effect.
+The second column lists the columns a type changes at full severity and the direction
+each moves over the span; `tests/test_data.py::TestAnomalyInjectors` runs the injectors,
+and so does the test that checks this table against them.
 
-| Type | Mechanism |
-| --- | --- |
-| `wash_trading` | Volume and transaction count inflate while the price moves less than normal. |
-| `pump_and_dump` | A volume ramp with a price rise over the first part of the span, then a sharper fall. |
-| `fee_spike` | `fee_rate` is multiplied up and `tx_count` rises a little; price and volume stay normal. |
-| `flash_crash` | One sharp price drop on the first row with a volume burst, then a partial recovery. |
-| `layering` | Every fourth row gets an added volume spike. |
-| `fee_evasion` | `fee_rate` is cut towards zero while volume rises. |
+| Type | Changes | Mechanism |
+| --- | --- | --- |
+| `wash_trading` | `volume` up, `tx_count` up, `price` damped | Volume and transaction count inflate while the price moves less than normal. |
+| `pump_and_dump` | `volume` up, `price` rises then falls | A volume ramp with a price rise over the first part of the span, then a sharper fall. |
+| `fee_spike` | `fee_rate` up, `tx_count` up | `fee_rate` is multiplied by up to 10 and `tx_count` by up to 2; price and volume stay normal. |
+| `flash_crash` | `volume` up, `price` drops then recovers partly | One sharp price drop on the first row, where volume peaks; volume stays raised for the rest of the span while the price partly recovers. |
+| `layering` | `volume` up | Every fourth row gets an added volume spike. |
+| `fee_evasion` | `fee_rate` down, `volume` up | `fee_rate` is cut towards zero while volume rises. |
 
 `benign_spike_rate` adds a look-alike burst to normal blocks without any label
 (`data/source/anomalies.py::inject_benign_spike`). `anomalies_per_block`,
@@ -116,9 +121,9 @@ and the generator's normal process must land inside the bands
 `data/pipeline.py::TransactionPipeline.process_blocks` turns the event record into a
 `SplitData`. The order of operations is fixed:
 
-1. **Block shuffle and split.** Blocks are shuffled with the generator seed and split
-   by `data.split` (train, val, test fractions), so no block, and no window, straddles
-   two splits (`tests/test_data.py::TestSequenceAwareSplit::test_every_block_lands_in_exactly_one_split`,
+1. **Block shuffle and split.** Blocks are shuffled with the generator seed. Val and
+   test each get `round(n * fraction)` blocks of `data.split` (at least one) and train
+   gets the rest, so no block, and no window, straddles two splits (`tests/test_data.py::TestSequenceAwareSplit::test_every_block_lands_in_exactly_one_split`,
    `tests/test_data.py::TestSequenceAwareSplit::test_windows_never_span_two_blocks`).
    It needs at least three blocks and every block at least `seq_len + horizon` rows.
 2. **Privacy release per split.** With a `privacy:` block, each split is its own
@@ -127,7 +132,8 @@ and the generator's normal process must land inside the bands
    `SplitData.epsilon_spent` reports the spend per split. A pipeline releases once; a
    second `process_blocks`, `fit` or `transform` raises `BudgetExhausted`
    (`tests/test_data.py::TestSequenceAwareSplit::test_each_split_spends_its_own_full_budget`,
-   `tests/test_data.py::TestSequenceAwareSplit::test_no_further_release_after_process_blocks`).
+   `tests/test_data.py::TestSequenceAwareSplit::test_no_further_release_after_process_blocks`,
+   `tests/test_data.py::TestSequenceAwareSplit::test_a_pipeline_never_releases_twice_on_any_pair_of_paths`).
    Without a block no stage runs.
 3. **Signals per block.** `TransactionPipeline.compute_signals` derives the four
    signals below inside each block, from the released columns, so nothing crosses a
@@ -145,12 +151,16 @@ and the generator's normal process must land inside the bands
 `[N, T, F]` float32 and the labels `y_risk`, `y_forecast`, `forecast_mask`, plus the
 bookkeeping `block_index`, `onset_offset`, `end_row` and `anomaly_type` (the dominant
 type in the window, or `none`) that the evaluation needs. `train/loop.py::prepare_data`
-is the one place that builds all of it from a config; the CLI, the notebook and
-`eval.run` all call it.
+builds the model's `SplitData` from a config; the CLI, the notebook, `eval.run` and the
+privacy sweep call it. The data gate (`eval/gates.py::_score_preset`) and the window
+baseline of `eval.run` build a second, raw-column split by calling `process_blocks`
+directly: its features are the generator's raw columns, it has no privacy stage, and
+it uses the same seed and split fractions.
 
 ## Signals
 
-`core/signals.py::SignalProcessor` is an all-static class: its functions take arrays.
+`core/signals.py::SignalProcessor` holds no state: its static functions take arrays
+(`process_sequence` is a classmethod that combines them).
 `data.pipeline.SIGNAL_SOURCES` lists the four signals the pipeline derives and the
 raw column each reads. They are applied per block, and the first rows of every block
 are the warm-up.
@@ -165,7 +175,8 @@ are the warm-up.
 **Configured features that are not produced are dropped.** `TransactionPipeline`
 keeps only the names in `data.features` that are columns after `compute_signals`,
 in the configured order, and stores them as `available_features`. `price_change`,
-`regime` and `entropy` are in the default list but are never derived, so they vanish.
+`regime` and `entropy` are in the `DataConfig` default list (`config/base.yaml` names
+the first two) but are never derived, so they vanish.
 `train/loop.py::fit` sizes the model from `SplitData.feature_names`, so
 `model.input_size` in YAML is ignored; if a model's input width surprises you, check
 `available_features` first. `SignalProcessor` also defines `entropy`,
@@ -174,14 +185,17 @@ in the configured order, and stores them as `available_features`. `price_change`
 ## Backbone
 
 `models/backbone/hybrid.py::DignityBackbone` maps `x [B, T, F]` to
-`(context [B, H], attn_weights [B, T])` with `H = model.hidden_size`:
+`(context [B, H], attn_weights [B, T])` with `H = model.hidden_size`, for an odd
+`model.cnn_kernel_size` (every shipped config). An even kernel adds one step per
+convolution, so `attn_weights` is `[B, T+2]`:
 
 1. `CNN1D`: two convolution layers of kernel `model.cnn_kernel_size` over time,
-   `[B, T, F] -> [B, T, H]`.
+   `[B, T, F] -> [B, T, H]` for an odd kernel.
 2. `StackedLSTM`: `model.n_layers` unidirectional layers, `[B, T, H] -> [B, T, H]`.
 3. `AdditiveAttention`: weights over the T steps and their weighted sum, the context.
 
-`model.dropout` applies inside the CNN and the LSTM and again after the LSTM.
+`model.dropout` applies inside the CNN, between LSTM layers (only when
+`model.n_layers > 1`), after the LSTM and inside the head.
 `tests/test_models.py::TestBackboneComponents::test_dignity_backbone` pins the shapes.
 
 ## Heads
@@ -193,7 +207,7 @@ the backbone with one head, and `Dignity.forward` returns
 | Task | Head | `predictions` | Training loss |
 | --- | --- | --- | --- |
 | `risk` | `models/head/risk.py::RiskHead` | Sigmoid probabilities `[B, 1]` | `train/losses.py::risk_loss`: binary cross-entropy with `train.pos_weight` (default: train negatives over positives) |
-| `forecast` | `models/head/forecast.py::ForecastHead` | Onset probabilities `[B, horizon]`, `P(onset within h rows)` for h = 1..H, never decreasing in h by construction | `train/losses.py::forecast_loss`: masked per-horizon binary cross-entropy |
+| `forecast` | `models/head/forecast.py::ForecastHead` | Onset probabilities `[B, horizon]`, `P(onset within h rows)` for h = 1..H, never decreasing in h by construction | `train/losses.py::forecast_loss`: masked per-horizon binary cross-entropy with `train.pos_weight` (default: negatives over positives among the unmasked train labels) |
 | `policy` | `models/head/policy.py::PolicyHead` | Logits `[B, 3]` over `models.head.policy.ACTIONS` = `allow`, `review`, `block` | `train/losses.py::expected_cost_loss`: softmax-weighted cost table |
 
 Pinned by `tests/test_models.py::TestTaskHeads::test_forecast_probabilities_never_decrease_with_horizon`
@@ -219,7 +233,7 @@ all call it. It returns a `train.loop.FitResult`: `best_path`, `history`,
 - **Optimizer.** AdamW with a cosine schedule over `train.epochs`; gradient clipping
   at `train.gradient_clip`. `train.use_amp` only takes effect on CUDA.
 - **AMP and the risk loss.** The risk head ends in a sigmoid and the loss is
-  `BCELoss`, which PyTorch refuses inside autocast, so `train/engine.py::train_epoch`
+  binary cross-entropy on probabilities, which PyTorch refuses inside autocast, so `train/engine.py::train_epoch`
   computes the loss outside autocast in float32. A CPU run proves nothing about this;
   `tests/test_train.py::TestTrainEpoch::test_amp_risk_training_runs_on_gpu` covers it
   and skips without CUDA.
@@ -233,50 +247,65 @@ all call it. It returns a `train.loop.FitResult`: `best_path`, `history`,
 - **Chance guard.** At `train.guard_epochs`, if validation AUROC is below
   `train.chance_guard_auroc`, `fit` warns with `train.loop.ChanceGuardWarning`
   (`tests/test_train.py::TestFit::test_chance_guard_warns_once_when_val_auroc_stays_below_floor`).
-  Forecast reads the last horizon; policy has no AUROC.
+  Forecast reads the last horizon; policy has no AUROC. No warning is raised when
+  `train.chance_guard_auroc` is null, when the run ends before `train.guard_epochs`, or
+  (forecast) when the last horizon's validation column holds one class.
 - **Early stopping.** After `train.patience` epochs without improvement `fit` stops;
   `None` disables it
   (`tests/test_train.py::TestFit::test_early_stopping_halts_after_patience_epochs_without_improvement`).
   `last.pt` is written every `train.save_interval` epochs and on the final or stopping
   epoch. `--resume` restores the model, optimizer and grad-scaler state; resuming across
   selection metrics raises `ValueError`.
-- **Warm start.** Policy trained cold stalls at "review everything", so
-  `train.init_backbone_from` points at a risk `best.pt`.
+- **Warm start.** The shipped policy config sets `train.init_backbone_from` to a risk
+  `best.pt`; the key is read only for `task: policy` and is skipped on `--resume`.
   `train/loop.py::load_backbone` copies only the `backbone.*` tensors and raises
-  `ValueError` when the features, the scaler, the privacy block, the data block or any
-  tensor shape differs
-  (`tests/test_train.py::TestLoadBackbone::test_warm_start_copies_the_risk_backbone_and_leaves_the_head_alone`).
+  `ValueError` when the features, the scaler, the privacy block, the data block, the
+  set of backbone tensors or any tensor shape differs. Without a `privacy:` block any
+  difference in the scaler raises; under one the scaler may differ by up to 25% of the
+  run's scale, because system-mode noise is unseeded
+  (`tests/test_train.py::TestLoadBackbone::test_warm_start_copies_the_risk_backbone_and_leaves_the_head_alone`;
+  the refusals are `tests/test_train.py::TestLoadBackbone`).
 
 `python -m eval.run` (`eval/run.py::main`) trains through `fit`, scores the test split
 and writes the results. The test split is for reporting; checkpoint selection, the
-alarm threshold and the baseline policy's thresholds all use validation.
+forecast alarm threshold and the baseline policy's thresholds all use validation.
 
 | Flag | Meaning |
 | --- | --- |
 | `--config PATH` or `--smoke` | A full run of a config, or the CI-sized `config/smoke.yaml`. Exactly one is required. |
 | `--seed tuning` or `--seed eval` | Which `eval` seed drives the generator. `--smoke` never runs on the evaluation seed. |
 | `--tasks risk,forecast,policy` | The default. Unknown names exit 2. Forecast and policy also fit risk, because their baseline is today's risk score and each policy seed warm-starts from the same seed's risk model, but the risk result file is written only when `risk` is in `--tasks`. |
-| `--privacy-sweep` | Also trains risk at each `eval.epsilons` value on the privacy template `config/train_risk.yaml` and writes the privacy-versus-utility results and curve. |
+| `--privacy-sweep` | Also trains risk with this run's config at each `eval.epsilons` value, taking the privacy block and the features of `config/train_risk.yaml`, with its Laplace epsilons rescaled to that total, public bounds and seeded noise (`privacy.deterministic_rng`, not DP-grade). Trains a non-private reference per replicate, then writes the privacy results and the curve (`docs/img/privacy_curve.png` by default). |
 
-Each result file has the keys `config_hash`, `seed`, `git_sha`, `metrics` and
+Each result file `eval.run` writes (risk, forecast, policy and, with
+`--privacy-sweep`, privacy) has the keys `config_hash`, `seed`, `git_sha`, `metrics` and
 `baselines`, in `eval.out_dir`; charts go to `eval.img_dir`. The headline model is the
-first of `eval.n_train_seeds` training seeds; `seed_spread` reports every training seed, the headline included.
+first of `eval.n_train_seeds` training seeds. The risk, forecast and policy files carry
+`metrics.seed_spread` over every training seed, the headline included; the privacy file
+carries `replicate_spread` per epsilon and `seed_spread` for its reference.
 Confidence intervals bootstrap whole blocks, never single windows, because windows of
 one block overlap (`eval/metrics.py::bootstrap_ci`, DGNTY-21).
 
 | Task | Metrics (`eval/metrics.py`) | Baselines (`eval/baselines.py`) |
 | --- | --- | --- |
-| Risk | `risk_metrics`: AUROC, PR-AUC, recall at 1% false-positive rate, Brier score, prevalence, recall per anomaly type; also scored per block, a block's score being its highest window score | `majority`; `window_logistic` on the raw columns' window statistics; `block_tree` on per-block statistics, trained on the noisy `block_label` |
+| Risk | `risk_metrics`: AUROC, PR-AUC, recall at 1% false-positive rate, Brier score, prevalence, recall per anomaly type at the test split's 1%-false-positive point; also scored per block, a block's score being its highest window score | `majority`; `window_logistic` on the raw columns' window statistics; `block_tree` on per-block statistics, trained on the noisy `block_label` |
 | Forecast | `forecast_metrics`: PR-AUC per horizon on unmasked windows; `lead_times`: rows between the first alarm and each onset | `risk_score_forecast`: today's risk score used at every horizon |
 | Policy | `policy_metrics`: expected cost, review rate, block rate, anomaly recall, false-block rate | `threshold_policy`: two thresholds on the risk score, tuned on validation under the review budget |
+
+`metrics.model_gate` in the risk file (`eval/metrics.py::model_gate`) holds a window gate,
+which compares the model's PR-AUC with `majority` and `window_logistic`, and a block
+gate, which compares the block-level PR-AUC with `block_tree`. A gate passes when the
+model's PR-AUC and its confidence interval's lower bound both exceed the best
+baseline's PR-AUC, and `model_gate` passes when both gates do.
 
 ## Checkpoint and export
 
 `train/checkpoint.py` writes self-describing checkpoints: a plain dict readable with
 `torch.load(weights_only=True)` holding `model_state`, `optimizer_state`,
-`grad_scaler_state`, `meta`, `epoch`, `metrics` and `best_metric`. `meta` is a
-`train.checkpoint.CheckpointMeta` with `format_version`, `task`, `input_size`,
-`feature_names`, `head_kwargs`, `scaler_center`, `scaler_scale` and the whole `config`
+`grad_scaler_state`, `meta`, `epoch`, `metrics` and `best_metric`. `meta` is stored as
+a plain dict of the fields of `train.checkpoint.CheckpointMeta`: `format_version`,
+`task`, `input_size`, `feature_names`, `head_kwargs`, `scaler_center`, `scaler_scale`
+and `config` (the whole run config); `load_checkpoint` returns it as a `CheckpointMeta`
 (`tests/test_checkpoint.py::TestCheckpoint::test_checkpoint_alone_rebuilds_an_identical_model`).
 `train.checkpoint.FORMAT_VERSION` is 2. `build_model_from_meta` rebuilds the model
 from `meta` alone.
@@ -289,20 +318,29 @@ raises
 `export/to_onnx.py` exports and verifies:
 
 - `export_to_onnx` writes opset 13 with input `input` `[batch, sequence, features]`
-  and outputs `predictions` and `attention_weights`; the batch and sequence axes are
-  dynamic. The traced shape is `(1, data.seq_len, input_size)` from the checkpoint.
+  and outputs `predictions` and `attention_weights`; the batch axis of every tensor and
+  the sequence axis of the input and `attention_weights` are dynamic.
 - `verify_onnx_export` runs the ONNX model and compares predictions and attention
   weights with PyTorch.
-- `export.to_onnx.main` (`dignity-export`) returns 0 on success, 1 when verification
+- `export.to_onnx.main` (`dignity-export`) traces at `(1, data.seq_len, input_size)`
+  from the checkpoint. It returns 0 on success, 1 when verification
   fails and 3 for an unsupported checkpoint, with the message on stderr
   (`tests/test_export.py::TestExportCli::test_failed_verification_exits_nonzero`,
   `tests/test_export.py::TestExportCli::test_pre_v1_checkpoint_exits_3_with_a_clear_message`).
 
-The ONNX model consumes **scaled, already-released windows**: the caller computes the
-signals, then applies `meta.scaler_center` and `meta.scaler_scale` to the columns in
-`meta.feature_names` order. **v1.0 has no
-inference-time privacy release** (DGNTY-27): the privacy stage runs only in the
-pipeline's training-time paths (`process_blocks`, `fit`, `transform`), and nothing in
+The ONNX model consumes scaled windows of the pipeline's released inputs, in the
+pipeline's order: privacy release, then signals, then
+`(x - meta.scaler_center) / meta.scaler_scale` over the columns in
+`meta.feature_names` order. A checkpoint trained without a `privacy:` block therefore
+needs only the signals and the scaler. A checkpoint trained under a `privacy:` block
+(both shipped privacy configs) was fitted to released inputs: with `transform: log1p`,
+`volume` is in log1p units, clipped to the block's `bounds` and then noised, and the
+scaler's centre and scale are in those units. The `generalize` columns were binned with
+classes fitted on the train split, and the checkpoint does not store them. So that
+release cannot be reproduced from the checkpoint, and v1.0 ships no way to prepare new
+private inputs for an exported model. **v1.0 has no inference-time privacy release**
+(DGNTY-27): the privacy stage runs only in the pipeline's training-time paths
+(`process_blocks`, `fit`, `transform`, `fit_transform` and `process`), and nothing in
 the export path adds noise to or generalizes a live input. The risk and forecast
 models emit probabilities; the policy model emits logits, so a consumer applies a
 softmax and then `models.head.policy.decide_actions`.
