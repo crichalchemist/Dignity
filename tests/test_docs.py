@@ -193,13 +193,19 @@ class TestDocs:
         assert not all(a["ci_low"] <= 0.5 <= a["ci_high"] for a in aurocs)
 
 
-FENCE_RE = re.compile(r"^[ \t]*```.*?^[ \t]*```", re.DOTALL | re.MULTILINE)
+FENCE_RE = re.compile(r"^[ \t]*(```|~~~).*?^[ \t]*\1", re.DOTALL | re.MULTILINE)
 FIX = ROOT / "tests" / "fixtures" / "docs_numbers"
 FIXR = ROOT / "tests" / "fixtures" / "docs_refs"
 RESULTS_DIR = ROOT / "results" / "v1.0"
 NUM_RE = re.compile(r"([^\s>]+)\s*<!--num (\S+?)\.json (\S+) (\S+?)-->")
 NUM_OPEN_RE = re.compile(r"<!--\s*num\b")
 ZONE_TAG_RE = re.compile(r"<!--results-(start|end)-->")
+# Anything that looks like a zone tag or the provisional tag; only the three exact
+# spellings are tags, the rest would be skipped silently.
+TAG_LIKE_RE = re.compile(
+    r"<!--\s*(?:results-(?:start|end)|provisional)\b", re.IGNORECASE
+)
+EXACT_TAGS = ("<!--results-start-->", "<!--results-end-->", "<!--provisional-->")
 NUMERIC_RE = re.compile(r"[+-]?\d+(?:,\d{3})*(?:\.\d+)?(?:[eE][+-]?\d+)?%?")
 # A backticked span that is only a number: signed, with separators, a decimal
 # point, an exponent or a percent sign. Labels and paths that merely contain
@@ -339,6 +345,14 @@ def check_numbers(md_path: Path, results_dir: Path) -> list[str]:
                 "outside code"
             )
 
+    for like in TAG_LIKE_RE.finditer(live):
+        if not live.startswith(EXACT_TAGS, like.start()):
+            problems.append(
+                f"{md_path.name}:{line_of(like.start())}: malformed zone tag, "
+                "write exactly <!--results-start-->, <!--results-end--> or "
+                "<!--provisional-->"
+            )
+
     zones = []
     opened = None
     for tag in ZONE_TAG_RE.finditer(live):
@@ -409,10 +423,10 @@ def run_identity_problems(results_dir: Path = RESULTS_DIR) -> list[str]:
     }
     problems = []
     for key in ("seed", "git_sha", "config_hash"):
-        values = {name: payload.get(key) for name, payload in payloads.items()}
+        values = {name: payload[key] for name, payload in payloads.items()}
         if len(set(values.values())) != 1:
             problems.append(f"{key} differs between results files: {values}")
-    seed = payloads["risk"].get("seed")
+    seed = payloads["risk"]["seed"]
     if seed not in (EvalConfig().tuning_seed, EvalConfig().eval_seed):
         problems.append(f"seed {seed} is neither the tuning nor the evaluation seed")
     return problems
@@ -603,12 +617,78 @@ class TestCodeIsInert:
         msgs = check_numbers(_doc(tmp_path, text), FIX)
         assert len(msgs) == 1 and "unmarked number 7" in msgs[0], msgs
 
+    @pytest.mark.parametrize("fence", ["```", "~~~"])
+    def test_prose_between_two_fenced_blocks_is_still_checked(self, tmp_path, fence):
+        # A greedy fence pattern read everything from the first fence to the last
+        # as one block, so a stale number and a zone number between them went
+        # unchecked.
+        block = f"{fence}\ncode\n{fence}\n"
+        text = block + f"0.85 {MARK_PR}\n" + _zone("| 3 |") + block
+        msgs = check_numbers(_doc(tmp_path, text), FIX)
+        assert len(msgs) == 2, msgs
+        assert "quoted 0.85 but results.json gives 0.84" in msgs[0], msgs
+        assert "unmarked number 3" in msgs[1], msgs
+
+    def test_a_marker_and_a_zone_tag_in_a_tilde_fence_are_documentation(self, tmp_path):
+        text = (
+            "~~~\n0.99 <!--num nowhere.json x.y .2f-->\n<!--results-start-->\n~~~\n"
+            "Prose with 12 in it.\n"
+        )
+        assert check_numbers(_doc(tmp_path, text), FIX) == []
+
+    @pytest.mark.parametrize("outer, inner", [("~~~", "```"), ("```", "~~~")])
+    def test_a_fence_is_closed_only_by_its_own_kind_of_fence(
+        self, tmp_path, outer, inner
+    ):
+        text = f"{outer}\n{inner}\n{outer}\n0.85 {MARK_PR}\n"
+        msgs = check_numbers(_doc(tmp_path, text), FIX)
+        assert len(msgs) == 1 and "quoted 0.85" in msgs[0], msgs
+
+    @pytest.mark.parametrize(
+        "tag",
+        [
+            "<!-- results-start -->",
+            "<!--results-start -->",
+            "<!--results-end  -->",
+            "<!--Results-End-->",
+            "<!-- provisional -->",
+            "<!--provisional -->",
+            "<!--PROVISIONAL-->",
+        ],
+    )
+    def test_a_tag_that_looks_like_a_zone_or_provisional_tag_is_reported(
+        self, tmp_path, tag
+    ):
+        msgs = check_numbers(_doc(tmp_path, f"intro\n{tag}\n"), FIX)
+        assert len(msgs) == 1 and "malformed zone tag" in msgs[0], msgs
+        assert msgs[0].startswith("doc.md:2:"), msgs
+
+    def test_a_spaced_zone_tag_does_not_leave_its_numbers_unchecked(self, tmp_path):
+        text = "<!-- results-start -->| 3 |<!--results-end-->\n"
+        msgs = check_numbers(_doc(tmp_path, text), FIX)
+        assert any("malformed zone tag" in m for m in msgs), msgs
+
+    def test_a_spaced_tag_in_code_is_documentation(self, tmp_path):
+        text = "Write `<!-- results-start -->` or\n```\n<!-- provisional -->\n```\n"
+        assert check_numbers(_doc(tmp_path, text), FIX) == []
+
+    def test_the_exact_tags_are_not_reported_as_malformed(self, tmp_path):
+        text = f"<!--provisional-->{_zone(f'0.84 {MARK_PR}')}"
+        assert check_numbers(_doc(tmp_path, text), FIX) == []
+
 
 class TestBacktickedNumbers:
     @pytest.mark.parametrize(
         "span", ["0.99", "-0.5", "+3", "1,000", "1e-3", "12%", ".5", "2026"]
     )
     def test_a_backticked_number_in_a_zone_is_an_unmarked_number(self, tmp_path, span):
+        msgs = check_numbers(_doc(tmp_path, _zone(f"| PR-AUC | `{span}` |")), FIX)
+        assert len(msgs) == 1 and "unmarked number" in msgs[0], msgs
+
+    @pytest.mark.parametrize("span", [" 0.99 ", "  12%", "-0.5\t", " 2026 "])
+    def test_a_padded_backticked_number_in_a_zone_is_an_unmarked_number(
+        self, tmp_path, span
+    ):
         msgs = check_numbers(_doc(tmp_path, _zone(f"| PR-AUC | `{span}` |")), FIX)
         assert len(msgs) == 1 and "unmarked number" in msgs[0], msgs
 
@@ -661,6 +741,21 @@ class TestZones:
         msgs = check_numbers(_doc(tmp_path, _zone(f"| {cell} |")), FIX)
         assert len(msgs) == 1, msgs
         assert msgs[0].endswith(f"unmarked number {quoted} in a results zone")
+
+    @pytest.mark.parametrize(
+        "body, quoted",
+        [("3 glued to the start tag", "3"), ("glued to the end tag 45", "45")],
+    )
+    def test_a_number_glued_to_a_zone_tag_is_inside_the_zone(
+        self, tmp_path, body, quoted
+    ):
+        msgs = check_numbers(_doc(tmp_path, _zone(body)), FIX)
+        assert len(msgs) == 1, msgs
+        assert msgs[0].endswith(f"unmarked number {quoted} in a results zone"), msgs
+
+    def test_a_one_character_zone_is_scanned_from_both_edges(self, tmp_path):
+        msgs = check_numbers(_doc(tmp_path, _zone("7")), FIX)
+        assert len(msgs) == 1 and "unmarked number 7" in msgs[0], msgs
 
     def test_a_multi_line_comment_in_a_zone_hides_its_digits(self, tmp_path):
         text = _zone(f"<!-- a note\nspanning 7 lines -->0.84 {MARK_PR}")
@@ -727,6 +822,37 @@ class TestMarkerValues:
         assert any("malformed marker" in m for m in msgs), msgs
 
 
+class TestSeveralResultsFiles:
+    @staticmethod
+    def _results(tmp_path):
+        results = tmp_path / "res"
+        results.mkdir()
+        (results / "risk.json").write_text('{"metrics": {"pr_auc": 0.84}}')
+        (results / "policy.json").write_text('{"metrics": {"neg_cost": -12.5}}')
+        return results
+
+    GOOD = (
+        "0.84 <!--num risk.json metrics.pr_auc .2f--> and "
+        "-12.5 <!--num policy.json metrics.neg_cost .1f-->\n"
+        "0.84 <!--num risk.json metrics.pr_auc .2f-->\n"
+    )
+
+    def test_a_doc_quoting_numbers_from_two_results_files_is_checked_against_each(
+        self, tmp_path
+    ):
+        results = self._results(tmp_path)
+        assert check_numbers(_doc(tmp_path, self.GOOD), results) == []
+
+    def test_a_stale_number_from_the_second_file_is_reported_with_its_file(
+        self, tmp_path
+    ):
+        results = self._results(tmp_path)
+        stale = self.GOOD.replace("-12.5", "-12.6")
+        msgs = check_numbers(_doc(tmp_path, stale), results)
+        assert len(msgs) == 1, msgs
+        assert "quoted -12.6 but policy.json gives -12.5" in msgs[0], msgs
+
+
 class TestEveryPublicDocIsChecked:
     def test_every_public_doc_quotes_numbers_that_equal_the_committed_results(self):
         assert (ROOT / "README.md").exists() and (ROOT / "docs/RESULTS.md").exists()
@@ -790,14 +916,33 @@ class TestResultsComeFromOneRun:
         assert run_identity_problems() == []
 
     @pytest.mark.parametrize("key", ["seed", "git_sha", "config_hash"])
-    def test_a_results_file_from_another_run_is_reported(self, tmp_path, key):
+    @pytest.mark.parametrize("stale", ["risk", "forecast", "policy", "privacy"])
+    def test_a_results_file_from_another_run_is_reported_whichever_file_it_is(
+        self, tmp_path, stale, key
+    ):
+        # The other value is derived from the committed one, so the case stays a
+        # difference when the release regenerates every file on the evaluation seed.
+        other = None
         for name in ("risk", "forecast", "policy", "privacy"):
             payload = json.loads((RESULTS_DIR / f"{name}.json").read_text())
-            if name == "privacy":
-                payload[key] = 2026 if key == "seed" else "other"
+            if name == stale:
+                other = payload[key] + 1 if key == "seed" else f"{payload[key]}-other"
+                payload[key] = other
             (tmp_path / f"{name}.json").write_text(json.dumps(payload))
         problems = run_identity_problems(tmp_path)
-        assert any(key in p and "differs" in p for p in problems), problems
+        assert any(
+            key in p and "differs" in p and f"'{stale}': {other!r}" in p
+            for p in problems
+        ), problems
+
+    @pytest.mark.parametrize("key", ["seed", "git_sha", "config_hash"])
+    def test_a_key_missing_from_every_results_file_fails_loudly(self, tmp_path, key):
+        for name in ("risk", "forecast", "policy", "privacy"):
+            payload = json.loads((RESULTS_DIR / f"{name}.json").read_text())
+            del payload[key]
+            (tmp_path / f"{name}.json").write_text(json.dumps(payload))
+        with pytest.raises(KeyError, match=key):
+            run_identity_problems(tmp_path)
 
     def test_a_seed_that_is_neither_frozen_seed_is_reported(self, tmp_path):
         for name in ("risk", "forecast", "policy", "privacy"):
@@ -943,13 +1088,21 @@ def missing_symbols(docs=None) -> list[str]:
     return missing
 
 
+def _leaves_repo(ref: str) -> bool:
+    """An absolute path, or one that climbs above the repo root."""
+    return os.path.isabs(ref) or os.path.normpath(ref).split(os.sep)[0] == ".."
+
+
 def missing_paths(docs=None) -> list[str]:
-    """Every repo path a doc names that does not exist (default: public docs)."""
+    """Every repo path a doc names that does not exist (default: public docs).
+    Public docs name repo-relative paths only, so a path that leaves the repo is
+    missing whether or not it exists on this machine."""
     return [
         f"{_label(p)}: {ref}"
         for p in (_public_docs() if docs is None else docs)
         for ref in doc_paths(p.read_text())
-        if not ref.startswith(ALLOWED_PREFIXES) and not (ROOT / ref).exists()
+        if _leaves_repo(ref)
+        or (not ref.startswith(ALLOWED_PREFIXES) and not (ROOT / ref).exists())
     ]
 
 
@@ -1132,6 +1285,81 @@ class TestDocReferences:
         assert set(defs) == {"top", "atop", "Outer"}
         assert set(_defs(defs["Outer"].body)) == {"method", "Inner"}
 
+    def test_a_nested_function_is_not_a_node_but_a_method_is_one_of_its_class(
+        self, tmp_path, monkeypatch
+    ):
+        # ROOT is a module global read by node_problem, so a module in tmp_path is
+        # looked up like a repo file.
+        monkeypatch.setattr(sys.modules[__name__], "ROOT", tmp_path)
+        (tmp_path / "mod.py").write_text(
+            "def outer():\n    def inner():\n        pass\n\n\n"
+            "class K:\n    def meth(self):\n        pass\n\n"
+            "    class Sub:\n        pass\n"
+        )
+        cited = (
+            "`mod.py::outer` `mod.py::K` `mod.py::K.meth` `mod.py::K::meth` "
+            "`mod.py::K.Sub` "
+            "`mod.py::inner` `mod.py::meth` `mod.py::Sub` `mod.py::outer.inner` "
+            "`mod.py::K.nope`"
+        )
+        doc = _doc(tmp_path, cited + "\n")
+        assert missing_nodes([doc]) == [
+            "doc.md: mod.py::inner (inner is not defined)",
+            "doc.md: mod.py::meth (meth is not defined)",
+            "doc.md: mod.py::Sub (Sub is not defined)",
+            "doc.md: mod.py::outer.inner (outer is not a class)",
+            "doc.md: mod.py::K.nope (nope is not defined in K)",
+        ]
+
+    @pytest.mark.parametrize("fence", ["```", "~~~"])
+    def test_references_between_two_fenced_blocks_are_still_checked(
+        self, tmp_path, fence
+    ):
+        block = f"{fence}\ncode\n{fence}\n"
+        prose = "`core.privacy.NoSuch` `config/dead.yaml` `train/loop.py::gone`\n"
+        doc = _doc(tmp_path, block + prose + block)
+        assert missing_symbols([doc]) == [f"{doc}: core.privacy.NoSuch"]
+        assert missing_paths([doc]) == [f"{doc}: config/dead.yaml"]
+        assert missing_nodes([doc]) == [
+            f"{doc}: train/loop.py::gone (gone is not defined)"
+        ]
+
+    def test_references_inside_a_tilde_fence_are_skipped(self, tmp_path):
+        text = "~~~\n`core.nope.Q` `config/fenced.yaml` `train/loop.py::gone`\n~~~\n"
+        doc = _doc(tmp_path, text)
+        assert missing_symbols([doc]) == []
+        assert missing_paths([doc]) == []
+        assert missing_nodes([doc]) == []
+
+    @pytest.mark.parametrize(
+        "ref",
+        [
+            "/etc/hosts",
+            "/usr",
+            "../x",
+            "../../etc/hosts",
+            "docs/../../x",
+            "runs/../../x",
+        ],
+    )
+    def test_a_path_that_leaves_the_repo_is_missing_even_when_it_exists(
+        self, tmp_path, ref
+    ):
+        # Public docs name repo-relative paths only. /etc/hosts and /usr exist on
+        # the machine that runs the suite; that must not make them valid.
+        doc = _doc(tmp_path, f"`{ref}`\n")
+        assert missing_paths([doc]) == [f"{doc}: {ref}"]
+
+    @pytest.mark.parametrize(
+        "ref, ok",
+        [("docs/../README.md", True), ("./docs/../docs", True), ("..x/y.md", False)],
+    )
+    def test_a_path_that_wanders_but_stays_in_the_repo_is_judged_by_existence(
+        self, tmp_path, ref, ok
+    ):
+        doc = _doc(tmp_path, f"`{ref}`\n")
+        assert (missing_paths([doc]) == []) is ok
+
     def test_a_config_key_resolves_through_the_config_dataclasses(self):
         for key in (
             "data.label_overlap",
@@ -1253,10 +1481,10 @@ def sandboxed_config(tmp: Path) -> Path:
     return out
 
 
-def _git_status_paths() -> list[str]:
+def _git_status_paths(root: Path = ROOT) -> list[str]:
     proc = subprocess.run(
         ["git", "status", "--porcelain"],
-        cwd=ROOT,
+        cwd=root,
         capture_output=True,
         text=True,
         check=True,
@@ -1264,7 +1492,7 @@ def _git_status_paths() -> list[str]:
     return proc.stdout.splitlines()
 
 
-def _write_snapshot() -> tuple[list[str], dict[str, tuple[int, int]]]:
+def _write_snapshot(root: Path = ROOT) -> tuple[list[str], dict[str, tuple[int, int]]]:
     """What a stray write would change: git status, plus size and mtime of every
     file in the directories git ignores or already has dirty (runs/, checkpoints/,
     results/, docs/img/) and of any ONNX file at the repo root."""
@@ -1272,13 +1500,30 @@ def _write_snapshot() -> tuple[list[str], dict[str, tuple[int, int]]]:
     files = [
         f
         for sub in ("results", "docs/img", "runs", "checkpoints")
-        for f in sorted((ROOT / sub).rglob("*"))
+        for f in sorted((root / sub).rglob("*"))
     ]
-    for file in files + sorted(ROOT.glob("*.onnx")):
+    for file in files + sorted(root.glob("*.onnx")):
         if file.is_file():
             info = file.stat()
             stats[str(file)] = (info.st_size, info.st_mtime_ns)
-    return _git_status_paths(), stats
+    return _git_status_paths(root), stats
+
+
+def stray_writes(before, after) -> list[str]:
+    """What differs between two _write_snapshot results: a git status line that
+    appeared or went away, and a file that is new, gone, or changed in size or
+    mtime. Empty when the quickstart touched nothing in the repo."""
+    status_before, stats_before = before
+    status_after, stats_after = after
+    changes = [
+        f"git status: {line}" for line in sorted(set(status_before) ^ set(status_after))
+    ]
+    for file in sorted(stats_before.keys() | stats_after.keys()):
+        if stats_before.get(file) != stats_after.get(file):
+            changes.append(
+                f"{file}: {stats_before.get(file)} -> {stats_after.get(file)}"
+            )
+    return changes
 
 
 def _rewrite(token: str, cfg: Path, tmp: Path) -> str:
@@ -1305,6 +1550,99 @@ def _sandboxed_argv(cmd: str, cfg: Path, tmp: Path) -> list[str]:
     assert argv[0] == "python", f"a quickstart command must run python: {cmd}"
     argv[0] = sys.executable
     return argv
+
+
+def _git(root: Path, *args: str) -> None:
+    subprocess.run(
+        ["git", "-c", "commit.gpgsign=false", "-c", "core.hooksPath=/dev/null", *args],
+        cwd=root,
+        check=True,
+        capture_output=True,
+    )
+
+
+@pytest.fixture
+def repo(tmp_path):
+    """A committed tree shaped like this repo: .onnx files and runs/ are ignored,
+    results/ and docs/img/ hold committed files."""
+    root = tmp_path / "repo"
+    files = {
+        ".gitignore": "*.onnx\nruns/\ncheckpoints/\n",
+        "README.md": "readme\n",
+        "results/risk.json": '{"a": 1}\n',
+        "docs/img/c.png": "png",
+    }
+    for name, body in files.items():
+        (root / name).parent.mkdir(parents=True, exist_ok=True)
+        (root / name).write_text(body)
+    _git(root, "init", "-q")
+    _git(root, "add", "-A")
+    _git(root, "commit", "-q", "--no-verify", "-m", "tree")
+    return root
+
+
+def _touch(path: Path) -> None:
+    ns = path.stat().st_mtime_ns + 5_000_000_000
+    os.utime(path, ns=(ns, ns))
+
+
+def _grow(path: Path) -> None:
+    old = path.stat().st_mtime_ns
+    path.write_text(path.read_text() + "more\n")
+    os.utime(path, ns=(old, old))  # same mtime, so only the size gives it away
+
+
+def _write(rel: str, body: str = "x"):
+    def act(root: Path) -> None:
+        (root / rel).parent.mkdir(parents=True, exist_ok=True)
+        (root / rel).write_text(body)
+
+    return act
+
+
+class TestQuickstartStrayWrites:
+    def test_a_tree_nothing_wrote_to_has_no_stray_write(self, repo):
+        before = _write_snapshot(repo)
+        assert stray_writes(before, _write_snapshot(repo)) == []
+
+    def test_the_snapshot_of_this_repo_sees_the_committed_results(self):
+        stats = _write_snapshot()[1]
+        assert str(ROOT / "results" / "v1.0" / "risk.json") in stats
+
+    @pytest.mark.parametrize(
+        "act, culprit",
+        [
+            (_write("m.onnx"), "m.onnx"),
+            (_write("runs/smoke/best.pt"), "best.pt"),
+            (_write("checkpoints/risk/x.pt"), "x.pt"),
+            (_write("results/new.json"), "new.json"),
+            (_write("docs/img/new.png"), "new.png"),
+            (_write("stray.txt"), "stray.txt"),
+            (_write("README.md", "changed readme\n"), "README.md"),
+            (_write("results/risk.json", '{"a": 22}\n'), "risk.json"),
+            (lambda r: _touch(r / "results" / "risk.json"), "risk.json"),
+            (lambda r: _grow(r / "docs" / "img" / "c.png"), "c.png"),
+            (lambda r: (r / "results" / "risk.json").unlink(), "risk.json"),
+        ],
+        ids=[
+            "an ONNX file at the repo root",
+            "a new file under runs/",
+            "a new file under checkpoints/",
+            "a new file under results/",
+            "a new file under docs/img/",
+            "a new untracked file elsewhere",
+            "a committed file elsewhere modified",
+            "a committed results file changed in size",
+            "a committed results file touched, same content",
+            "a committed image grown, same mtime",
+            "a committed results file deleted",
+        ],
+    )
+    def test_each_kind_of_stray_write_is_detected(self, repo, act, culprit):
+        before = _write_snapshot(repo)
+        act(repo)
+        changes = stray_writes(before, _write_snapshot(repo))
+        assert any(culprit in change for change in changes), changes
 
 
 class TestQuickstart:
@@ -1382,9 +1720,18 @@ class TestQuickstart:
     @pytest.mark.slow
     @pytest.mark.timeout(900)  # three subprocesses, each capped at 300 s
     def test_readme_quickstart_runs_end_to_end_without_touching_committed_files(
-        self, tmp_path
+        self, tmp_path, monkeypatch
     ):
         before = _write_snapshot()
+        assert before[1], "the snapshot saw no files, so a comparison proves nothing"
+        compared = []
+        real_stray_writes = stray_writes
+
+        def spy(*snapshots):
+            compared.append(snapshots)
+            return real_stray_writes(*snapshots)
+
+        monkeypatch.setattr(sys.modules[__name__], "stray_writes", spy)
         cfg = sandboxed_config(tmp_path)
         cmds = quickstart_commands((ROOT / "README.md").read_text())
         assert cmds, "README has no `bash quickstart` fence"
@@ -1407,4 +1754,6 @@ class TestQuickstart:
         for output in QUICKSTART_OUTPUTS:
             produced = tmp_path / output
             assert produced.is_file() and produced.stat().st_size > 0, output
-        assert _write_snapshot() == before  # nothing in the repo was written
+        stray = stray_writes(before, _write_snapshot())
+        assert compared and compared[0][0] is before, "the comparison did not run"
+        assert stray == [], "the quickstart wrote into the repo"
