@@ -45,10 +45,10 @@ format that export no longer supports (DGNTY-3, DGNTY-35). No shipped config wri
 ## Commands
 
 ```bash
-# Tests (902 collected: test_core 65, test_data 118, test_models 23, test_privacy 42,
-# test_operator 4, test_docs 452, test_train 78, test_checkpoint 3, test_export 9,
+# Tests (1196 collected: test_core 65, test_data 118, test_models 23, test_privacy 42,
+# test_operator 4, test_docs 725, test_train 78, test_checkpoint 3, test_export 9,
 # test_calibration 3, test_labels 7, test_gates 11, test_ci 4, test_eval 72,
-# test_colab_eval 11 — one skips without CUDA)
+# test_colab_eval 13, test_scripts 19 — one skips without CUDA)
 # every test is limited to 300 s (pytest.ini; pytest-timeout), except the README quickstart
 # test, which carries its own 900 s limit (three subprocesses, each capped at 300 s)
 pytest tests/ -v
@@ -56,6 +56,7 @@ pytest tests/test_models.py -v                       # one file
 pytest tests/test_docs.py -v   # doc numbers, symbols, paths and the README quickstart (M6)
 pytest tests/test_models.py::TestDignityModel::test_risk_model -v   # one test
 pytest tests/ -m "not slow" -v                       # marker filter
+pytest tests/test_docs.py -m "not slow" -v         # fast doc run: skips only the README quickstart test (a name filter on Quickstart is case-insensitive and also deselects four README tests)
 
 # Lint / format — ruff only, line length 88, enforced by CI and pre-commit
 ruff check .
@@ -66,10 +67,11 @@ pre-commit run --all-files
 pytest tests/ --cov --cov-fail-under=100
 
 python -m eval.gates --seed 1000   # data gate; tuning seed only, refuses 2026
+python scripts/refresh_doc_numbers.py README.md docs/RESULTS.md   # after any results change
 python -m eval.run --smoke --seed tuning  # CI-sized, all three tasks (--tasks defaults to risk,forecast,policy); outputs under runs/smoke/
 python -m eval.run --smoke --seed tuning --tasks risk,forecast  # --tasks forecast also fits risk (baseline) but writes only forecast.json; unknown names exit 2
 python -m eval.run --smoke --seed tuning --privacy-sweep  # also trains risk per epsilon on the config/train_risk.yaml privacy template (own models, so works without --tasks risk); writes privacy.json + privacy_curve.png
-python -m eval.run --config config/synthetic_hard.yaml --seed tuning  # full run on a Colab GPU; see docs/RESULTS.md
+python -m eval.run --config config/synthetic_hard.yaml --seed tuning --tasks risk,forecast,policy --privacy-sweep  # full run on a Colab GPU; see docs/RESULTS.md
 
 # Train
 # checkpoints land in ./runs/<task>/ (gitignored); never in checkpoints/
@@ -182,12 +184,6 @@ a mechanism, it needs a test in `tests/test_privacy.py` or CI's 100% gate on tha
   to match CCXT's native format. Any new data source must emit ms or a join against crypto data
   will silently match zero rows. Do not reintroduce `// 10**9`.
 
-## Known breakage (do not "discover" these again — fix or leave, but don't be confused)
-
-- **`docs/` and `README.md` drift from the code easily.** `tests/test_docs.py` runs the README
-  quickstart and checks quoted numbers, symbols, paths and removed claims. Trust the source, and
-  when you touch a documented symbol, fix the doc in the same change.
-
 ## Conventions
 
 - `ruff format` at line length 88 is the formatter; `ruff check` (`E,W,F,I,N,UP,B,C4,SIM`) is
@@ -213,9 +209,10 @@ a mechanism, it needs a test in `tests/test_privacy.py` or CI's 100% gate on tha
   (dicts by key, lists by non-negative integer: `pr_auc_by_horizon.4.value`; `fmt` is a Python
   format spec: `.2f`, `.1%`, `d`, `g` for ε (floats such as `10.0`), `s` compares the whole token;
   a JSON null renders as `n/a` for every `fmt`; a path through a null or a scalar is "no such
-  path"). Only the number core of the token is compared. `split_token` splits a token into
-  prefix, core and suffix and is the one helper the M6.6 refresh imports, so a refresh rewrites
-  the core and keeps the wrappers. Accepted wrappers: `[0.72 <!--…-->, 0.88 <!--…-->]` and
+  path"). Only the number core of the token is compared. The marker grammar (`NUM_RE`,
+  `TOKEN_RE`, `split_token`, `resolve`, `strip_code`) is defined once in `scripts/refresh_doc_numbers.py`;
+  `tests/test_docs.py` imports it and `check_numbers` there is the checker. `split_token` splits a
+  token into prefix, core and suffix, so a refresh rewrites the core and keeps the wrappers. Accepted wrappers: `[0.72 <!--…-->, 0.88 <!--…-->]` and
   `(0.72, 0.88)` for a CI (three markers), `**0.81**`, `_`/`~`, table pipes glued to the number,
   a `/` glued before or after the number (`0 <!--…-->/34 <!--…-->`) and a trailing `. , ; :`. A range such as `0.72–0.88`
   is rejected: write the bracket form. A `<!--num` comment that does not parse is a malformed
@@ -236,6 +233,7 @@ a mechanism, it needs a test in `tests/test_privacy.py` or CI's 100% gate on tha
   `<!--provisional-->**Provisional: numbers are from the tuning seed; the final evaluation has
   not run.**` (one line); once `risk.json` has the evaluation seed the word Provisional and the
   `<!--provisional-->` comment appear in neither.
+- The refresh command covers both `README.md` and `docs/RESULTS.md`; after it, rewrite the sentences the doc tests point at.
 - Doc references are checked the same way, on inline code only (fenced blocks are skipped).
   Symbol: `^(core|data|models|train|export|eval)(\.\w+)+$` must import and resolve (longest
   importable module prefix, then `getattr`); under `data`, `data.synthetic`, `train` and `eval`
@@ -254,6 +252,7 @@ a mechanism, it needs a test in `tests/test_privacy.py` or CI's 100% gate on tha
   file and the results JSON files must exist afterwards, and `stray_writes` compares git status
   and the size and mtime of every file under `results/`, `docs/img/`, `runs/` and `checkpoints/`
   and of any root `*.onnx` before and after. The quickstart test carries its own 900 s limit.
+  When you touch a documented symbol, fix the doc in the same change; the doc tests enforce it.
 - Tests are organized as classes (`TestSignalProcessor`, `TestDignityModel`, …); node ids are
   `file::Class::test_name`. They use root-level fixtures in `tests/conftest.py` (`device`,
   `sample_sequence` `[4,100,9]`, `sample_labels`) and an autouse seed reset. Reuse them rather

@@ -1,44 +1,73 @@
-# Dignity Core – Privacy-Preserving Sequence Modeling for Transactional Behavior
+# Dignity Core: Sequence Models for Transaction Risk
 
 <!--provisional-->**Provisional: numbers are from the tuning seed; the final evaluation has not run.**
 
-[![PyTorch](https://img.shields.io/badge/PyTorch-2.5+-ee4c2c.svg)](https://pytorch.org/)
-[![Python](https://img.shields.io/badge/Python-3.10+-blue.svg)](https://python.org/)
 [![CI](https://github.com/crichalchemist/Dignity/actions/workflows/ci.yml/badge.svg)](https://github.com/crichalchemist/Dignity/actions/workflows/ci.yml)
+[![Python](https://img.shields.io/badge/Python-3.10_to_3.12-blue.svg)](https://python.org/)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
-**Dignity** is a privacy-preserving deep learning framework for modeling transactional behavior patterns. It provides modular components for signal processing, data pipelines, and neural architectures with an input-level differential-privacy stage, k-anonymous generalization, and keyed pseudonymization — each backed by a test.
+Detect, warn early, decide: three heads on one CNN-LSTM-attention backbone score transaction risk on synthetic data, each against the baseline it has to beat.
 
-## Overview
+## What it does
 
-Dignity Core implements privacy-first sequence modeling:
+- **Detect**: is an anomaly active in this window? The `risk` head, scored by PR-AUC against `window_logistic` and `block_tree`.
+- **Warn early**: will an anomaly start within the next 1 to `model.horizon` rows? The forecast head, scored by PR-AUC per horizon and by lead time against `risk_score_forecast`.
+- **Decide**: allow, review or block each window under a 5% review budget (`policy.review_budget`). The policy head, scored by expected cost against `threshold_policy`.
 
-- **Privacy-Preserving**: Keyed pseudonymization, k-anonymous generalization, and input-level ε-DP with a budget ledger
-- **Signal Processing**: Volatility, entropy, momentum, and regime detection utilities
-- **Modular Architecture**: Clean separation between data pipeline, model components, and training infrastructure
-- **Deployable**: ONNX export with verification and benchmarking for production inference
-- **Task-Agnostic**: Configurable for risk scoring, early warning, or triage
-- **Lightweight**: Focused, production-ready codebase
+It scores risk and gives no advice on what to transact.
 
-## Key Features
+## Results
 
-- ✅ **Privacy-First**: Keyed pseudonymization, bounded Laplace noise with ε accounting, k-anonymous generalization — see docs/PRIVACY.md
-- ✅ **Signal Processing**: Volatility, entropy, momentum, directional change, and regime detection
-- ✅ **Modular Design**: Core utilities, data pipeline, model components cleanly separated
-- ✅ **Flexible Architecture**: CNN1D + LSTM + Attention backbone with task-specific heads
-- ✅ **Multi-Task Ready**: Risk scoring, early warning, or triage via configurable heads
-- ✅ **Production Export**: ONNX conversion with verification and inference benchmarking
-- ✅ **Synthetic Data**: Built-in generator for testing and prototyping
-- ✅ **Training Infrastructure**: AMP support, gradient clipping, checkpointing, CLI interface
-- ✅ **Comprehensive Tests**: 31 tests covering core utilities, data pipeline, and model components
-- ✅ **YAML Configuration**: Declarative configs for different tasks and environments
+**Verdict.** Risk clears both baselines; forecast and triage do not clear theirs; the privacy curve is at chance at every grid value except the two largest.
+
+**Outcome.** On risk, the window gate passes against `window_logistic` and the block gate passes against `block_tree`. On forecast, the model's PR-AUC interval clears `risk_score_forecast` at no horizon, its point estimate is below the baseline's at every horizon, the model's PR-AUC interval contains the prevalence at every horizon, the baseline's PR-AUC interval lies wholly above the prevalence at every horizon, the baseline's lower bound is above the model's point estimate at most horizons, and the model warns ahead of no onset. On policy, the triage head's expected cost is higher than the threshold policy's, so the triage head does not beat the threshold policy.
+
+The numbers of the four `eval.run` results are tuning-seed scores. They are for the `hard` preset (`config/synthetic_hard.yaml`). The headline training seed is the first of three training seeds. Intervals are 95% bootstrap intervals over test blocks. `pr_auc_by_horizon.N` scores an onset within the next N plus one rows; chance is the prevalence. Which seed produced them, and what that implies, is in the Seeds bullet of the [protocol](docs/RESULTS.md#protocol). Commands, baselines and caveats are in [docs/RESULTS.md](docs/RESULTS.md); recall per anomaly type is in its [per-type results](docs/RESULTS.md#per-type-results).
+
+<!--results-start-->
+| Metric | Model | Baseline | File |
+|---|---|---|---|
+| `auroc` | 0.84 <!--num risk.json metrics.auroc.value .2f--> | `window_logistic` 0.68 <!--num risk.json baselines.window_logistic.auroc.value .2f--> | `results/v1.0/risk.json` |
+| `pr_auc` | 0.81 <!--num risk.json metrics.pr_auc.value .2f--> [0.72 <!--num risk.json metrics.pr_auc.ci_low .2f-->, 0.88 <!--num risk.json metrics.pr_auc.ci_high .2f-->] | `window_logistic` 0.55 <!--num risk.json baselines.window_logistic.pr_auc.value .2f--> | `results/v1.0/risk.json` |
+| `recall_at_1pct_fpr` | 0.59 <!--num risk.json metrics.recall_at_1pct_fpr.value .2f--> | `window_logistic` 0.08 <!--num risk.json baselines.window_logistic.recall_at_1pct_fpr.value .2f--> | `results/v1.0/risk.json` |
+| `pr_auc` per block | 0.87 <!--num risk.json metrics.block_level.pr_auc.value .2f--> | `block_tree` 0.45 <!--num risk.json baselines.block_tree.pr_auc.value .2f--> | `results/v1.0/risk.json` |
+| `pr_auc_by_horizon.4` (five rows ahead; chance 0.0223 <!--num forecast.json metrics.prevalence_by_horizon.4 .4f-->) | 0.0336 <!--num forecast.json metrics.pr_auc_by_horizon.4.value .4f--> [0.0202 <!--num forecast.json metrics.pr_auc_by_horizon.4.ci_low .4f-->, 0.0635 <!--num forecast.json metrics.pr_auc_by_horizon.4.ci_high .4f-->] | `risk_score_forecast` 0.0566 <!--num forecast.json baselines.risk_score_forecast.pr_auc_by_horizon.4.value .4f--> | `results/v1.0/forecast.json` |
+| `lead_time.median` | n/a <!--num forecast.json metrics.lead_time.median .1f--> | `risk_score_forecast` 10.0 <!--num forecast.json baselines.risk_score_forecast.lead_time.median .1f--> | `results/v1.0/forecast.json` |
+| `lead_time.n_missed` | 34 <!--num forecast.json metrics.lead_time.n_missed d--> | `risk_score_forecast` 32 <!--num forecast.json baselines.risk_score_forecast.lead_time.n_missed d--> | `results/v1.0/forecast.json` |
+| `lead_time.n_onsets` | 34 <!--num forecast.json metrics.lead_time.n_onsets d--> | `risk_score_forecast` 34 <!--num forecast.json baselines.risk_score_forecast.lead_time.n_onsets d--> | `results/v1.0/forecast.json` |
+| `expected_cost` | 1.20 <!--num policy.json metrics.expected_cost.value .2f--> [0.83 <!--num policy.json metrics.expected_cost.ci_low .2f-->, 1.59 <!--num policy.json metrics.expected_cost.ci_high .2f-->] | `threshold_policy` 1.07 <!--num policy.json baselines.threshold_policy.expected_cost.value .2f--> [0.72 <!--num policy.json baselines.threshold_policy.expected_cost.ci_low .2f-->, 1.46 <!--num policy.json baselines.threshold_policy.expected_cost.ci_high .2f-->] | `results/v1.0/policy.json` |
+| `pr_auc` without privacy (non-private, privacy feature set, not the headline model) | 0.86 <!--num privacy.json metrics.reference.risk.pr_auc.value .2f--> [0.78 <!--num privacy.json metrics.reference.risk.pr_auc.ci_low .2f-->, 0.93 <!--num privacy.json metrics.reference.risk.pr_auc.ci_high .2f-->] | `window_logistic` 0.54 <!--num privacy.json baselines.window_logistic.reference.pr_auc.value .2f--> | `results/v1.0/privacy.json` |
+| `pr_auc` at ε 0.1 <!--num privacy.json metrics.points.0.epsilon g--> | 0.33 <!--num privacy.json metrics.points.0.risk.pr_auc.value .2f--> [0.22 <!--num privacy.json metrics.points.0.risk.pr_auc.ci_low .2f-->, 0.44 <!--num privacy.json metrics.points.0.risk.pr_auc.ci_high .2f-->] | `window_logistic` 0.26 <!--num privacy.json baselines.window_logistic.points.0.pr_auc.value .2f--> | `results/v1.0/privacy.json` |
+| `pr_auc` at ε 100 <!--num privacy.json metrics.points.6.epsilon g--> | 0.69 <!--num privacy.json metrics.points.6.risk.pr_auc.value .2f--> [0.57 <!--num privacy.json metrics.points.6.risk.pr_auc.ci_low .2f-->, 0.79 <!--num privacy.json metrics.points.6.risk.pr_auc.ci_high .2f-->] | `window_logistic` 0.36 <!--num privacy.json baselines.window_logistic.points.6.pr_auc.value .2f--> | `results/v1.0/privacy.json` |
+<!--results-end-->
+
+![Risk precision-recall curves against the baselines](docs/img/risk_pr_curve.png)
+![Forecast PR-AUC per horizon against baseline and prevalence](docs/img/forecast_pr_auc_by_horizon.png)
+![Privacy-versus-utility curve of risk PR-AUC at each epsilon](docs/img/privacy_curve.png)
+
+The privacy baseline is `window_logistic` on the released windows. The reference row is a non-private model on the privacy feature set, not the headline model; the prevalence, the chance line, is 0.27 <!--num privacy.json metrics.reference.risk.prevalence.value .2f-->. The shipped config is not a point on this curve: its ε of 1.0 is a grid value, but the curve runs on the hard preset with that preset's training settings.
 
 ## Quickstart
 
-Train the smoke preset, export it to ONNX and run the evaluation, on CPU and offline. The
-commands run from the repository root with the dependencies installed; `tests/test_docs.py`
-executes this block, so it cannot rot. Outputs stay under `runs/smoke/` (gitignored), apart from
-the ONNX file, which lands in the working directory.
+Python 3.10 to 3.12 (CI runs Linux with 3.10 and 3.12; `numpy<2` caps the range). From a fresh clone:
+
+```bash
+python3 -m venv .venv && source .venv/bin/activate
+pip install torch --index-url https://download.pytorch.org/whl/cpu
+pip install -r requirements.txt -r requirements-dev.txt
+pip install -e . --no-deps
+```
+
+On Intel macOS PyPI has no torch 2.5 or newer wheel, and a venv cannot see a conda-installed PyTorch, so use a conda environment instead of the block above, as the project's macOS checkout does (pip counts conda's PyTorch as satisfying `torch>=2.5.0`):
+
+```bash
+conda create -n dignity -c conda-forge python=3.11 "pytorch>=2.5"
+conda activate dignity
+pip install -r requirements.txt -r requirements-dev.txt
+pip install -e . --no-deps
+```
+
+Then:
 
 ```bash quickstart
 python -m train.cli --config config/smoke.yaml
@@ -46,397 +75,27 @@ python -m export.to_onnx --checkpoint runs/smoke/train/best.pt --output dignity_
 python -m eval.run --config config/smoke.yaml --seed tuning
 ```
 
-## Quick Start
+They train a risk model into `runs/smoke/train`, export and verify `dignity_risk.onnx`, and write results to `runs/smoke/results` and charts to `runs/smoke/img`. The full evaluation, and any config that keeps the default `eval.out_dir` and `eval.img_dir`, writes `results/v1.0` and `docs/img` (see the [Colab runbook](docs/RESULTS.md#colab-runbook)). See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
-Superseded by the Quickstart section above.
+Tests: `pytest tests/ -m "not slow"` is the fast run; `pytest tests/` is the full run, which also executes the quickstart above.
 
-### Installation
+## How this was built
 
-```bash
-# Clone repository
-git clone https://github.com/crichalchemist/Dignity.git
-cd Dignity
+Agent workflow rules live in `.claude/CLAUDE.md`. An adversarial review found that the original benchmark was trivially easy: a depth-3 tree on per-block statistics separated every block (DGNTY-10). The generator was rebuilt with difficulty presets; DGNTY-10 closes with the final evaluation. Each finding became an issue (DGNTY ids are rows of [docs/HOW-IT-WAS-BUILT.md](docs/HOW-IT-WAS-BUILT.md); the tracker is private), and each fix went to a PR and a CI run; that page records the status of every one, and DGNTY-8, DGNTY-27 and DGNTY-40 are still open (see its Status column).
 
-# Create conda environment (recommended)
-conda create -n dignity python=3.11
-conda activate dignity
+## Limitations
 
-# Install dependencies
-pip install -r requirements.txt
+- Synthetic data only: `data.source` accepts only `synthetic`, and there is no result on real data.
+- `fee_rate` and `tx_count` are uncalibrated.
+- The triage costs (`policy.costs`) are a stated assumption in the config.
+- Privacy: On the tuning seed, the shipped allocation leaves the risk model's PR-AUC not distinguishable from chance on the hard preset at every ε on the grid up to 10, and above chance at the two largest grid values, 30 and 100 ([curve](docs/PRIVACY.md#privacy-versus-utility-curve)), although inputs can be made differentially private (ε is the per-released-value Laplace budget on `volume`; `fee_rate` and `tx_count` are released by k-anonymous generalization, which ε does not govern; `price` is not consumed; the shipped config is not a point on the curve; see the [threat model](docs/THREAT-MODEL.md)). The intervals are one noise draw and one training seed, the grid values where utility returns are not offered as private settings, and k-anonymity holds for the train release only. There is no inference-time privacy release path (DGNTY-27).
 
-# Or install package
-pip install -e .
-```
+## Roadmap
 
-### Basic Usage
+Planned for v1.1, none of it in v1.0:
 
-#### Generate Synthetic Data
-
-```python
-from core.config import DignityConfig
-from data.source.synthetic import SyntheticGenerator
-
-cfg = DignityConfig.from_yaml("config/synthetic_easy.yaml")
-df = SyntheticGenerator(cfg.data.synthetic).generate()
-
-print(df.shape)
-# (160000, 10): 1000 blocks x 160 hourly rows; the event-record columns label every row
-```
-
-#### Privacy Operations
-
-```python
-import numpy as np
-from core.privacy import PrivacyBudget, PrivacyManager
-
-# One budget per release; epsilons add and overspending raises BudgetExhausted.
-pm = PrivacyManager(
-    PrivacyBudget(epsilon_total=1.0), key=b"load-this-from-the-environment"
-)
-
-# Keyed pseudonymization (HMAC-SHA256): linkable under one key, unlinkable across keys
-pseudonym = pm.pseudonymize("0x1234abcd5678ef90")
-
-# Bounded Laplace noise: clipped to bounds, sensitivity = hi - lo, spends epsilon
-amounts = np.array([123.456, 789.012, 456.789])
-noisy = pm.add_laplace_noise(amounts, epsilon=0.5, bounds=(0.0, 1000.0))
-
-# k-anonymous generalization: every output value is shared by >= k records
-generalized = PrivacyManager.generalize_amounts(
-    np.random.uniform(10, 100, 200), bins=10, k=5
-)
-```
-
-In training, none of this is called by hand: a `privacy:` block in the config
-turns on a pipeline stage that runs before signals are computed. **No block, no
-stage.** See `config/train_risk.yaml` and [docs/PRIVACY.md](docs/PRIVACY.md).
-
-#### Train a Model
-
-```bash
-# Train risk model with default config
-dignity-train --config config/train_risk.yaml
-
-# Train the early-warning (forecast) model
-dignity-train --config config/train_forecast.yaml
-
-# Train the triage (allow / review / block) model
-dignity-train --config config/train_policy.yaml
-
-# Train on Colab with optimized settings
-dignity-train --config config/colab.yaml
-```
-
-Or open `notebooks/train_risk.ipynb` (Colab badge inside) for the same run with the
-loss curves, validation scores, attention plots and ONNX export shown step by step.
-
-#### Export to ONNX
-
-```bash
-# Export trained model to ONNX
-python -m export.to_onnx \
-    --checkpoint runs/risk/best.pt \
-    --output dignity_risk.onnx \
-    --benchmark
-```
-
-The checkpoint carries its own feature list, input width and sequence length, so
-export needs no config. Checkpoints written before v1.0 are rejected with an
-"unsupported checkpoint format" error; retrain them with `dignity-train`.
-`dignity-export` is equivalent.
-
-## Architecture
-
-### Data Pipeline Flow
-
-```
-Transaction Data Sources
-├── Synthetic Generator (testing/prototyping)
-├── Cryptocurrency APIs (BTC, ETH, SOL via data/source/crypto.py)
-└── Custom Sources (via data/source/ extensibility)
-                    ↓
-Privacy Stage (core/privacy.py — optional, from the `privacy:` config block)
-├── Bounded Laplace noise (ε-DP, budget-ledgered)
-└── k-anonymous generalization (quantile bins)
-                    ↓
-Signal Processing (core/signals.py)
-├── Volatility (rolling std)
-├── Entropy (Shannon entropy)
-├── Price momentum
-├── Directional change events
-└── Regime detection (volatility clustering)
-                    ↓
-Data Pipeline (data/pipeline.py)
-├── Signal computation
-├── Feature scaling (RobustScaler)
-├── Sequence windowing
-└── PyTorch Dataset/DataLoader
-                    ↓
-Model Architecture (models/)
-├── Backbone: CNN1D + LSTM + Attention
-├── Task Heads: Risk | Forecast | Policy
-└── ~350K parameters (default config)
-                    ↓
-Training (train/engine.py + train/loop.py)
-├── Mixed precision (AMP)
-├── Gradient clipping
-├── Checkpointing
-└── Validation loops
-                    ↓
-Export & Deploy (export/to_onnx.py)
-├── ONNX conversion
-├── Model verification
-└── Inference benchmarking
-```
-
-### Neural Network Design
-
-The core model implements a modular hybrid architecture:
-
-**Backbone** (`models/backbone/hybrid.py`):
-1. **CNN1D**: Multi-scale 1D convolution for local pattern extraction (~80 lines)
-2. **StackedLSTM**: Unidirectional stacked LSTM for temporal dependencies (~100 lines)
-3. **AdditiveAttention**: Attention mechanism for feature weighting (~60 lines)
-
-**Task Heads** (`models/head/`):
-- **RiskHead**: Binary risk scoring (0-1 probability)
-- **ForecastHead**: early warning, P(new anomaly within h rows) for h = 1…H
-- **PolicyHead**: triage logits over allow / review / block
-
-**Main Model** (`models/dignity.py`):
-- Composable: `Dignity(task='risk')` assembles backbone + appropriate head
-- Compact: ~350K parameters vs. 800+ line monolithic implementations
-- Flexible: Easy to swap heads or modify backbone components
-
-### Privacy Operations
-
-`core/privacy.py` claims exactly three things, each enforced by a test:
-
-- **Keyed pseudonymization** (HMAC-SHA256, key required) — linkable under one key, unlinkable across keys
-- **Input-level ε-differential privacy** — clipped Laplace noise with sensitivity derived from public bounds and ε spent against a ledger that refuses to overspend
-- **k-anonymity** for generalized columns — quantile bins merged until every class has ≥ k records
-
-The stage runs on raw columns *before* signal computation, so derived features inherit the DP guarantee. What it does **not** claim — and why — is in [docs/THREAT-MODEL.md](docs/THREAT-MODEL.md).
-
-### Signal Processing
-
-Specialized transaction sequence signals in `core/signals.py`:
-
-- **Volatility**: Rolling standard deviation with configurable windows
-- **Entropy**: Shannon entropy for measuring transaction pattern complexity
-- **Momentum**: Price momentum calculation
-- **Directional Change**: Event-based change detection (threshold-based)
-- **Regime Detection**: Volatility clustering for market state identification
-
-## Repository Structure
-
-```
-Dignity/
-├── __init__.py               # Package root (v0.1.0)
-├── setup.py                  # Installation config
-├── requirements.txt          # Dependencies
-├── pytest.ini                # Test configuration
-├── pyproject.toml            # Build system config
-│
-├── core/                     # Core utilities (3 modules)
-│   ├── config.py            # YAML-based configuration (DignityConfig)
-│   ├── signals.py           # Signal processing (volatility, entropy, momentum, regime)
-│   └── privacy.py           # Privacy primitives (pseudonymization, Laplace, k-anonymity)
-│
-├── data/                     # Data pipeline (4 modules)
-│   ├── pipeline.py          # Preprocessing pipeline (signals, scaling, windowing)
-│   ├── loader.py            # PyTorch Dataset and DataLoader utilities
-│   └── source/
-│       ├── synthetic.py     # Synthetic transaction generator
-│       └── crypto.py        # Cryptocurrency data source
-│
-├── models/                   # Neural architectures (9 modules)
-│   ├── dignity.py           # Main model assembly (Backbone + Head)
-│   ├── backbone/
-│   │   ├── cnn1d.py        # 1D-CNN for local patterns (~80 lines)
-│   │   ├── lstm.py         # Stacked LSTM for temporal modeling (~100 lines)
-│   │   ├── attention.py    # Additive attention mechanism (~60 lines)
-│   │   └── hybrid.py       # DignityBackbone (CNN+LSTM+Attention, ~90 lines)
-│   └── head/
-│       ├── risk.py         # Binary risk scoring head
-│       ├── forecast.py     # Early-warning head
-│       └── policy.py       # Triage head (allow / review / block)
-│
-├── train/                    # Training infrastructure (2 modules)
-│   ├── engine.py            # Training/validation loops with AMP
-│   └── cli.py               # CLI interface (dignity-train)
-│
-├── export/                   # Deployment (1 module)
-│   └── to_onnx.py           # ONNX export with verification
-│
-├── config/                   # YAML configurations (9 files)
-│   ├── base.yaml            # Default configuration and key-by-key reference
-│   ├── train_risk.yaml      # Risk scoring optimized
-│   ├── train_forecast.yaml  # Early warning (forecast task)
-│   ├── train_policy.yaml    # Triage (allow / review / block)
-│   ├── colab.yaml           # Google Colab optimized
-│   ├── smoke.yaml           # CI-sized run
-│   └── synthetic_{easy,medium,hard}.yaml  # Difficulty presets
-│
-├── tests/                    # Test suite (31 tests)
-│   ├── conftest.py          # Pytest fixtures
-│   ├── test_core.py         # Core utilities (11 tests)
-│   ├── test_data.py         # Data pipeline (9 tests)
-│   └── test_models.py       # Model components (11 tests)
-│
-└── docs/                     # Documentation
-    ├── ARCHITECTURE.md      # Data contract, pipeline, backbone, heads, training, export
-    ├── PRIVACY.md           # Privacy stage and its guarantees
-    ├── THREAT-MODEL.md      # Threat model and the tests that back it
-    └── README.md            # Docs index
-```
-
-**Package Stats:**
-- 28 Python modules (~2,800 lines of code)
-- Test suite under tests/; 100% line coverage enforced on core/privacy.py in CI
-- 9 YAML configs: tasks, presets and a smoke run
-- ~350K parameters (default model)
-
-## Advanced Usage
-
-### Custom Signal Processing
-
-```python
-from core.signals import SignalProcessor
-import numpy as np
-
-# Calculate volatility
-prices = np.array([100, 102, 98, 101, 99, 103])
-vol = SignalProcessor.volatility(prices, window=3)
-
-# Compute entropy (market uncertainty)
-entropy = SignalProcessor.entropy(prices)
-
-# Detect price momentum
-momentum = SignalProcessor.price_momentum(prices, window=2)
-
-# Identify directional changes
-dc = SignalProcessor.directional_change(prices, threshold=0.015)
-
-# Regime detection (high/low volatility clustering)
-regime = SignalProcessor.regime_detection(prices, vol_window=10, threshold=1.5)
-```
-
-### Configuration Management
-
-```python
-from core.config import DignityConfig
-
-# Load config from YAML
-config = DignityConfig.from_yaml("config/train_risk.yaml")
-
-# Access nested configs
-print(f"Model task: {config.model.task}")
-print(f"Hidden size: {config.model.hidden_size}")
-print(f"Batch size: {config.data.batch_size}")
-print(f"Learning rate: {config.train.lr}")
-
-# Save modified config
-config.train.epochs = 100
-config.to_yaml("config/custom_config.yaml")
-```
-
-### Custom Data Source
-
-```python
-from data.source.crypto import CryptoSource
-import pandas as pd
-
-
-# Implement custom data source
-class CustomSource:
-    def load_data(self, symbol: str, start_date: str, end_date: str) -> pd.DataFrame:
-        # Your custom logic here
-        # Must return DataFrame with columns: timestamp, open, high, low, close, volume
-        pass
-```
-
-### Model Customization
-
-```python
-from models.dignity import Dignity
-import torch
-
-# Create model with custom config
-model = Dignity(
-    task="risk",
-    input_size=9,  # Number of features
-    hidden_size=256,  # Backbone hidden dimension
-    seq_len=100,  # Sequence length
-    dropout=0.3,
-)
-
-# Forward pass
-x = torch.randn(4, 100, 9)  # [batch, seq_len, features]
-output, attention = model(x)
-
-# Access components
-backbone = model.backbone
-task_head = model.head
-```
-
-### Running Tests
-
-```bash
-# Run all tests
-pytest tests/ -v
-
-# Run specific test suite
-pytest tests/test_core.py -v
-pytest tests/test_data.py -v
-pytest tests/test_models.py -v
-
-# Run with coverage
-pytest tests/ --cov=. --cov-report=html
-```
-
-## Design Philosophy
-
-**Dignity** is built on three principles:
-
-1. **Minimal**: ~2,800 lines vs. bloated research code. Every module has a single purpose.
-2. **Deniable**: Local-only inference, self-contained artifact, nothing phones home — three properties, three tests. Defined precisely in [docs/THREAT-MODEL.md](docs/THREAT-MODEL.md).
-3. **Deployable**: ONNX export, <10ms inference, production-ready from day one.
-
-You are not refactoring code. You are **distilling intent**.
-
-## Contributing
-
-Contributions are welcome! Please:
-- Install the hooks once: `pip install pre-commit && pre-commit install`
-- Run tests before submitting: `pytest tests/ -v`
-- Style is enforced by ruff at line length 88; the hooks run it for you
-- Add tests for new features
-- Update docs accordingly
-
-## License
-
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
-
-## Citation
-
-If you use this framework in your research or applications, please cite:
-
-```bibtex
-@software{dignity_core,
-  title = {Dignity Core: Privacy-Preserving Sequence Modeling for Transactional Behavior},
-  author = {crichalchemist},
-  year = {2026},
-  url = {https://github.com/crichalchemist/Dignity}
-}
-```
-
-## Acknowledgments
-
-- Refactored from [Sequence](https://github.com/crichalchemist/Sequence) research prototype
-- PyTorch team for the deep learning framework
-- Open source community for privacy-preserving ML techniques
-
----
-
-**Built for deniability. Optimized for persistence.**
+- Planned: fix the real-data source `CryptoSource` (DGNTY-7, DGNTY-13, DGNTY-14, DGNTY-15).
+- Planned: a dataset adapter layer that dispatches on `data.source` (DGNTY-41).
+- Planned: a labelled manipulation-event dataset, the public pump-and-dump events (La Morgia et al., 2020), as the first real-data result (DGNTY-42).
+- Planned: per-block aggregates from a public chain dataset (DGNTY-44).
+- Planned, not yet tracked: per-entity amount features for structuring typologies.
