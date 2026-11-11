@@ -11,5 +11,6 @@
       {"value": 0.65, "ci_low": 0.55, "ci_high": 0.75}
     ]
   },
-  "points": [{"epsilon": 1.0}, {"epsilon": 10}]
+  "points": [{"epsilon": 1.0}, {"epsilon": 10.0}],
+  "counts": {"n_missed": 0, "n_onsets": 34}
 }

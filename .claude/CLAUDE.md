@@ -45,11 +45,12 @@ format that export no longer supports (DGNTY-3, DGNTY-35). No shipped config wri
 ## Commands
 
 ```bash
-# Tests (485 collected: test_core 65, test_data 118, test_models 23, test_privacy 42,
-# test_operator 4, test_docs 35, test_train 78, test_checkpoint 3, test_export 9,
+# Tests (642 collected: test_core 65, test_data 118, test_models 23, test_privacy 42,
+# test_operator 4, test_docs 192, test_train 78, test_checkpoint 3, test_export 9,
 # test_calibration 3, test_labels 7, test_gates 11, test_ci 4, test_eval 72,
 # test_colab_eval 11 — one skips without CUDA)
-# every test is limited to 300 s (pytest.ini; pytest-timeout)
+# every test is limited to 300 s (pytest.ini; pytest-timeout), except the README quickstart
+# test, which carries its own 900 s limit (three subprocesses, each capped at 300 s)
 pytest tests/ -v
 pytest tests/test_models.py -v                       # one file
 pytest tests/test_docs.py -v   # doc numbers, symbols, paths and the README quickstart (M6)
@@ -198,19 +199,47 @@ a mechanism, it needs a test in `tests/test_privacy.py` or CI's 100% gate on tha
   no privacy stage. `bounds` are public parameters chosen a priori — never derive them from data.
 - `privacy.deterministic_rng: true` (+ `privacy_seed=`) is the seeded experiment mode; shipped
   configs stay on SystemRandom.
-- Doc numbers are machine-checked (`tests/test_docs.py`, `check_numbers`). A quoted number is the
-  token directly followed by a marker: `0.84 <!--num risk.json metrics.pr_auc.value .2f-->`,
-  grammar `<!--num <file>.json <dotted.path> <fmt>-->`, resolved against `results/v1.0/<file>.json`
-  (dicts by key, lists by integer: `pr_auc_by_horizon.4.value`; `fmt` is a Python format spec;
-  a JSON null renders as `n/a` for every `fmt`). A confidence interval is three markers. Text
-  between `<!--results-start-->` and `<!--results-end-->` may hold no number without a marker.
-  Inside a zone a label that contains a digit is a backticked key (`recall_at_1pct_fpr`,
-  `policy.review_budget`), an epsilon or horizon label carries its own marker
-  (`metrics.points.N.epsilon`), source paths are backticked, and "95% CI" lives in prose outside
-  the zone. While `results/v1.0/risk.json` has the tuning seed, README and `docs/RESULTS.md`
-  each carry the `<!--provisional-->` banner line; it goes when the seed is the evaluation seed.
-  Inline-code symbols (`core.privacy.PrivacyManager`) and repo paths are checked the same way
-  (symbol and path checkers land with M6.2).
+- Doc numbers are machine-checked in **every** public doc (`README.md` and `docs/**/*.md`;
+  `tests/test_docs.py`, `check_numbers`). A quoted number is a token directly followed by a marker,
+  `0.84 <!--num risk.json metrics.pr_auc.value .2f-->`, grammar
+  `<!--num <file>.json <dotted.path> <fmt>-->`, resolved against `results/v1.0/<file>.json`
+  (dicts by key, lists by non-negative integer: `pr_auc_by_horizon.4.value`; `fmt` is a Python
+  format spec: `.2f`, `.1%`, `d`, `g` for ε (floats such as `10.0`), `s` compares the whole token;
+  a JSON null renders as `n/a` for every `fmt`; a path through a null or a scalar is "no such
+  path"). Only the number core of the token is compared. `split_token` splits a token into
+  prefix, core and suffix and is the one helper the M6.6 refresh imports, so a refresh rewrites
+  the core and keeps the wrappers. Accepted wrappers: `[0.72 <!--…-->, 0.88 <!--…-->]` and
+  `(0.72, 0.88)` for a CI (three markers), `**0.81**`, `_`/`~`, table pipes glued to the number,
+  a leading `/` (`0 <!--…-->/34 <!--…-->`) and a trailing `. , ; :`. A range such as `0.72–0.88`
+  is rejected: write the bracket form. A `<!--num` comment that does not parse is a malformed
+  marker and fails. Text between `<!--results-start-->` and `<!--results-end-->` may hold no
+  number without a marker; the tags must alternate, start first (swapped or nested tags fail),
+  and a backticked purely numeric literal (`` `0.99` ``, `` `-0.5` ``, `` `12%` ``) in a zone is an
+  unmarked number. Labels that merely contain digits stay backticked: keys and paths
+  (`recall_at_1pct_fpr`, `policy.review_budget`, `results/v1.0/risk.json`); an ε label carries
+  its own marker (`metrics.points.N.epsilon`, `g`); a horizon label is a backticked
+  `pr_auc_by_horizon.N` (forecast.json has no list of horizon values); "95% CI" lives in prose
+  outside the zone. Markers and zone tags inside a fenced block or an inline code span are
+  documentation: neither checked nor counted. Banner: while the four `results/v1.0/*.json`
+  files (one run: same seed, git_sha and config_hash, asserted) carry the tuning seed, README and
+  `docs/RESULTS.md` each hold exactly the line
+  `<!--provisional-->**Provisional: numbers are from the tuning seed; the final evaluation has
+  not run.**` (one line); once `risk.json` has the evaluation seed the word Provisional and the
+  `<!--provisional-->` comment appear in neither.
+- Doc references are checked the same way, on inline code only (fenced blocks are skipped).
+  Symbol: `^(core|data|models|train|export|eval)(\.\w+)+$` must import and resolve (longest
+  importable module prefix, then `getattr`); under `data`, `data.synthetic`, `train` and `eval`
+  a name may instead be a config dataclass field (`data.synthetic.block_len`, `eval.epsilons`).
+  Path: a span with `/` or ending `.py .yaml .md .json .png .ipynb`, and no whitespace, `* { } < >`
+  or `scheme://`, must exist relative to the repo root after stripping a `::` or `#` suffix and a
+  leading `./`; only `runs/` and `checkpoints/` (gitignored) may be absent. Node: a non-test
+  `path::name` needs a `.py` repo-relative path and a top-level def or class `name`; a method is
+  `path::Class.method` or `path::Class::method`, and both parts are looked up by AST.
+  `tests/…::Class::test` citations are checked separately and a bare `Test*` name must carry its
+  file. A fenced block opened as `bash quickstart` (exactly) is run by the suite under `tmp_path`
+  on CPU: every command must start with `python` and may only write under `config/smoke.yaml`,
+  `runs/` and `dignity_risk.onnx`, which the test redirects, and the checkpoint, the ONNX file and
+  the results JSON files must exist afterwards. The quickstart test carries its own 900 s limit.
 - Tests are organized as classes (`TestSignalProcessor`, `TestDignityModel`, …); node ids are
   `file::Class::test_name`. They use root-level fixtures in `tests/conftest.py` (`device`,
   `sample_sequence` `[4,100,9]`, `sample_labels`) and an autouse seed reset. Reuse them rather
