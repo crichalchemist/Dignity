@@ -6503,8 +6503,8 @@ def readme_fence_problems(text: str) -> list[str]:
 
 
 def readme_pointer_problems(text: str) -> list[str]:
-    """Three pointers a reader needs: why the numbers are not final (the Seeds bullet
-    of the RESULTS protocol), how to run the tests, and where the per-type results
+    """Three pointers a reader needs: which seed produced the numbers (the Seeds
+    bullet of the RESULTS protocol), how to run the tests, and where the per-type results
     are. The anchors themselves are checked by the dead-link test."""
     flat = _flat(text)
     problems = []
@@ -6512,9 +6512,8 @@ def readme_pointer_problems(text: str) -> list[str]:
         r"Seeds bullet of the \[protocol\]\(docs/RESULTS\.md#protocol\)", flat
     ):
         problems.append(
-            "README.md must link the Seeds bullet of docs/RESULTS.md next to the "
-            "tuning-seed sentence: 'see the Seeds bullet of the "
-            "[protocol](docs/RESULTS.md#protocol)'"
+            "the Results paragraph of README.md must link the Seeds bullet of the "
+            "protocol: '[protocol](docs/RESULTS.md#protocol)'"
         )
     if "](docs/RESULTS.md#per-type-results)" not in flat:
         problems.append(
@@ -7274,7 +7273,7 @@ PRIVACY_QUALIFIERS = (
         "These intervals are replicate 0's: one noise draw and one training seed",
     ),
     (
-        "the two largest grid values are not offered as private settings",
+        "the grid values where utility returns are not offered as private settings",
         "PRIVACY.md",
         "they are not offered as a private setting",
     ),
@@ -7292,7 +7291,9 @@ PRIVACY_QUALIFIERS = (
 
 
 def readme_qualifier_problems(
-    text: str, docs: dict[str, str] | None = None
+    text: str,
+    docs: dict[str, str] | None = None,
+    qualifiers: tuple[tuple[str, str, str], ...] = PRIVACY_QUALIFIERS,
 ) -> list[str]:
     """The Limitations privacy bullet carries the qualifiers the privacy docs attach,
     and only while those docs still say them."""
@@ -7303,13 +7304,14 @@ def readme_qualifier_problems(
         }
     limits = _flat(section_of(text, "## Limitations"))
     problems = []
-    for clause, name, source in PRIVACY_QUALIFIERS:
+    for clause, name, source in qualifiers:
         if source not in docs[name]:
             problems.append(
-                f"docs/{name} no longer says {source!r}: rewrite the Limitations "
-                f"clause {clause!r} of README.md to what it says now"
+                f"docs/{name} no longer says {source!r}: rewrite or remove the "
+                f"Limitations clause {clause!r} of README.md to match what the doc "
+                "says now, and update its PRIVACY_QUALIFIERS entry in the same change"
             )
-        if clause not in limits:
+        elif clause not in limits:
             problems.append(
                 f"the Limitations section of README.md must say {clause!r} "
                 f"(docs/{name}: {source!r})"
@@ -8437,15 +8439,15 @@ class TestReleaseStepChecks:
     }
     LIMITS = (
         "## Limitations\n\n- Privacy: x. The intervals are one noise draw and one "
-        "training seed, the two largest grid values are not offered as private "
-        "settings, and k-anonymity holds for the train release only.\n"
+        "training seed, the grid values where utility returns are not offered as "
+        "private settings, and k-anonymity holds for the train release only.\n"
     )
 
     def test_a_privacy_bullet_without_the_qualifiers_of_the_docs_is_reported(self):
         assert readme_qualifier_problems(self.LIMITS, self.DOCS) == []
         for clause in (
             "intervals are one noise draw and one training seed",
-            "the two largest grid values are not offered as private settings",
+            "the grid values where utility returns are not offered as private settings",
             "k-anonymity holds for the train release only",
         ):
             assert readme_qualifier_problems(
@@ -8459,6 +8461,19 @@ class TestReleaseStepChecks:
             docs = dict(self.DOCS)
             docs[name] = docs[name].replace(source, "x")
             assert readme_qualifier_problems(self.LIMITS, docs), source
+
+    def test_a_qualifier_whose_source_sentence_is_gone_asks_for_one_rewrite(self):
+        clause = "the grid values where utility returns are not offered as private"
+        docs = dict(self.DOCS)
+        docs["PRIVACY.md"] = docs["PRIVACY.md"].replace(
+            "they are not offered as a private setting", "x"
+        )
+        limits = self.LIMITS.replace(clause, "x")
+        problems = readme_qualifier_problems(limits, docs)
+        assert len(problems) == 1
+        assert "PRIVACY_QUALIFIERS entry" in problems[0] and "rewrite" in problems[0]
+        kept = tuple(q for q in PRIVACY_QUALIFIERS if "private setting" not in q[2])
+        assert readme_qualifier_problems(limits, docs, kept) == []
 
     def test_a_fast_run_that_deselects_readme_tests_is_reported(self):
         assert fast_run_problems({"a": 'pytest tests/ -m "not slow"'}) == []
@@ -8551,6 +8566,16 @@ class TestReleaseStepChecks:
         drifted = privacy_row_expected(plain).replace("one noise draw", "two draws")
         row = f"| {drifted} | privacy | confirmed | DGNTY-8 | open | none | none |\n"
         assert privacy_row_problems(row, marked) != []
+
+    def test_the_privacy_row_may_carry_markers_the_headline_does_not(self):
+        marker = " <!--num privacy.json metrics.points.5.epsilon g-->"
+        plain = TestHowItWasBuilt.PRIVACY_FIXTURE
+        expected = privacy_row_expected(plain)
+        assert "at epsilon 30" in expected.lower()
+        cell = expected.replace("epsilon 30", f"epsilon 30{marker}", 1)
+        assert cell != expected
+        row = f"| {cell} | privacy | confirmed | DGNTY-8 | open | none | none |\n"
+        assert privacy_row_problems(row, plain) == []
 
     CURVE_FIXTURE = (
         "# Privacy\n\n## Privacy-versus-utility curve\n\n![chart](img/c.png)\n\n"
