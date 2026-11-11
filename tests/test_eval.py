@@ -483,6 +483,83 @@ class TestForecastPlots:
         plot_lead_times(self._result([]), str(tmp_path / "lead.png"))
         assert (tmp_path / "lead.png").stat().st_size > 0
 
+    @staticmethod
+    def _scaled_result(model, baseline, high, prevalence):
+        def entries(value, ci_high):
+            return [
+                {"value": value, "ci_low": value / 2, "ci_high": ci_high}
+                for _ in range(3)
+            ]
+
+        metrics = {
+            "pr_auc_by_horizon": entries(model, high),
+            "prevalence_by_horizon": [prevalence] * 3,
+        }
+        base = {"pr_auc_by_horizon": entries(baseline, high)}
+        return {"metrics": metrics, "baselines": {"risk_score_forecast": base}}
+
+    @staticmethod
+    def _saved_ylim(result, path, monkeypatch):
+        from matplotlib.figure import Figure
+
+        seen = []
+        real_savefig = Figure.savefig
+
+        def recording_savefig(fig, *args, **kwargs):
+            seen.append(fig.axes[0].get_ylim())
+            return real_savefig(fig, *args, **kwargs)
+
+        monkeypatch.setattr(Figure, "savefig", recording_savefig)
+        plot_forecast_pr_auc(result, str(path))
+        assert len(seen) == 1
+        return seen[0]
+
+    @staticmethod
+    def _saved_legend_and_axes(result, path, monkeypatch):
+        from matplotlib.figure import Figure
+
+        seen = []
+        real_savefig = Figure.savefig
+
+        def recording_savefig(fig, *args, **kwargs):
+            renderer = fig.canvas.get_renderer()
+            ax = fig.axes[0]
+            seen.append(
+                (ax.get_legend().get_window_extent(renderer), ax.get_window_extent())
+            )
+            return real_savefig(fig, *args, **kwargs)
+
+        monkeypatch.setattr(Figure, "savefig", recording_savefig)
+        plot_forecast_pr_auc(result, str(path))
+        assert len(seen) == 1
+        return seen[0]
+
+    def test_forecast_chart_legend_sits_below_the_axes_and_covers_no_series(
+        self, tmp_path, monkeypatch
+    ):
+        # wide intervals at early horizons fill the plot area, where a legend
+        # placed inside would hide them
+        result = self._scaled_result(0.08, 0.12, 0.9, 0.05)
+        legend, axes = self._saved_legend_and_axes(
+            result, tmp_path / "pr.png", monkeypatch
+        )
+        assert legend.y1 <= axes.y0
+
+    def test_forecast_chart_axis_follows_small_values_so_the_series_are_readable(
+        self, tmp_path, monkeypatch
+    ):
+        result = self._scaled_result(0.08, 0.12, 0.2, 0.05)
+        bottom, top = self._saved_ylim(result, tmp_path / "pr.png", monkeypatch)
+        assert bottom == 0
+        assert 0.2 <= top < 0.5
+
+    def test_forecast_chart_axis_still_reaches_values_near_one(
+        self, tmp_path, monkeypatch
+    ):
+        result = self._scaled_result(0.9, 0.95, 0.99, 0.3)
+        _, top = self._saved_ylim(result, tmp_path / "pr.png", monkeypatch)
+        assert top >= 0.99
+
 
 class TestEvalRunForecast:
     @pytest.fixture(scope="class")
