@@ -4,22 +4,32 @@ This page records how Dignity v1.0 was reviewed, what the review found and how e
 
 ## Agent conventions
 
-Agent-facing build and workflow rules live in `.claude/CLAUDE.md`, the single source, and the Gemini and agents dot-folders carry symlinks to it. Those symlinks are local files and are not tracked, so only the source is named as a path here. The public files at the repository root stay written for human contributors.
+Agent-facing build and workflow rules live in `.claude/CLAUDE.md`, the one copy of them tracked in this repository. Other agent tools can be pointed at it by local symlinks; those symlinks are not tracked, so only the tracked file is named as a path here. The public files at the repository root stay written for human contributors.
 
-The excerpt below is copied verbatim from the Conventions and "Behavior that will surprise you" sections of that file. It shows the kind of rule the agents work under: configuration is dataclass-backed, privacy bounds are public, and a configured feature can be dropped silently.
+The excerpt below is four whole bullets copied verbatim from `.claude/CLAUDE.md`, in the order they appear there: the first from the section "Behavior that will surprise you", the other three from the section Conventions. They show the kind of rule the agents work under. A configured feature that the pipeline never produces is dropped without a warning. Configuration is dataclass-backed, and a new field goes into `config/base.yaml` too. The privacy block is optional and its bounds are public parameters. The seeded privacy mode is opt-in and the shipped configs stay off it.
 
 <!--excerpt .claude/CLAUDE.md-->
 ```text
-- Type hints use modern union syntax (`np.ndarray | None`) — `target-version = "py310"`.
+- **Configured features are silently dropped.** `TransactionPipeline.fit` keeps only
+  `[f for f in self.features if f in df.columns]` and stores it as `self.available_features`.
+  `compute_signals` only ever derives `volume_volatility`, `volatility`, `momentum`, and
+  `directional_change`. So `base.yaml`'s 9-feature list resolves to **7** against synthetic data
+  (`price_change` and `regime` are never produced), and `train/loop.py::fit` sizes the model from
+  `SplitData.feature_names` (the pipeline's `available_features`) — **`model.input_size`
+  in YAML is ignored**.
+  If a model's input width is unexpected, check `available_features` first.
+  The checkpoint stores `available_features` in order (`meta.feature_names`).
+- Config is dataclass-backed: `DignityConfig{model,data,train,eval,policy,privacy,device,seed}` in `core/config.py`, loaded via
+  `DignityConfig.from_yaml`. Add a field to the dataclass **and** to `config/base.yaml`; unknown
+  keys, top-level or nested, raise `TypeError` at load. `data.source` accepts only `synthetic`.
+  `config/base.yaml` is the config reference (there is no CONFIGURATION.md): every key carries
+  a comment saying what it does, `tests/test_docs.py::TestBaseConfigDoc` enforces a comment of at
+  least three words per key and pins the load-bearing ones to the code, and you
+  keep those comments current when you add a field.
 - A `privacy:` block in YAML is optional and validated at load (`PrivacyConfig`). No block =
   no privacy stage. `bounds` are public parameters chosen a priori — never derive them from data.
 - `privacy.deterministic_rng: true` (+ `privacy_seed=`) is the seeded experiment mode; shipped
   configs stay on SystemRandom.
-- **Configured features are silently dropped.** `TransactionPipeline.fit` keeps only
-  `[f for f in self.features if f in df.columns]` and stores it as `self.available_features`.
-- **Synthetic data is an event record of blocks, interleaved.** `SyntheticGenerator` writes one
-  row per step with `block_id`, `is_anomalous`, `anomaly_type`, `anomaly_id` and `block_label`;
-  normal and anomalous blocks are drawn independently, so they interleave. Labels come from the
 ```
 <!--/excerpt-->
 
@@ -27,7 +37,7 @@ The excerpt below is copied verbatim from the Conventions and "Behavior that wil
 
 Five reviewers (code, training, docs, synthetic data, datasets) examined the repository, and a skeptic then re-verified every finding independently. The review page states that 42 raw findings merged into 31 defects, that all 31 were confirmed (none refuted, none left uncertain) and that they were filed as DGNTY-7 to DGNTY-37. Eight recommendation items (DGNTY-38 to DGNTY-45) cover synthetic-data quality and public datasets. DGNTY-1 to DGNTY-6 were known defects filed before the review. The review page gives no skeptic verdict for them or for the recommendation items, so the table says "not recorded" there.
 
-The tracker is Plane, a private tracker that readers of this repository cannot open. This page is therefore self-contained: the table paraphrases each finding in one line (it does not quote the tracker), and the DGNTY-n id is the one that merged PR titles carry.
+The tracker is Plane, a private tracker that readers of this repository cannot open. This page is therefore self-contained: the table paraphrases each finding in one line (it does not quote the tracker), and the DGNTY-n id is the one that PR titles carry by convention.
 
 Two stories from the review are worth telling plainly.
 
@@ -36,7 +46,7 @@ Two stories from the review are worth telling plainly.
 
 ## Finding to fix
 
-The table has one row per finding of the review's 45 filed items. Status is one of four values: fixed, open (maintainer decision), closes with the final evaluation (M7), deferred (v1.1). A PR link on a row that is not fixed shows work that addressed part of the item, not that it is done. The CI run link is the push run of the PR's merge commit on the integration branch; a row whose PR has no merge commit yet says "not recorded".
+The table has one row per item, DGNTY-1 to DGNTY-45. The review filed DGNTY-7 to DGNTY-45; DGNTY-1 to DGNTY-6 were filed before it. Status is one of three values: fixed, open (maintainer decision), deferred (v1.1). v1.1 is the planned next release: a deferred item is planned for it and does not exist in v1.0. While the committed results are tuning-seed results, DGNTY-10 carries a fourth status, closes with the final evaluation (M7). M7 is the release milestone in which the final evaluation runs on the evaluation seed. A PR link on a row that is not fixed shows work that addressed part of the item, not that it is done. The CI run link is the push run of the PR's merge commit on the integration branch. This pull request (#41) has no merge commit yet, so its cell says "#41: not recorded".
 
 Three items stay open by the maintainer's choice: DGNTY-8 (the shipped privacy block against the curve outcome), DGNTY-27 (there is no inference-time privacy release path in v1.0) and DGNTY-40 (the curve shipped, the per-anomaly-type privacy gate did not). DGNTY-46, DGNTY-47 and DGNTY-48 were filed while the work was in progress, they are open, and they are not rows of this table.
 
@@ -49,11 +59,11 @@ Three items stay open by the maintainer's choice: DGNTY-8 (the shipped privacy b
 | The training step crashed on batches that carry no labels | training | not recorded | DGNTY-5 | fixed | [#21](https://github.com/crichalchemist/Dignity/pull/21) | [run for #21](https://github.com/crichalchemist/Dignity/actions/runs/42546616622) |
 | Config defaults and test timeouts did not do what they claimed (checkpoint folder, inert timeouts) | config | not recorded | DGNTY-6 | fixed | [#15](https://github.com/crichalchemist/Dignity/pull/15) [#17](https://github.com/crichalchemist/Dignity/pull/17) | [run for #15](https://github.com/crichalchemist/Dignity/actions/runs/42538310125) [run for #17](https://github.com/crichalchemist/Dignity/actions/runs/42540734883) |
 | The real-data source collapsed frames because it misread a timestamp unit | data | confirmed | DGNTY-7 | deferred (v1.1) | none | not recorded |
-| The shipped privacy block drove the risk model to chance and the training command still saved it as best. On the tuning seed the shipped allocation leaves the risk model's PR-AUC not distinguishable from chance on the hard preset at every grid epsilon except the two largest, where it is above chance but below the non-private reference; see [Privacy-versus-utility curve](PRIVACY.md#privacy-versus-utility-curve). | privacy | confirmed | DGNTY-8 | open (maintainer decision) | [#36](https://github.com/crichalchemist/Dignity/pull/36) [#37](https://github.com/crichalchemist/Dignity/pull/37) | [run for #36](https://github.com/crichalchemist/Dignity/actions/runs/42765940079) [run for #37](https://github.com/crichalchemist/Dignity/actions/runs/42815370353) |
+| The shipped privacy block drove the risk model to chance and the training command still saved it as best. On the tuning seed, the shipped allocation leaves the risk model's PR-AUC not distinguishable from chance on the hard preset at every ε on the grid up to 10, and above chance at the two largest grid values, 30 and 100: up to ε = 10 each point's 95% confidence interval for PR-AUC contains the prevalence (the chance line) and lies wholly below the non-private reference's interval. At ε = 30 and ε = 100 the interval lies wholly above the prevalence, PR-AUC is higher at 100 than at 30, and both point estimates are below the reference's. See [Privacy-versus-utility curve](PRIVACY.md#privacy-versus-utility-curve). | privacy | confirmed | DGNTY-8 | open (maintainer decision) | [#36](https://github.com/crichalchemist/Dignity/pull/36) [#37](https://github.com/crichalchemist/Dignity/pull/37) | [run for #36](https://github.com/crichalchemist/Dignity/actions/runs/42765940079) [run for #37](https://github.com/crichalchemist/Dignity/actions/runs/42815370353) |
 | Validation reported only loss and accuracy at a fixed threshold: no ranking metric, baseline or test split | evaluation | confirmed | DGNTY-9 | fixed | [#29](https://github.com/crichalchemist/Dignity/pull/29) [#30](https://github.com/crichalchemist/Dignity/pull/30) | [run for #29](https://github.com/crichalchemist/Dignity/actions/runs/42578189720) [run for #30](https://github.com/crichalchemist/Dignity/actions/runs/42597188123) |
 | The synthetic risk task was trivially separable | data | confirmed | DGNTY-10 | closes with the final evaluation (M7) | none | not recorded |
 | The synthetic normal process was unrealistic (Gaussian, no clustering, pinned volume, constant fee) | data | confirmed | DGNTY-11 | fixed | [#26](https://github.com/crichalchemist/Dignity/pull/26) [#24](https://github.com/crichalchemist/Dignity/pull/24) | [run for #26](https://github.com/crichalchemist/Dignity/actions/runs/42565042769) [run for #24](https://github.com/crichalchemist/Dignity/actions/runs/42552101263) |
-| Four guides documented an API that did not exist | docs | confirmed | DGNTY-12 | closes with the final evaluation (M7) | [#41](https://github.com/crichalchemist/Dignity/pull/41) | not recorded |
+| Four guides documented an API that did not exist | docs | confirmed | DGNTY-12 | fixed | [#16](https://github.com/crichalchemist/Dignity/pull/16) [#40](https://github.com/crichalchemist/Dignity/pull/40) [#41](https://github.com/crichalchemist/Dignity/pull/41) | [run for #16](https://github.com/crichalchemist/Dignity/actions/runs/42539967316) [run for #40](https://github.com/crichalchemist/Dignity/actions/runs/42971898695) #41: not recorded |
 | The timestamp normaliser misclassified some units and mixed columns | data | confirmed | DGNTY-13 | deferred (v1.1) | none | not recorded |
 | The block resampler dropped columns and failed without high and low values | data | confirmed | DGNTY-14 | deferred (v1.1) | none | not recorded |
 | Real-data frames produced a different feature count from synthetic ones | data | confirmed | DGNTY-15 | deferred (v1.1) | none | not recorded |
@@ -76,8 +86,8 @@ Three items stay open by the maintainer's choice: DGNTY-8 (the shipped privacy b
 | Volatility warm-up looked ahead | signals | confirmed | DGNTY-32 | fixed | [#19](https://github.com/crichalchemist/Dignity/pull/19) | [run for #19](https://github.com/crichalchemist/Dignity/actions/runs/42543678002) |
 | The gradient scaler was recreated every epoch and not checkpointed | training | confirmed | DGNTY-33 | fixed | [#22](https://github.com/crichalchemist/Dignity/pull/22) [#21](https://github.com/crichalchemist/Dignity/pull/21) | [run for #22](https://github.com/crichalchemist/Dignity/actions/runs/42547586587) [run for #21](https://github.com/crichalchemist/Dignity/actions/runs/42546616622) |
 | Generalization bin edges were fitted on train and validation together | privacy | confirmed | DGNTY-34 | fixed | [#34](https://github.com/crichalchemist/Dignity/pull/34) | [run for #34](https://github.com/crichalchemist/Dignity/actions/runs/42741432391) |
-| Protected old checkpoints were degenerate and must not be exported | export | confirmed | DGNTY-35 | deferred (v1.1) | [#23](https://github.com/crichalchemist/Dignity/pull/23) | [run for #23](https://github.com/crichalchemist/Dignity/actions/runs/42548635331) |
-| README and docs hygiene: wrong counts, missing folders, wrong checkpoint path, broken links | docs | confirmed | DGNTY-36 | fixed | [#40](https://github.com/crichalchemist/Dignity/pull/40) [#18](https://github.com/crichalchemist/Dignity/pull/18) | [run for #40](https://github.com/crichalchemist/Dignity/actions/runs/42971898695) [run for #18](https://github.com/crichalchemist/Dignity/actions/runs/42541872548) |
+| Protected old checkpoints were degenerate and must not be exported (v1.0 rejects the old checkpoint format at export and says so; retraining the old checkpoints is deferred) | export | confirmed | DGNTY-35 | deferred (v1.1) | [#23](https://github.com/crichalchemist/Dignity/pull/23) | [run for #23](https://github.com/crichalchemist/Dignity/actions/runs/42548635331) |
+| README and docs hygiene: wrong counts, missing folders, wrong checkpoint path, broken links | docs | confirmed | DGNTY-36 | fixed | [#40](https://github.com/crichalchemist/Dignity/pull/40) [#18](https://github.com/crichalchemist/Dignity/pull/18) [#41](https://github.com/crichalchemist/Dignity/pull/41) | [run for #40](https://github.com/crichalchemist/Dignity/actions/runs/42971898695) [run for #18](https://github.com/crichalchemist/Dignity/actions/runs/42541872548) #41: not recorded |
 | The privacy doc pointed auditors at the wrong test file | docs | confirmed | DGNTY-37 | fixed | [#34](https://github.com/crichalchemist/Dignity/pull/34) | [run for #34](https://github.com/crichalchemist/Dignity/actions/runs/42741432391) |
 | Recommendation: replace the generator core with calibrated, clustered dynamics | data | not recorded | DGNTY-38 | fixed | [#27](https://github.com/crichalchemist/Dignity/pull/27) | [run for #27](https://github.com/crichalchemist/Dignity/actions/runs/42570160464) |
 | Recommendation: redesign anomaly types, per-row flags and difficulty presets | data | not recorded | DGNTY-39 | fixed | [#27](https://github.com/crichalchemist/Dignity/pull/27) [#25](https://github.com/crichalchemist/Dignity/pull/25) | [run for #27](https://github.com/crichalchemist/Dignity/actions/runs/42570160464) [run for #25](https://github.com/crichalchemist/Dignity/actions/runs/42553746645) |
@@ -88,16 +98,22 @@ Three items stay open by the maintainer's choice: DGNTY-8 (the shipped privacy b
 | Recommendation: per-block aggregates from a public chain dataset | data | not recorded | DGNTY-44 | deferred (v1.1) | none | not recorded |
 | Recommendation: secondary labelled sets and a datasets verdict page | data | not recorded | DGNTY-45 | deferred (v1.1) | none | not recorded |
 
+Notes on four rows. DGNTY-12 is fixed: #16 removed the quick-start, configuration and signals guides, #40 rewrote the architecture guide and folded the signals content into it, and the configuration reference is now the commented `config/base.yaml`. DGNTY-36 is fixed in parts: #18 and #40 fixed the hygiene items in the docs and the repository, and the README part is fixed by this pull request (#41), which rewrites the README. DGNTY-35 is deferred only in part: v1.0 rejects the old checkpoint format at export and states it in the architecture and results pages, and what is deferred is retraining or converting the old checkpoints. DGNTY-8 repeats the curve section of the privacy page and adds nothing to it.
+
 ## Gates
 
-Every change reaches the integration branch through a pull request, and each PR title carries `DGNTY-n`. Both `main` and `dev` are protected: no deletion and no force-push. The required checks are:
+This section says only what `.github/workflows/ci.yml`, `.pre-commit-config.yaml` and the branch protection settings on GitHub show.
 
-- `lint`: `ruff check` and `ruff format --check` at line length 88.
-- `test (3.10)` and `test (3.12)`: the full suite, with a 100% coverage gate on `core/privacy.py`, so every privacy mechanism needs a named test.
-- `smoke`: the installed console scripts train, export and evaluate all three tasks on a small config, and the working tree must stay clean afterwards.
+CI runs on every push to `main` and `dev` and on every pull request. Both branches require four status checks to pass: `lint`, `test (3.10)`, `test (3.12)` and `smoke`. Their protection forbids deleting the branch and force-pushing to it. It does not require a pull-request review and it does not apply to repository administrators. Each check is a job of the workflow:
 
-The same lint gates run locally before a commit through the pre-commit hooks `ruff` and `ruff-format`. The doc checkers in `tests/test_docs.py` also run in CI: they check every quoted number, symbol and path in these pages against the committed results and the code.
+- `lint`: `ruff check .` and `ruff format --check .` with a pinned ruff version.
+- `test (3.10)` and `test (3.12)`: `pytest tests/ --cov --cov-fail-under=100`. The coverage gate measures only `core/privacy.py`, so every privacy mechanism needs a named test. The doc checkers in `tests/test_docs.py` run here too: they check every quoted number, symbol and path in these pages against the committed results and the code.
+- `smoke`: installs the package, then runs `dignity-train --config config/smoke.yaml`, `dignity-export` on the checkpoint it wrote, and `python -m eval.run --smoke --seed tuning --tasks risk,forecast,policy --privacy-sweep`, and fails if `git status --porcelain` shows a change afterwards.
+
+The pre-commit configuration has two hooks, `ruff` (with `--fix`) and `ruff-format`. They run before a commit in a clone where pre-commit is installed.
+
+A PR title carries `DGNTY-n` by convention. Nothing in the workflow or in the protection checks it, and two merged PRs, #12 and #14, do not carry one.
 
 ## Plane to GitHub
 
-A PR that names a DGNTY item in its title or body gets a comment from the Plane integration that lists the linked work items, with their ids and titles. For example, [#40](https://github.com/crichalchemist/Dignity/pull/40) carries a "Linked to Plane Work Item(s)" comment naming DGNTY-36. The comment is how a PR and its tracker item find each other, and it is why the id convention in PR titles matters.
+The tracker has a GitHub integration. What this repository shows of it is one example: [#40](https://github.com/crichalchemist/Dignity/pull/40) carries a "Linked to Plane Work Item(s)" comment from the integration that names DGNTY-27 and DGNTY-36. The page makes no claim about which other PRs carry such a comment.

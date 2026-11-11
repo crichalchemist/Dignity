@@ -3,6 +3,7 @@
 import ast
 import collections
 import dataclasses
+import hashlib
 import importlib
 import importlib.util
 import json
@@ -4474,6 +4475,380 @@ STATUSES = (
     "deferred (v1.1)",
 )
 PR_LINK = re.compile(r"\[#\d+\]\(https://github\.com/\S+/pull/\d+\)")
+BUILT_REPO = "https://github.com/crichalchemist/Dignity"
+THIS_PR = 41  # the pull request that carries this page; it has no merge commit yet
+# Each id's PRs, in the order the row lists them, as `gh pr list --state merged` maps
+# them (titles and bodies that name the id, and the PRs that removed or rewrote the
+# four guides); an empty tuple means no PR addressed the item.
+PR_MAP = {
+    1: (31, 33),
+    2: (32, 33),
+    3: (22, 23),
+    4: (23,),
+    5: (21,),
+    6: (15, 17),
+    7: (),
+    8: (36, 37),
+    9: (29, 30),
+    10: (),
+    11: (26, 24),
+    12: (16, 40, 41),
+    13: (),
+    14: (),
+    15: (),
+    16: (26, 25),
+    17: (26,),
+    18: (26, 25),
+    19: (26,),
+    20: (35,),
+    21: (28,),
+    22: (22,),
+    23: (21, 20),
+    24: (23,),
+    25: (23,),
+    26: (26,),
+    27: (40, 34),
+    28: (36,),
+    29: (16,),
+    30: (39, 30),
+    31: (21,),
+    32: (19,),
+    33: (22, 21),
+    34: (34,),
+    35: (23,),
+    36: (40, 18, 41),
+    37: (34,),
+    38: (27,),
+    39: (27, 25),
+    40: (38, 37, 36),
+    41: (20,),
+    42: (),
+    43: (),
+    44: (),
+    45: (),
+}
+# The push run of each merged PR's merge commit on dev (workflow ci, success).
+RUN_FOR = {
+    15: 42538310125,
+    16: 42539967316,
+    17: 42540734883,
+    18: 42541872548,
+    19: 42543678002,
+    20: 42544661411,
+    21: 42546616622,
+    22: 42547586587,
+    23: 42548635331,
+    24: 42552101263,
+    25: 42553746645,
+    26: 42565042769,
+    27: 42570160464,
+    28: 42574940294,
+    29: 42578189720,
+    30: 42597188123,
+    31: 42612468724,
+    32: 42707762444,
+    33: 42714693737,
+    34: 42741432391,
+    35: 42753203935,
+    36: 42765940079,
+    37: 42815370353,
+    38: 42920455265,
+    39: 42949003267,
+    40: 42971898695,
+}
+# The review page's counts and the ids it filed.
+REVIEWERS = ("code", "training", "docs", "synthetic data", "datasets")
+RAW_FINDINGS, DEFECTS, RECOMMENDATIONS = 42, 31, 8
+FIRST_DEFECT, LAST_DEFECT, LAST_RECOMMENDATION = 7, 37, 45
+NUMBER_WORDS = {1: "One", 2: "Two", 3: "Three", 4: "Four", 5: "Five", 8: "Eight"}
+# The checks both protected branches require, from
+# `gh api repos/crichalchemist/Dignity/branches/{dev,main}/protection`
+# (required_status_checks); the doc's list is also derived from ci.yml.
+REQUIRED_CHECKS = ("lint", "test (3.10)", "test (3.12)", "smoke")
+UNTITLED_PRS = (12, 14)  # merged PRs whose titles carry no DGNTY-n
+# Finding and Area cells of every row except DGNTY-8 (which privacy_row_problems
+# ties to docs/PRIVACY.md), as the tracker titles and the review page give them.
+# If a paraphrase is edited on purpose, check it against the tracker, then update.
+FINDING_DIGEST = "6d5ac0cf174af91a3fed7bde8a81b1b543362a82b82acca708a4d75f34afcac4"
+PRIVATE_STRINGS = (
+    "/Users/",
+    "/home/",
+    "COGNEE",
+    "FRED",
+    "TWELVEDATA",
+    "Courtney",
+    "Richardson",
+    "controlroom",
+    ".internal",
+    "app.plane.so",
+)
+EMAIL_RE = re.compile(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+")
+HOME_PATH_RE = re.compile(r"(?:^|[\s(`])(?:~|\$HOME)/")
+# The sentences true only while the committed results are tuning-seed results;
+# required while results_on_tuning_seed() is true and forbidden after.
+BUILT_TUNING_ONLY = (
+    "While the committed results are tuning-seed results, DGNTY-10 carries a "
+    "fourth status, closes with the final evaluation (M7).",
+    "The finding closes only once the final evaluation has run.",
+    "On the tuning seed, the shipped allocation leaves the risk model's PR-AUC",
+)
+BUILT_TUNING_WORDING = (
+    "tuning-seed",
+    "On the tuning seed",
+    "closes with the final evaluation",
+    "closes only once the final evaluation has run",
+    "has not run",
+)
+PRIVACY_ROW_LEAD = (
+    "The shipped privacy block drove the risk model to chance and the training "
+    "command still saved it as best."
+)
+
+
+def built_rows(text: str) -> dict[int, list[str]]:
+    rows = {}
+    for line in text.splitlines():
+        m = re.search(r"\| DGNTY-(\d+) \|", line)
+        if m:
+            rows[int(m.group(1))] = [c.strip() for c in line.strip("|").split("|")]
+    return rows
+
+
+def trail_row_problems(text: str) -> list[str]:
+    """Every row's PR cell and CI cell equal the pinned id-to-PR map: same PRs in
+    the same order, links whose text and address agree, one run per merged PR."""
+    problems = []
+    rows = built_rows(text)
+    if sorted(rows) != list(range(1, 46)):
+        return [f"the table has rows {sorted(rows)}, not DGNTY-1 to DGNTY-45"]
+    for n, cells in rows.items():
+        verdict = "confirmed" if FIRST_DEFECT <= n <= LAST_DEFECT else "not recorded"
+        if cells[2] != verdict:
+            problems.append(f"DGNTY-{n}: verdict {cells[2]!r}, expected {verdict!r}")
+        prs = re.findall(r"\[#(\d+)\]\((\S+?)\)", cells[5])
+        if tuple(int(p) for p, _ in prs) != PR_MAP[n]:
+            problems.append(f"DGNTY-{n}: PR cell {cells[5]!r} is not {PR_MAP[n]}")
+        problems += [
+            f"DGNTY-{n}: link #{p} goes to {url}"
+            for p, url in prs
+            if url != f"{BUILT_REPO}/pull/{p}"
+        ]
+        runs = re.findall(r"\[run for #(\d+)\]\((\S+?)\)", cells[6])
+        merged = tuple(p for p in PR_MAP[n] if p != THIS_PR)
+        if not PR_MAP[n]:
+            if (cells[5], cells[6]) != ("none", "not recorded"):
+                problems.append(f"DGNTY-{n}: no PR, so 'none' and 'not recorded'")
+            continue
+        if tuple(int(p) for p, _ in runs) != merged:
+            problems.append(f"DGNTY-{n}: CI cell {cells[6]!r} has not one run per PR")
+        problems += [
+            f"DGNTY-{n}: run for #{p} is {url}"
+            for p, url in runs
+            if int(p) in RUN_FOR
+            and url != f"{BUILT_REPO}/actions/runs/{RUN_FOR[int(p)]}"
+        ]
+        note = f"#{THIS_PR}: not recorded"
+        if (THIS_PR in PR_MAP[n]) != (note in cells[6]):
+            problems.append(f"DGNTY-{n}: the note {note!r} goes with #{THIS_PR} only")
+        rest = re.sub(r"\[run for #\d+\]\(\S+?\)", "", cells[6]).replace(note, "")
+        if rest.strip():
+            problems.append(f"DGNTY-{n}: CI cell holds more than runs: {cells[6]!r}")
+    digest = hashlib.sha256(
+        "\n".join(
+            f"{n}|{c[0]}|{c[1]}" for n, c in sorted(rows.items()) if n != 8
+        ).encode()
+    ).hexdigest()
+    if digest != FINDING_DIGEST:
+        problems.append(f"the Finding or Area cells changed (digest {digest})")
+    return problems
+
+
+def privacy_row_problems(text: str, privacy_text: str) -> list[str]:
+    """The DGNTY-8 finding cell is its paraphrase, then the headline paragraph of
+    the curve section of docs/PRIVACY.md word for word, then a link to it."""
+    sentences = sentences_of(
+        section_of(privacy_text, "## Privacy-versus-utility curve").split("\n", 1)[1]
+    )
+    try:
+        at = next(i for i, s in enumerate(sentences) if "the shipped allocation" in s)
+    except StopIteration:
+        return ["docs/PRIVACY.md no longer has the curve headline paragraph"]
+    expected = (
+        f"{PRIVACY_ROW_LEAD} {sentences[at]} {sentences[at + 1]} See "
+        "[Privacy-versus-utility curve](PRIVACY.md#privacy-versus-utility-curve)."
+    )
+    cell = _flat(built_rows(text)[8][0])
+    return [] if cell == expected else [f"row 8 says {cell!r}, expected {expected!r}"]
+
+
+def claude_md_bullets(section: str) -> list[str]:
+    """The whole bullets of a section: a '- ' line and its indented continuation."""
+    bullets, current = [], []
+    for line in section.splitlines()[1:]:
+        if line.startswith("- "):
+            bullets.append("\n".join(current)) if current else None
+            current = [line]
+        elif current and line.startswith("  "):
+            current.append(line)
+        else:
+            bullets.append("\n".join(current)) if current else None
+            current = []
+    if current:
+        bullets.append("\n".join(current))
+    return bullets
+
+
+def excerpt_problems(text: str, source: str) -> list[str]:
+    """The excerpt is whole bullets of .claude/CLAUDE.md, in source order, and the
+    prose around it names only what the bullets show."""
+    block = text.split("<!--excerpt .claude/CLAUDE.md-->")[1].split("<!--/excerpt-->")[
+        0
+    ]
+    body = "\n".join(x for x in block.splitlines() if not x.startswith("```"))
+    taken = claude_md_bullets("\n" + body.strip("\n"))
+    if not taken:
+        return ["the excerpt holds no bullet"]
+    available = claude_md_bullets(
+        section_of(source, "## Behavior that will surprise you")
+    ) + claude_md_bullets(section_of(source, "## Conventions"))
+    problems = [
+        f"not a whole bullet of the source: {b[:50]!r}"
+        for b in taken
+        if b not in available
+    ]
+    positions = [available.index(b) for b in taken if b in available]
+    if positions != sorted(set(positions)):
+        problems.append("the bullets are not in source order")
+    problems += [f"private string {s!r}" for s in PRIVATE_STRINGS if s in block]
+    prose = _flat(section_of(text, "## Agent conventions"))
+    count = f"{NUMBER_WORDS.get(len(taken), len(taken)).lower()} whole bullets"
+    if count not in prose:
+        problems.append(f"the prose does not say {count!r}")
+    flat_block = _flat(body)
+    for claim, shown in (
+        ("is dropped without a warning", "silently dropped"),
+        ("Configuration is dataclass-backed", "Config is dataclass-backed"),
+        ("its bounds are public parameters", "`bounds` are public parameters"),
+        ("the shipped configs stay off it", "shipped configs stay on SystemRandom"),
+    ):
+        if claim not in prose or shown not in flat_block:
+            problems.append(f"prose claim {claim!r} and excerpt line {shown!r}")
+    return problems
+
+
+def ci_check_names(ci_text: str) -> list[str]:
+    names = []
+    for job, spec in yaml.safe_load(ci_text)["jobs"].items():
+        versions = spec.get("strategy", {}).get("matrix", {}).get("python-version")
+        names += [f"{job} ({v})" for v in versions] if versions else [job]
+    return names
+
+
+def gates_problems(text: str, ci_text: str, precommit_text: str) -> list[str]:
+    """The Gates section names the checks, commands and hooks the workflow and the
+    pre-commit file hold, and makes no claim of enforcement they do not show."""
+    gates = section_of(text, "## Gates")
+    spans = re.findall(r"`([^`]+)`", gates)
+    runs = [
+        step["run"]
+        for spec in yaml.safe_load(ci_text)["jobs"].values()
+        for step in spec["steps"]
+        if "run" in step
+    ]
+    problems = []
+    if tuple(ci_check_names(ci_text)) != REQUIRED_CHECKS:
+        problems.append(f"ci.yml jobs are {ci_check_names(ci_text)}")
+    problems += [f"check not named: {c}" for c in REQUIRED_CHECKS if c not in spans]
+    prefixes = ("ruff ", "pytest ", "python ", "dignity-train ", "git status")
+    problems += [
+        f"command not in ci.yml: {s}"
+        for s in spans
+        if s.startswith(prefixes) and not any(s in r for r in runs)
+    ]
+    hooks = [
+        h["id"]
+        for repo in yaml.safe_load(precommit_text)["repos"]
+        for h in repo["hooks"]
+    ]
+    problems += [f"hook not named: {h}" for h in hooks if h not in spans]
+    flat = _flat(gates)
+    for needed in (
+        f"{NUMBER_WORDS[len(REQUIRED_CHECKS)].lower()} status checks",
+        "forbids deleting the branch and force-pushing",
+        "does not require a pull-request review",
+        "does not apply to repository administrators",
+        "by convention",
+        "Nothing in the workflow or in the protection checks it",
+        *(f"#{n}" for n in UNTITLED_PRS),
+    ):
+        if needed not in flat:
+            problems.append(f"missing: {needed}")
+    for claimed in ("Every change reaches", "each PR title carries"):
+        if claimed in flat:
+            problems.append(f"unsupported claim: {claimed}")
+    return problems
+
+
+def private_string_problems(text: str) -> list[str]:
+    problems = [f"private string {s!r}" for s in PRIVATE_STRINGS if s in text]
+    problems += [f"email-like {m.group(0)!r}" for m in EMAIL_RE.finditer(text)]
+    problems += [
+        f"home path {m.group(0).strip()!r}" for m in HOME_PATH_RE.finditer(text)
+    ]
+    return problems
+
+
+def review_count_problems(text: str) -> list[str]:
+    """The review's counts, said once in the prose, equal the pinned constants and
+    the verdict column."""
+    problems = []
+    if len(REVIEWERS) != 5 or DEFECTS != LAST_DEFECT - FIRST_DEFECT + 1:
+        problems.append("the constants disagree with each other")
+    if RECOMMENDATIONS != LAST_RECOMMENDATION - LAST_DEFECT:
+        problems.append("the recommendation count disagrees with the id range")
+    review = _flat(section_of(text, "## The adversarial review"))
+    for needed in (
+        f"Five reviewers ({', '.join(REVIEWERS)})",
+        f"{RAW_FINDINGS} raw findings merged into {DEFECTS} defects",
+        f"all {DEFECTS} were confirmed",
+        f"DGNTY-{FIRST_DEFECT} to DGNTY-{LAST_DEFECT}",
+        f"Eight recommendation items (DGNTY-{LAST_DEFECT + 1} to "
+        f"DGNTY-{LAST_RECOMMENDATION})",
+        f"DGNTY-1 to DGNTY-{FIRST_DEFECT - 1} were known defects",
+    ):
+        if needed not in review:
+            problems.append(f"missing: {needed}")
+    confirmed = [n for n, c in built_rows(text).items() if c[2] == "confirmed"]
+    if len(confirmed) != DEFECTS:
+        problems.append(f"{len(confirmed)} rows are confirmed, not {DEFECTS}")
+    return problems
+
+
+def how_built_seed_problems(text: str, results_dir: Path = RESULTS_DIR) -> list[str]:
+    """Every sentence and status that holds only while the committed results are
+    tuning-seed results is required then and forbidden after."""
+    flat = _flat(text)
+    status = built_rows(text)[10][4]
+    if results_on_tuning_seed(results_dir):
+        problems = [
+            f"missing while the results are on the tuning seed: {s}"
+            for s in BUILT_TUNING_ONLY
+            if s not in flat
+        ]
+        if status != STATUSES[2]:
+            problems.append(f"DGNTY-10 reads {status!r} on the tuning seed")
+        return problems
+    return [
+        "holds only on the tuning seed, but the results carry the evaluation seed; "
+        f"rewrite it: {w}"
+        for w in BUILT_TUNING_WORDING
+        if w in flat
+    ]
+
+
+def _corrupt(text: str, old: str, new: str) -> str:
+    assert text.count(old) >= 1, old
+    return text.replace(old, new, 1)
 
 
 class TestHowItWasBuilt:
@@ -4481,19 +4856,36 @@ class TestHowItWasBuilt:
 
     DEFERRED = {7, 13, 14, 15, 35, 41, 42, 43, 44, 45}  # deferred to v1.1
     OPEN = {8, 27, 40}  # the maintainer's call, partly addressed
-    CLOSES_WITH_EVALUATION = {10, 12}
+    CLOSES_WITH_EVALUATION = {10}  # DGNTY-12 is fixed: its guides are gone or rewritten
 
     @pytest.fixture(scope="class")
     def text(self):
         return HOW_BUILT.read_text()
 
+    @pytest.fixture(scope="class")
+    def privacy_text(self):
+        return (ROOT / "docs" / "PRIVACY.md").read_text()
+
+    @pytest.fixture(scope="class")
+    def claude_md(self):
+        return (ROOT / ".claude/CLAUDE.md").read_text()
+
+    @pytest.fixture(scope="class")
+    def ci_text(self):
+        return (ROOT / ".github/workflows/ci.yml").read_text()
+
+    @pytest.fixture(scope="class")
+    def precommit_text(self):
+        return (ROOT / ".pre-commit-config.yaml").read_text()
+
     def _rows(self, text):
-        rows = {}
-        for line in text.splitlines():
-            m = re.search(r"\| DGNTY-(\d+) \|", line)
-            if m:
-                rows[int(m.group(1))] = [c.strip() for c in line.strip("|").split("|")]
-        return rows
+        return built_rows(text)
+
+    def _evaluation_seed_results(self, tmp_path):
+        payload = _results_json("risk")
+        payload["seed"] = EvalConfig().eval_seed
+        (tmp_path / "risk.json").write_text(json.dumps(payload))
+        return tmp_path
 
     def test_finding_table_covers_every_review_finding_exactly_once(self, text):
         ids = [int(m) for m in re.findall(r"\| DGNTY-(\d+) \|", text)]
@@ -4511,30 +4903,100 @@ class TestHowItWasBuilt:
             assert (status == "deferred (v1.1)") == (n in self.DEFERRED), n
             if n in self.OPEN:
                 assert status == "open (maintainer decision)", n
-            if n in self.CLOSES_WITH_EVALUATION:
-                assert status == "closes with the final evaluation (M7)", n
+            assert (status == STATUSES[2]) == (n in self.CLOSES_WITH_EVALUATION), n
 
     def test_open_findings_link_the_prs_that_addressed_part_of_them(self, text):
         rows = self._rows(text)
         for n in self.OPEN:
             assert PR_LINK.search(rows[n][5]), n
 
-    def test_this_prs_own_finding_links_its_pull_request(self, text):
+    def test_this_prs_own_findings_link_its_pull_request_and_say_what_it_fixes(
+        self, text
+    ):
+        rows = self._rows(text)
+        for n in (12, 36):
+            assert rows[n][4] == "fixed", n
+            assert f"({BUILT_REPO}/pull/{THIS_PR})" in rows[n][5], n
+        flat = _flat(text)
         assert (
-            "(https://github.com/crichalchemist/Dignity/pull/41)"
-            in (self._rows(text)[12][5])
+            "the README part is fixed by this pull request (#41), which rewrites "
+            "the README" in flat
         )
 
-    def test_a_row_without_a_recorded_ci_run_says_so(self, text):
-        for n, cells in self._rows(text).items():
-            ci = cells[6]
-            assert "/actions/runs/" in ci or ci == "not recorded", (n, ci)
+    def test_every_pr_and_ci_link_of_every_row_is_the_pinned_one(self, text):
+        assert trail_row_problems(text) == []
 
-    def test_the_privacy_row_states_the_curve_outcome_without_a_number(self, text):
-        row = self._rows(text)[8]
-        assert "PRIVACY.md#privacy-versus-utility-curve" in " ".join(row)
-        assert "tuning seed" in " ".join(row)
-        assert "not distinguishable from chance" in " ".join(row)
+    @pytest.mark.parametrize(
+        "old, new",
+        [
+            ("pull/28)", "pull/12)"),  # wrong PR number behind the same text
+            ("[#28](", "[#27]("),  # text and address disagree
+            ("actions/runs/42574940294", "actions/runs/42574940295"),  # wrong run
+            (
+                "| fixed | [#28](https://github.com/crichalchemist/Dignity/pull/28) |",
+                "| fixed | [#30](https://github.com/crichalchemist/Dignity/pull/30) |",
+            ),  # a PR cell moved to another row
+            ("| confirmed | DGNTY-9 |", "| not recorded | DGNTY-9 |"),
+            ("42971898695) #41: not recorded", "42971898695) not recorded"),
+            ("| none | not recorded |", "| none | |"),
+        ],
+    )
+    def test_a_wrong_or_swapped_link_is_reported(self, text, old, new):
+        assert trail_row_problems(_corrupt(text, old, new)) != []
+
+    def test_swapped_run_links_between_two_rows_are_reported(self, text):
+        run_a = f"{BUILT_REPO}/actions/runs/{RUN_FOR[28]}"
+        run_b = f"{BUILT_REPO}/actions/runs/{RUN_FOR[19]}"
+        swapped = text.replace(run_a, "@@").replace(run_b, run_a).replace("@@", run_b)
+        assert any("run for" in p for p in trail_row_problems(swapped))
+
+    def test_a_row_with_two_prs_and_one_run_is_reported(self, text):
+        shortened = text.replace(
+            f" [run for #33]({BUILT_REPO}/actions/runs/{RUN_FOR[33]})", "", 1
+        )
+        assert shortened != text
+        assert trail_row_problems(shortened) != []
+
+    def test_a_paraphrase_changed_to_nonsense_is_reported(self, text):
+        corrupted = _corrupt(
+            text, "The synthetic risk task was trivially separable", "Nothing happened"
+        )
+        assert any("digest" in p for p in trail_row_problems(corrupted))
+
+    def test_the_privacy_row_is_the_curve_section_headline_and_adds_nothing(
+        self, text, privacy_text
+    ):
+        assert privacy_row_problems(text, privacy_text) == []
+
+    @pytest.mark.parametrize(
+        "old, new",
+        [
+            ("both point estimates are below", "both intervals are below"),
+            (
+                "and lies wholly below the non-private",
+                "and lies wholly above the non-private",
+            ),
+            (
+                "above chance at the two largest grid values",
+                "above chance at three grid values",
+            ),
+            ("See [Privacy-versus-utility curve]", "See [the curve]"),
+        ],
+    )
+    def test_a_drift_between_the_privacy_row_and_the_curve_section_is_reported(
+        self, text, privacy_text, old, new
+    ):
+        assert privacy_row_problems(_corrupt(text, old, new), privacy_text) != []
+
+    def test_the_privacy_row_is_not_extended_beyond_the_section(
+        self, text, privacy_text
+    ):
+        extended = _corrupt(
+            text,
+            "See [Privacy-versus-utility curve]",
+            "It never beats chance. See [Privacy-versus-utility curve]",
+        )
+        assert privacy_row_problems(extended, privacy_text) != []
 
     def test_the_table_is_self_contained_and_names_plane_as_the_private_tracker(
         self, text
@@ -4559,60 +5021,139 @@ class TestHowItWasBuilt:
         assert "separated every block" in story
         assert "AUROC" not in story
 
-    def test_dot_folder_symlinks_are_named_in_prose_not_as_paths(self, text):
+    def test_the_review_counts_equal_the_pinned_constants_and_the_verdict_column(
+        self, text
+    ):
+        assert review_count_problems(text) == []
+
+    @pytest.mark.parametrize(
+        "old, new",
+        [
+            (
+                "42 raw findings merged into 31 defects",
+                "42 raw findings merged into 30 defects",
+            ),
+            ("all 31 were confirmed", "all 30 were confirmed"),
+            ("Five reviewers", "Six reviewers"),
+            ("DGNTY-7 to DGNTY-37", "DGNTY-7 to DGNTY-36"),
+            ("Eight recommendation items", "Seven recommendation items"),
+            ("| confirmed | DGNTY-20 |", "| not recorded | DGNTY-20 |"),
+        ],
+    )
+    def test_a_changed_review_count_is_reported(self, text, old, new):
+        assert review_count_problems(_corrupt(text, old, new)) != []
+
+    def test_the_agent_conventions_name_only_the_tracked_file(self, text):
         section = section_of(text, "## Agent conventions")
         assert "`.claude/CLAUDE.md`" in section
         assert ".gemini/GEMINI.md" not in text
         assert ".agents/AGENTS.md" not in text
-        assert "Gemini" in section and "agents" in section
+        flat = _flat(section)
+        assert "symlinks are not tracked" in flat
+        assert "dot-folders carry" not in flat
 
-    def test_claude_md_excerpt_is_verbatim_and_sanitised(self, text):
+    def test_the_claude_md_excerpt_is_whole_bullets_in_source_order(
+        self, text, claude_md
+    ):
+        assert excerpt_problems(text, claude_md) == []
+
+    @pytest.mark.parametrize(
+        "old, new",
+        [
+            ("  keep those comments current when you add a field.\n", ""),
+            (
+                "  The checkpoint stores `available_features` in order (`meta.feature_names`).\n",
+                "",
+            ),
+            ("never derive them from data.", "never derive them."),
+            ("  configs stay on SystemRandom.", "  configs stay on SystemRandom"),
+            ("four whole bullets", "two whole bullets"),
+            ("is dropped without a warning", "is kept"),
+            (
+                "The privacy block is optional and its bounds are public parameters. ",
+                "",
+            ),
+        ],
+    )
+    def test_a_cut_reordered_or_overclaiming_excerpt_is_reported(
+        self, text, claude_md, old, new
+    ):
+        assert excerpt_problems(_corrupt(text, old, new), claude_md) != []
+
+    def test_excerpt_bullets_out_of_order_or_from_another_section_are_reported(
+        self, text, claude_md
+    ):
         block = text.split("<!--excerpt .claude/CLAUDE.md-->")[1].split(
             "<!--/excerpt-->"
         )[0]
-        source = (ROOT / ".claude/CLAUDE.md").read_text()
-        lines = [x for x in block.splitlines() if x.strip() and not x.startswith("```")]
-        assert lines
-        assert all(x in source for x in lines)
-        conventions = section_of(source, "## Conventions")
-        surprises = section_of(source, "## Behavior that will surprise you")
-        assert all(x in conventions or x in surprises for x in lines)
-        for secret in (
-            "/Users/",
-            "COGNEE",
-            "FRED",
-            "TWELVEDATA",
-            "Courtney",
-            ".internal",
-        ):
-            assert secret not in block
+        body = block.replace("```text\n", "").replace("```\n", "").strip("\n")
+        bullets = claude_md_bullets("\n" + body)
+        reordered = text.replace(body, "\n".join(reversed(bullets)))
+        assert any("order" in p for p in excerpt_problems(reordered, claude_md))
+        foreign = text.replace(
+            body, body + "\n- Type hints use modern union syntax (`np.ndarray | None`)"
+        )
+        assert excerpt_problems(foreign, claude_md) != []
 
-    def test_page_names_every_required_check_and_the_precommit_hooks(self, text):
-        gates = section_of(text, "## Gates")
-        for needle in (
-            "lint",
-            "test (3.10)",
-            "test (3.12)",
-            "smoke",
-            "100%",
-            "core/privacy.py",
-            "ruff-format",
-            "ruff",
-            "DGNTY-n",
-        ):
-            assert needle in gates, needle
+    def test_the_gates_say_only_what_the_workflow_hooks_and_protection_show(
+        self, text, ci_text, precommit_text
+    ):
+        assert gates_problems(text, ci_text, precommit_text) == []
 
-    def test_every_job_the_page_names_exists_in_the_workflow(self):
-        ci = (ROOT / ".github/workflows/ci.yml").read_text()
-        for job in ("lint:", "test:", "smoke:"):
-            assert job in ci
-        hooks = (ROOT / ".pre-commit-config.yaml").read_text()
-        for hook in ("id: ruff", "id: ruff-format"):
-            assert hook in hooks
+    @pytest.mark.parametrize(
+        "old, new",
+        [
+            (
+                "forbids deleting the branch and force-pushing",
+                "forbids deleting the branch",
+            ),
+            (
+                "It does not require a pull-request review and it",
+                "It requires a review and it",
+            ),
+            ("`pytest tests/ --cov --cov-fail-under=100`", "`pytest tests/ -x`"),
+            ("`ruff-format`", "`ruff-fmt`"),
+            ("`DGNTY-n` by convention", "`DGNTY-n` always"),
+            (
+                "A PR title carries",
+                "Every change reaches the integration branch through a pull request. A PR title carries",
+            ),
+            (
+                "and two merged PRs, #12 and #14, do not carry one",
+                "and every PR carries one",
+            ),
+            (
+                "Both branches require four status checks",
+                "Both branches require five status checks",
+            ),
+        ],
+    )
+    def test_a_gate_claim_the_record_does_not_show_is_reported(
+        self, text, ci_text, precommit_text, old, new
+    ):
+        corrupted = _corrupt(text, old, new)
+        assert gates_problems(corrupted, ci_text, precommit_text) != []
 
-    def test_the_plane_integration_example_links_a_pull_request(self, text):
+    def test_a_job_the_workflow_dropped_or_a_version_it_changed_is_reported(
+        self, text, ci_text, precommit_text
+    ):
+        without_smoke = ci_text.split("  smoke:")[0]
+        assert gates_problems(text, without_smoke, precommit_text) != []
+        other_version = ci_text.replace('["3.10", "3.12"]', '["3.11", "3.12"]')
+        assert other_version != ci_text
+        assert gates_problems(text, other_version, precommit_text) != []
+
+    def test_the_plane_section_describes_only_what_its_example_shows(self, text):
         section = section_of(text, "## Plane to GitHub")
+        flat = _flat(section)
         assert PR_LINK.search(section)
+        assert f"({BUILT_REPO}/pull/40)" in section
+        assert 'a "Linked to Plane Work Item(s)" comment' in flat
+        assert "names DGNTY-27 and DGNTY-36" in flat
+        # one example shown, so no quantifier over PRs and no "gets"/"is why" claim
+        assert not re.search(
+            r"\b(every|each|all|any|always|whenever|gets|is why)\b", flat, re.I
+        )
 
     def test_the_docs_index_links_the_page(self):
         assert "(HOW-IT-WAS-BUILT.md)" in (ROOT / "docs/README.md").read_text()
@@ -4620,3 +5161,88 @@ class TestHowItWasBuilt:
     def test_docs_never_cite_the_gitignored_internal_notes(self):
         for path in _public_docs():
             assert ".internal/" not in path.read_text(), path
+
+    def test_no_private_string_appears_anywhere_in_the_document(self, text):
+        assert private_string_problems(text) == []
+
+    @pytest.mark.parametrize(
+        "private",
+        [
+            "maintainer@example.org",
+            "see TWELVEDATA here",
+            "/Users/someone/work",
+            "/home/someone/work",
+            "~/notes",
+            "the COGNEE key",
+            "Courtney",
+        ],
+    )
+    def test_a_private_string_outside_the_excerpt_is_reported(self, text, private):
+        assert private_string_problems(text + f"\nNote: {private}\n") != []
+
+    def test_the_old_checkpoint_row_says_what_v1_0_does_and_what_is_deferred(
+        self, text
+    ):
+        row = " ".join(self._rows(text)[35])
+        assert "v1.0 rejects the old checkpoint format at export" in row
+        assert "retraining the old checkpoints is deferred" in row
+        assert "deferred only in part" in _flat(text)
+        results = _flat((ROOT / "docs" / "RESULTS.md").read_text())
+        assert "Checkpoints written before v1.0 are unsupported" in results
+        assert "DGNTY-35" in results
+        architecture = (ROOT / "docs" / "ARCHITECTURE.md").read_text()
+        assert "UnsupportedCheckpointError` (DGNTY-35)" in architecture
+
+    def test_m7_is_defined_once_and_v1_1_items_are_planned_not_present(self, text):
+        flat = _flat(text)
+        definition = "M7 is the release milestone in which the final evaluation runs"
+        assert flat.count(definition) == 1
+        assert flat.index(definition) < flat.index("| Finding |")
+        assert (
+            "v1.1 is the planned next release: a deferred item is planned for it "
+            "and does not exist in v1.0" in flat
+        )
+        assert "the review's 45 filed items" not in flat
+        assert (
+            "The review filed DGNTY-7 to DGNTY-45; DGNTY-1 to DGNTY-6 were filed "
+            "before it." in flat
+        )
+
+    def test_every_sentence_true_only_on_the_tuning_seed_follows_the_results_seed(
+        self, text
+    ):
+        assert how_built_seed_problems(text) == []
+
+    def test_a_tuning_seed_sentence_is_required_while_the_results_use_that_seed(
+        self, text
+    ):
+        for sentence in BUILT_TUNING_ONLY:
+            assert how_built_seed_problems(text.replace(sentence, "")) != [], sentence
+        assert how_built_seed_problems(
+            text.replace("| closes with the final evaluation (M7) |", "| fixed |")
+        )
+
+    def test_a_tuning_seed_sentence_is_rejected_once_the_results_carry_the_eval_seed(
+        self, text, tmp_path
+    ):
+        evaluation = self._evaluation_seed_results(tmp_path)
+        assert not results_on_tuning_seed(evaluation)
+        problems = how_built_seed_problems(text, evaluation)
+        for wording in BUILT_TUNING_WORDING[:4]:
+            assert any(wording in p for p in problems), wording
+        rewritten = text
+        for sentence in BUILT_TUNING_ONLY[:2]:
+            rewritten = rewritten.replace(sentence, "")
+        rewritten = rewritten.replace(
+            "| closes with the final evaluation (M7) |", "| fixed |"
+        ).replace("On the tuning seed", "On the evaluation seed")
+        assert how_built_seed_problems(rewritten, evaluation) == []
+
+    def test_a_has_not_run_sentence_is_rejected_once_the_results_carry_the_eval_seed(
+        self, text, tmp_path
+    ):
+        evaluation = self._evaluation_seed_results(tmp_path)
+        left_over = text.replace("(M7)", "(M7) has not run")
+        assert any(
+            "has not run" in p for p in how_built_seed_problems(left_over, evaluation)
+        )
