@@ -60,8 +60,9 @@ data:
 
 # Training loop (train/loop.py fit). A run writes best.pt (once the val metric has
 # improved; a run that never improves raises RuntimeError), last.pt and history.json
-# into its run directory: dignity-train uses checkpoint_dir itself, eval.run and the
-# privacy sweep nest per seed and task under it.
+# into its run directory: dignity-train uses checkpoint_dir itself, eval.run nests
+# eval_<seed>/<task>/train_seed_<s> under it, and the privacy sweep nests
+# privacy_sweep/eps_<e>/train_seed_<s> and privacy_sweep/reference/train_seed_<s>.
 train:
   epochs: 50  # maximum epochs; the cosine schedule is stretched over exactly this many
   lr: 0.0003  # AdamW learning rate at epoch 1, cosine-decayed towards 0 at the last epoch

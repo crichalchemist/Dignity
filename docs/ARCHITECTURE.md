@@ -56,11 +56,13 @@ overdispersed (`tests/test_data.py::TestNormalProcessPlausibility`).
 `volume`, `price`, `fee_rate` and `tx_count`, and the drawn severity scales the effect.
 The second column lists the columns a type changes at full severity and the direction
 each moves over the span; `tests/test_data.py::TestAnomalyInjectors` runs the injectors,
-and so does the test that checks this table against them.
+and so does
+`tests/test_docs.py::TestArchitectureDoc::test_each_anomaly_row_names_the_columns_its_injector_changes`,
+which checks this table against them.
 
 | Type | Changes | Mechanism |
 | --- | --- | --- |
-| `wash_trading` | `volume` up, `tx_count` up, `price` damped | Volume and transaction count inflate while the price moves less than normal. |
+| `wash_trading` | `volume` up, `tx_count` up, `price` damped | Volume and transaction count inflate while the `price` column varies less than normal. |
 | `pump_and_dump` | `volume` up, `price` rises then falls | A volume ramp with a price rise over the first part of the span, then a sharper fall. |
 | `fee_spike` | `fee_rate` up, `tx_count` up | `fee_rate` is multiplied by up to 10 and `tx_count` by up to 2; price and volume stay normal. |
 | `flash_crash` | `volume` up, `price` drops then recovers partly | One sharp price drop on the first row, where volume peaks; volume stays raised for the rest of the span while the price partly recovers. |

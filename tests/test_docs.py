@@ -1932,17 +1932,64 @@ def bare_identifiers(text: str) -> list[str]:
     ]
 
 
+def repo_class_members() -> dict[str, set[str]]:
+    """Class name -> its members: methods, class-level fields and `self.x`
+    attributes, plus those of base classes the repo defines."""
+    own: dict[str, set[str]] = {}
+    bases: dict[str, set[str]] = {}
+    for tree in _walk_repo():
+        for cls in (n for n in ast.walk(tree) if isinstance(n, ast.ClassDef)):
+            members = own.setdefault(cls.name, set())
+            bases.setdefault(cls.name, set()).update(
+                b.id for b in cls.bases if isinstance(b, ast.Name)
+            )
+            for item in cls.body:
+                if isinstance(item, ast.FunctionDef | ast.AsyncFunctionDef):
+                    members.add(item.name)
+                    members.update(
+                        n.attr
+                        for n in ast.walk(item)
+                        if isinstance(n, ast.Attribute)
+                        and isinstance(n.ctx, ast.Store)
+                        and isinstance(n.value, ast.Name)
+                        and n.value.id == "self"
+                    )
+                elif isinstance(item, ast.Assign | ast.AnnAssign):
+                    targets = (
+                        item.targets if isinstance(item, ast.Assign) else [item.target]
+                    )
+                    members.update(
+                        n.id
+                        for t in targets
+                        for n in ast.walk(t)
+                        if isinstance(n, ast.Name)
+                    )
+
+    def full(name: str, seen: frozenset = frozenset()) -> set[str]:
+        if name in seen:
+            return set()
+        out = set(own[name])
+        for base in bases[name] & own.keys():
+            out |= full(base, seen | {name})
+        return out
+
+    return {name: full(name) for name in own}
+
+
 def missing_identifiers(text: str) -> list[str]:
     """Bare identifiers of `text` with a part that is neither a name the repo defines
-    nor a string it writes nor a listed literal."""
+    nor a string it writes nor a listed literal. A chain whose first part is a repo
+    class is resolved as a chain: its second part must be a member of that class."""
     known = repo_names() | repo_strings() | set(ARCH_LITERALS)
-    return sorted(
-        {
-            span
-            for span in bare_identifiers(text)
-            if span not in known and not all(p in known for p in span.split("."))
-        }
-    )
+    members = repo_class_members()
+
+    def defined(span: str) -> bool:
+        first, *rest = span.split(".")
+        if rest and first in members and rest[0] not in members[first]:
+            return False
+        return span in known or all(p in known for p in span.split("."))
+
+    return sorted({span for span in bare_identifiers(text) if not defined(span)})
 
 
 def _onnx_graph(tmp_path):
@@ -2228,6 +2275,50 @@ class TestArchitectureDoc:
         export_source = (ROOT / "export" / "to_onnx.py").read_text().lower()
         assert "privacy" not in export_source
 
+    def test_cryptosource_is_unsupported_and_two_features_are_never_derived(
+        self, tmp_path
+    ):
+        # F17, F18: two scope sentences that an inversion would make false. Each is
+        # pinned as a sentence and tied to the code that makes it true.
+        from data.pipeline import TransactionPipeline
+
+        text = _flat(self.ARCH.read_text())
+        assert (
+            "`CryptoSource` in `data/source/crypto.py` is present but unsupported "
+            "until v1.1 (DGNTY-41)" in text
+        )
+        assert (
+            "`price_change`, `regime` and `entropy` are in the `DataConfig` default "
+            "list" in text
+        )
+        assert "but are never derived, so they vanish" in text
+        assert (
+            "`SignalProcessor` also defines `entropy`, `regime_detection` and "
+            "`process_sequence`; the pipeline does not call them" in text
+        )
+        crypto = tmp_path / "crypto.yaml"
+        crypto.write_text("data:\n  source: crypto\n")
+        with pytest.raises(ValueError, match="crypto"):
+            DignityConfig.from_yaml(str(crypto))
+        assert {"entropy", "regime", "price_change"} <= set(DataConfig().features)
+        frame = pd.DataFrame(
+            {"volume": np.arange(1.0, 61), "price": np.linspace(100, 130, 60)}
+        )
+        columns = set(TransactionPipeline().compute_signals(frame).columns)
+        assert columns.isdisjoint({"entropy", "regime", "price_change"})
+        pipeline_source = (ROOT / "data" / "pipeline.py").read_text()
+        assert "regime_detection" not in pipeline_source
+        assert "entropy" not in pipeline_source
+
+    def test_anomaly_table_lead_in_names_the_test_that_checks_it(self):
+        text = _flat(self.ARCH.read_text())
+        cited = (
+            "tests/test_docs.py::TestArchitectureDoc::"
+            "test_each_anomaly_row_names_the_columns_its_injector_changes"
+        )
+        assert f"`{cited}`" in text
+        assert hasattr(type(self), cited.rsplit("::", 1)[1])
+
     def test_label_policy_and_selection_sentences_are_what_the_code_does(self):
         # D16, D21, D22, D33, D40: each sentence is pinned and its code is run
         from models.head.policy import decide_actions
@@ -2448,6 +2539,12 @@ class TestArchitectureDoc:
         renamed = text.replace("`_fit_scaler`", "`_fit_nothing`")
         assert missing_identifiers(renamed) == ["_fit_nothing"]
 
+    def test_a_dotted_chain_is_resolved_as_a_chain_not_part_by_part(self):
+        # `costs` is a field of PolicyConfig, not of SplitData
+        assert missing_identifiers("`SplitData.costs`") == ["SplitData.costs"]
+        assert missing_identifiers("`SplitData.epsilon_spent`") == []
+        assert missing_identifiers("`SignalProcessor.price_momentum`") == []
+
     def test_a_renamed_config_key_in_the_doc_is_reported(self, tmp_path):
         doc = tmp_path / "doc.md"
         doc.write_text(
@@ -2614,3 +2711,129 @@ class TestBaseConfigDoc:
         shipped = yaml.safe_load((ROOT / "config/train_risk.yaml").read_text())
         assert example == shipped["privacy"]
         PrivacyConfig(**example)
+
+
+# Trading framing: Dignity is a risk project (detection, early warning, triage).
+# Matching is case-insensitive and word-bounded, so an identifier such as
+# `wash_trading` (underscores are word characters) is never a hit by itself.
+FRAMING_RE = re.compile(
+    r"\btrad(?:e|es|ed|er|ers|ing)\b"
+    r"|\b(?:buy|buys|buying|bought|sell|sells|selling|sold)\b"
+    r"|\bprice (?:move|moves|movement|movements|target|targets)\b"
+    r"|\bportfolios?\b|\bprofit\w*|\balpha\b|\bquants?\b"
+    r"|\b(?:maximi[sz]\w*|chas\w*|earn\w*|generat\w*|expected|excess|investment"
+    r"|log|stock|asset|market)\s+returns?\b|\breturns? on\b"
+    r"|trading agent|price (?:forecast|prediction)|predict prices"
+    r"|\bforecast\w* (?:the )?price",
+    re.I,
+)
+# The only terms removed before matching: anomaly types the generator injects,
+# in identifier and prose form. "layering" and "pump and dump" never match the
+# pattern; they are listed because the maintainer named them.
+FRAMING_ALLOWED = (
+    re.compile(r"wash[_ -]trading", re.I),  # anomaly type, six injectors
+    re.compile(r"pump[_ -]and[_ -]dump", re.I),  # anomaly type
+    re.compile(r"\blayering\b", re.I),  # anomaly type
+)
+
+
+def framing_hits(text: str) -> list[str]:
+    """Trading-framed phrases of `text`, after the anomaly-type allowlist."""
+    for allowed in FRAMING_ALLOWED:
+        text = allowed.sub(" ", text)
+    return [m.group(0) for m in FRAMING_RE.finditer(text)]
+
+
+def config_comments(path: Path) -> str:
+    """The comment text of a YAML file, live and commented-out keys alike."""
+    return "\n".join(
+        line[line.index("#") :] for line in path.read_text().splitlines() if "#" in line
+    )
+
+
+class TestFramingGuard:
+    """Dignity is a risk project; no public text frames it as trading, price
+    forecasting or quant work (maintainer rule)."""
+
+    def test_public_docs_and_config_comments_do_not_frame_the_project_as_trading(self):
+        hits = {
+            str(path.relative_to(ROOT)): framing_hits(text)
+            for path, text in [
+                *((d, d.read_text()) for d in _public_docs()),
+                *(
+                    (c, config_comments(c))
+                    for c in sorted((ROOT / "config").glob("*.yaml"))
+                ),
+            ]
+            if framing_hits(text)
+        }
+        assert hits == {}
+
+    def test_a_trading_sentence_added_to_the_architecture_doc_is_reported(self):
+        text = (ROOT / "docs" / "ARCHITECTURE.md").read_text()
+        for sentence in (
+            "Traders use the forecast to anticipate the next price move.",
+            "The policy decides whether to buy or sell.",
+        ):
+            assert framing_hits(text) == []
+            assert framing_hits(text + "\n" + sentence) != [], sentence
+
+    def test_a_trading_header_in_a_config_comment_is_reported(self):
+        base = ROOT / "config" / "base.yaml"
+        comments = config_comments(base)
+        assert comments.startswith("# Base Dignity Configuration")
+        framed = comments.replace(
+            "# Base Dignity Configuration", "# Trading-agent model architecture", 1
+        )
+        assert framing_hits(comments) == []
+        assert framing_hits(framed) == ["Trading"]
+
+    @pytest.mark.parametrize(
+        "phrase",
+        [
+            "a quant strategy",
+            "the alpha of the model",
+            "maximise returns",
+            "a portfolio of assets",
+            "chasing profit",
+            "buying and selling",
+            "a price target",
+            "price movement",
+            "the trader",
+        ],
+    )
+    def test_each_forbidden_trading_term_is_reported(self, phrase):
+        assert framing_hits(phrase) != []
+
+    def test_anomaly_type_names_are_allowed_but_do_not_mask_trading_framing(self):
+        allowed = (
+            "`wash_trading`, wash trading, wash-trading, `pump_and_dump`, "
+            "pump and dump, `layering` and the generator's `price` column"
+        )
+        assert framing_hits(allowed) == []
+        assert framing_hits(allowed + " for traders") == ["traders"]
+        assert framing_hits("wash trading helps trading") == ["trading"]
+
+    def test_the_docs_do_use_the_allowlisted_anomaly_names(self):
+        # the allowlist is not dead weight: the docs name the anomaly types
+        text = (ROOT / "docs" / "ARCHITECTURE.md").read_text()
+        assert "wash_trading" in text and "pump_and_dump" in text
+
+
+class TestBaseConfigRunDirectories:
+    def test_train_header_names_the_directories_each_runner_nests_under_it(self):
+        comments = _flat(
+            config_comments(ROOT / "config" / "base.yaml").replace("#", "")
+        )
+        assert "eval.run nests eval_<seed>/<task>/train_seed_<s> under it" in comments
+        assert (
+            "the privacy sweep nests privacy_sweep/eps_<e>/train_seed_<s> and "
+            "privacy_sweep/reference/train_seed_<s>" in comments
+        )
+        run = (ROOT / "eval" / "run.py").read_text()
+        sweep = (ROOT / "eval" / "privacy_sweep.py").read_text()
+        assert 'f"eval_{seed_name}"' in run and 'f"train_seed_{s}"' in run
+        assert "config.model.task" in run
+        assert '"privacy_sweep"' in sweep
+        assert 'f"eps_{epsilon}"' in sweep and '"reference"' in sweep
+        assert 'f"train_seed_{config.seed + r}"' in sweep
