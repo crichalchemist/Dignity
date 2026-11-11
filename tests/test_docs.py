@@ -1554,7 +1554,19 @@ def _sandboxed_argv(cmd: str, cfg: Path, tmp: Path) -> list[str]:
 
 def _git(root: Path, *args: str) -> None:
     subprocess.run(
-        ["git", "-c", "commit.gpgsign=false", "-c", "core.hooksPath=/dev/null", *args],
+        # an identity of its own: a CI runner has none configured
+        [
+            "git",
+            "-c",
+            "commit.gpgsign=false",
+            "-c",
+            "core.hooksPath=/dev/null",
+            "-c",
+            "user.name=dignity-tests",
+            "-c",
+            "user.email=dignity-tests@example.invalid",
+            *args,
+        ],
         cwd=root,
         check=True,
         capture_output=True,
