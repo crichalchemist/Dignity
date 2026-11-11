@@ -45,8 +45,8 @@ format that export no longer supports (DGNTY-3, DGNTY-35). No shipped config wri
 ## Commands
 
 ```bash
-# Tests (704 collected: test_core 65, test_data 118, test_models 23, test_privacy 42,
-# test_operator 4, test_docs 254, test_train 78, test_checkpoint 3, test_export 9,
+# Tests (902 collected: test_core 65, test_data 118, test_models 23, test_privacy 42,
+# test_operator 4, test_docs 452, test_train 78, test_checkpoint 3, test_export 9,
 # test_calibration 3, test_labels 7, test_gates 11, test_ci 4, test_eval 72,
 # test_colab_eval 11 — one skips without CUDA)
 # every test is limited to 300 s (pytest.ini; pytest-timeout), except the README quickstart
@@ -89,6 +89,8 @@ why `E402` is ignored for `data/`, `train/`, `export/`-adjacent trees in `pyproj
 
 ## Architecture
 
+Longer-form architecture: docs/ARCHITECTURE.md (data contract, heads, pipeline)
+
 One data path, one backbone, three interchangeable heads. The pieces only make sense together:
 
 ```
@@ -121,7 +123,7 @@ Adding a task = a head in `models/head/`, a branch in `Dignity.__init__`, a loss
 `train/losses.py`, target/selection/head_kwargs branches in `train/loop.fit`, metrics in
 `eval/metrics.py`, a baseline in `eval/baselines.py`, and a branch in `eval/run.py`.
 
-`core/signals.SignalProcessor` is an **all-static utility class**. `core/privacy.PrivacyManager`
+`core/signals.SignalProcessor` is a **stateless utility class** (static functions; `process_sequence` is a classmethod). `core/privacy.PrivacyManager`
 is **instance-based**: it is bound to a `PrivacyBudget` (ε ledger), an optional HMAC key, and
 an injectable `rng`. `TransactionPipeline.process_blocks` builds one
 `PrivacyManager`+`PrivacyBudget` per split (parallel composition); the instance-level manager
@@ -155,8 +157,8 @@ a mechanism, it needs a test in `tests/test_privacy.py` or CI's 100% gate on tha
   `BudgetExhausted`. Do not
   go back to `process()` + a positional slice — that trained on 100% normal and validated on 100%
   anomalous rows (val loss ≈ 42 in the January checkpoints).
-- **AMP and the risk loss.** `RiskHead` ends in a sigmoid and the risk criterion is `BCELoss`,
-  which PyTorch refuses inside an autocast region. `train_epoch` therefore computes the loss
+- **AMP and the risk loss.** `RiskHead` ends in a sigmoid and the risk criterion is binary cross-entropy on probabilities
+  (`F.binary_cross_entropy`), which PyTorch refuses inside an autocast region. `train_epoch` therefore computes the loss
   outside autocast in float32. This only bites on CUDA (CPU autocast is a no-op here), so a CPU
   run proves nothing about it; `tests/test_train.py` has a GPU-only test. If you ever switch the
   head to logits, switch the loss to `BCEWithLogitsLoss` in the same change and re-check ONNX
@@ -192,13 +194,18 @@ a mechanism, it needs a test in `tests/test_privacy.py` or CI's 100% gate on tha
   the linter. Both run in CI's `lint` job and in pre-commit. Width is settled; `pyproject.toml`
   and `.editorconfig` agree.
 - Type hints use modern union syntax (`np.ndarray | None`) — `target-version = "py310"`.
-- Config is dataclass-backed: `DignityConfig{model,data,train}` in `core/config.py`, loaded via
+- Config is dataclass-backed: `DignityConfig{model,data,train,eval,policy,privacy,device,seed}` in `core/config.py`, loaded via
   `DignityConfig.from_yaml`. Add a field to the dataclass **and** to `config/base.yaml`; unknown
   keys, top-level or nested, raise `TypeError` at load. `data.source` accepts only `synthetic`.
+  `config/base.yaml` is the config reference (there is no CONFIGURATION.md): every key carries
+  a comment saying what it does, `tests/test_docs.py::TestBaseConfigDoc` enforces a comment of at
+  least three words per key and pins the load-bearing ones to the code, and you
+  keep those comments current when you add a field.
 - A `privacy:` block in YAML is optional and validated at load (`PrivacyConfig`). No block =
   no privacy stage. `bounds` are public parameters chosen a priori — never derive them from data.
 - `privacy.deterministic_rng: true` (+ `privacy_seed=`) is the seeded experiment mode; shipped
   configs stay on SystemRandom.
+- Framing guard (`tests/test_docs.py`, `framing_hits`): a tripwire over a fixed trading/price-forecasting vocabulary in every public doc and `config/*.yaml` comment, not a proof; allowed forms (`trade-off`, `wash_trading`, `pump_and_dump`, `layering`) are listed beside it and the vocabulary is not extended.
 - Doc numbers are machine-checked in **every** public doc (`README.md` and `docs/**/*.md`;
   `tests/test_docs.py`, `check_numbers`). A quoted number is a token directly followed by a marker,
   `0.84 <!--num risk.json metrics.pr_auc.value .2f-->`, grammar

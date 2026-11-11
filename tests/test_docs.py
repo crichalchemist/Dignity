@@ -11,10 +11,21 @@ import subprocess
 import sys
 from pathlib import Path
 
+import numpy as np
+import pandas as pd
 import pytest
 import yaml
 
-from core.config import DataConfig, EvalConfig, SyntheticConfig, TrainConfig
+from core.config import (
+    DataConfig,
+    DignityConfig,
+    EvalConfig,
+    ModelConfig,
+    PolicyConfig,
+    PrivacyConfig,
+    SyntheticConfig,
+    TrainConfig,
+)
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -58,6 +69,55 @@ def _public_docs():
     yield from sorted((ROOT / "docs").rglob("*.md"))
 
 
+def heading_slugs(path: Path) -> set[str]:
+    """The anchors GitHub gives the headings of a markdown file."""
+    heads = re.findall(r"^#{1,6} +(.+?) *$", FENCE_RE.sub("", path.read_text()), re.M)
+    return {re.sub(r"[^\w\- ]", "", h.lower()).replace(" ", "-") for h in heads}
+
+
+def dead_links(docs=None) -> list[str]:
+    """Every relative link of a doc (default: every public doc) whose file is
+    missing or, for a markdown file, whose #fragment names no heading."""
+    dead = []
+    for path in _public_docs() if docs is None else docs:
+        for lineno, line in enumerate(path.read_text().splitlines(), start=1):
+            for target, frag in re.findall(r"\]\(([^)#\s]+)(?:#([^)]*))?\)", line):
+                if re.match(r"\w+:", target):
+                    continue  # http(s):, mailto:
+                where = f"{_label(path)}:{lineno}: {target}" + (
+                    f"#{frag}" if frag else ""
+                )
+                linked = path.parent / target
+                missing_anchor = (
+                    linked.exists()
+                    and frag
+                    and target.endswith(".md")
+                    and frag not in heading_slugs(linked)
+                )
+                if not linked.exists() or missing_anchor:
+                    dead.append(where)
+    return dead
+
+
+def missing_citations(docs=None) -> list[str]:
+    """Every `tests/file::Class[::method]` citation of a doc (default: every public
+    doc) that names a class or method the test file does not define."""
+    missing = []
+    for doc in _public_docs() if docs is None else docs:
+        for fname, cls, method in CITED.findall(doc.read_text()):
+            tree = ast.parse((ROOT / "tests" / fname).read_text())
+            classes = {n.name: n for n in tree.body if isinstance(n, ast.ClassDef)}
+            node = f"tests/{fname}::{cls}" + (f"::{method}" if method else "")
+            methods = (
+                {n.name for n in classes[cls].body if isinstance(n, ast.FunctionDef)}
+                if cls in classes
+                else set()
+            )
+            if cls not in classes or (method and method not in methods):
+                missing.append(f"{doc.name}: {node}")
+    return missing
+
+
 class TestDocs:
     def test_docs_do_not_reintroduce_removed_claims(self):
         hits = []
@@ -78,17 +138,13 @@ class TestDocs:
         assert "requirements-dev.txt" in ci
 
     def test_docs_do_not_link_to_files_that_do_not_exist(self):
-        import re
+        assert dead_links() == []
 
-        dead = []
-        for path in _public_docs():
-            for lineno, line in enumerate(path.read_text().splitlines(), start=1):
-                for target in re.findall(r"\]\(([^)#\s]+)(?:#[^)]*)?\)", line):
-                    if re.match(r"\w+:", target):
-                        continue  # http(s):, mailto:
-                    if not (path.parent / target).exists():
-                        dead.append(f"{path.relative_to(ROOT)}:{lineno}: {target}")
-        assert dead == []
+    def test_a_link_to_a_heading_that_does_not_exist_is_reported(self, tmp_path):
+        (tmp_path / "target.md").write_text("# Title\n\n## Data contract\n")
+        doc = tmp_path / "doc.md"
+        doc.write_text("[ok](target.md#data-contract) [bad](target.md#no-such)\n")
+        assert dead_links([doc]) == [f"{_label(doc)}:1: target.md#no-such"]
 
     def test_stale_docs_stay_deleted(self):
         for name in (
@@ -99,27 +155,10 @@ class TestDocs:
         ):
             assert not (ROOT / "docs" / f"{name}.md").exists(), name
 
-    def test_every_cited_privacy_test_exists(self):
+    def test_every_cited_test_exists(self):
         # A citation that names a test which does not exist is a claim with no
-        # test behind it (spec section 3).
-        missing = []
-        for doc in _public_docs():
-            for fname, cls, method in CITED.findall(doc.read_text()):
-                tree = ast.parse((ROOT / "tests" / fname).read_text())
-                classes = {n.name: n for n in tree.body if isinstance(n, ast.ClassDef)}
-                node = f"tests/{fname}::{cls}" + (f"::{method}" if method else "")
-                methods = (
-                    {
-                        n.name
-                        for n in classes[cls].body
-                        if isinstance(n, ast.FunctionDef)
-                    }
-                    if cls in classes
-                    else set()
-                )
-                if cls not in classes or (method and method not in methods):
-                    missing.append(f"{doc.name}: {node}")
-        assert missing == []
+        # test behind it (spec section 3). Every public doc is checked.
+        assert missing_citations() == []
         # No citation may omit its file (DGNTY-37): a backticked span naming a
         # Test* class must start with "tests/".
         bare = [
@@ -129,6 +168,18 @@ class TestDocs:
             if re.search(r"\bTest[A-Z]\w*", span) and not span.startswith("tests/")
         ]
         assert bare == []
+
+    def test_a_citation_of_a_test_that_does_not_exist_is_reported(self, tmp_path):
+        arch = ROOT / "docs" / "ARCHITECTURE.md"
+        real = "test_forecast_probabilities_never_decrease_with_horizon"
+        assert real in arch.read_text()
+        doc = tmp_path / "ARCHITECTURE.md"
+        doc.write_text(arch.read_text())
+        assert missing_citations([doc]) == []
+        doc.write_text(arch.read_text().replace(real, "test_no_such_method"))
+        assert any("test_no_such_method" in m for m in missing_citations([doc]))
+        doc.write_text(arch.read_text().replace("::TestTaskHeads", "::TestNoClass"))
+        assert any("TestNoClass" in m for m in missing_citations([doc]))
 
     def test_privacy_docs_state_the_per_split_claim(self):
         for path in PRIVACY_DOCS:
@@ -953,15 +1004,17 @@ class TestResultsComeFromOneRun:
         assert len(problems) == 1 and "neither" in problems[0], problems
 
 
-SYMBOL_RE = re.compile(r"^(core|data|models|train|export|eval)(\.\w+)+$")
+SYMBOL_RE = re.compile(r"^(core|data|models|model|train|export|eval|policy)(\.\w+)+$")
 PATH_EXT = (".py", ".yaml", ".md", ".json", ".png", ".ipynb")
 # Paths a doc may name although they are gitignored and so absent from a checkout.
 ALLOWED_PREFIXES = ("runs/", "checkpoints/")
 # Config sections a doc may name as `section.key`; a key is a dataclass field.
 CONFIG_SECTIONS = {
+    "model": ModelConfig,
     "data": DataConfig,
     "train": TrainConfig,
     "eval": EvalConfig,
+    "policy": PolicyConfig,
 }
 NESTED_CONFIG = {(DataConfig, "synthetic"): SyntheticConfig}
 
@@ -1066,6 +1119,8 @@ def resolve_symbol(dotted: str):
                 return _resolve_config_key(dotted)
             raise
         return obj
+    if parts[0] in CONFIG_SECTIONS:  # model and policy are no importable module
+        return _resolve_config_key(dotted)
     raise ImportError(dotted)
 
 
@@ -1769,3 +1824,1223 @@ class TestQuickstart:
         stray = stray_writes(before, _write_snapshot())
         assert compared and compared[0][0] is before, "the comparison did not run"
         assert stray == [], "the quickstart wrote into the repo"
+
+
+def _flat(text: str) -> str:
+    """Prose with emphasis marks dropped and whitespace collapsed to single spaces."""
+    return re.sub(r"\s+", " ", text.replace("**", ""))
+
+
+def _between(text: str, start: str, end: str) -> str:
+    """The text from `start` up to the next `end` after it."""
+    first = text.index(start)
+    return text[first : text.index(end, first)]
+
+
+def _first_table(section: str) -> list[list[str]]:
+    """Body rows of the first markdown table in `section`, as stripped cells."""
+    rows: list[list[str]] = []
+    for line in section.splitlines():
+        if line.startswith("|"):
+            rows.append([c.strip() for c in line.strip().strip("|").split("|")])
+        elif rows:
+            break
+    return rows[2:]
+
+
+IDENT_CHAIN_RE = re.compile(r"[A-Za-z_]\w*(\.[A-Za-z_]\w*)*")
+NAME_PACKAGES = ("core", "data", "models", "train", "eval", "export", "scripts")
+# Backticked words in ARCHITECTURE.md that the repo neither defines as a name nor
+# writes as a string: library and builtin names, and a symbol of the prose.
+ARCH_LITERALS = {
+    "None": "the Python constant",
+    "ValueError": "the builtin exception the code raises",
+    "RobustScaler": "the scikit-learn scaler the pipeline wraps",
+    "t": "the last row of a window, a symbol of the prose",
+    "attn_weights": "the name of the backbone's second return value, a local variable",
+}
+
+
+def _walk_repo():
+    for package in NAME_PACKAGES:
+        for path in sorted((ROOT / package).rglob("*.py")):
+            yield ast.parse(path.read_text())
+
+
+def repo_names() -> set[str]:
+    """Names the repo's packages define: top-level defs, classes and module-level
+    assignments, plus every method, class-level field and `self.x` attribute of a
+    class."""
+    names: set[str] = set()
+
+    def add(body: list[ast.stmt], in_class: bool) -> None:
+        for node in body:
+            if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef):
+                names.add(node.name)
+                if isinstance(node, ast.ClassDef):
+                    add(node.body, True)
+                elif in_class:
+                    names.update(
+                        n.attr
+                        for n in ast.walk(node)
+                        if isinstance(n, ast.Attribute)
+                        and isinstance(n.ctx, ast.Store)
+                        and isinstance(n.value, ast.Name)
+                        and n.value.id == "self"
+                    )
+            targets = []
+            if isinstance(node, ast.Assign):
+                targets = node.targets
+            elif isinstance(node, ast.AnnAssign):
+                targets = [node.target]
+            for target in targets:
+                names.update(
+                    n.id
+                    for n in ast.walk(target)
+                    if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store)
+                )
+
+    for tree in _walk_repo():
+        add(tree.body, False)
+    return names
+
+
+def repo_strings() -> set[str]:
+    """Identifier-like string constants of the repo's packages: dictionary keys,
+    column names, actions, metric names and the like."""
+    return {
+        n.value
+        for tree in _walk_repo()
+        for n in ast.walk(tree)
+        if isinstance(n, ast.Constant)
+        and isinstance(n.value, str)
+        and IDENT_CHAIN_RE.fullmatch(n.value)
+    }
+
+
+def bare_identifiers(text: str) -> list[str]:
+    """Backticked spans that are an identifier or a dotted chain of them and that
+    no other checker owns: not a path, not a config key, not a package-rooted
+    symbol."""
+    return [
+        span
+        for span in _spans(text)
+        if IDENT_CHAIN_RE.fullmatch(span)
+        and not SYMBOL_RE.match(span)
+        and span.split(".")[0] not in CONFIG_SECTIONS
+        and not _path_like(span)
+    ]
+
+
+def repo_class_members() -> dict[str, set[str]]:
+    """Class name -> its members: methods, class-level fields and `self.x`
+    attributes, plus those of base classes the repo defines."""
+    own: dict[str, set[str]] = {}
+    bases: dict[str, set[str]] = {}
+    for tree in _walk_repo():
+        for cls in (n for n in ast.walk(tree) if isinstance(n, ast.ClassDef)):
+            members = own.setdefault(cls.name, set())
+            bases.setdefault(cls.name, set()).update(
+                b.id for b in cls.bases if isinstance(b, ast.Name)
+            )
+            for item in cls.body:
+                if isinstance(item, ast.FunctionDef | ast.AsyncFunctionDef):
+                    members.add(item.name)
+                    members.update(
+                        n.attr
+                        for n in ast.walk(item)
+                        if isinstance(n, ast.Attribute)
+                        and isinstance(n.ctx, ast.Store)
+                        and isinstance(n.value, ast.Name)
+                        and n.value.id == "self"
+                    )
+                elif isinstance(item, ast.Assign | ast.AnnAssign):
+                    targets = (
+                        item.targets if isinstance(item, ast.Assign) else [item.target]
+                    )
+                    members.update(
+                        n.id
+                        for t in targets
+                        for n in ast.walk(t)
+                        if isinstance(n, ast.Name)
+                    )
+
+    def full(name: str, seen: frozenset = frozenset()) -> set[str]:
+        if name in seen:
+            return set()
+        out = set(own[name])
+        for base in bases[name] & own.keys():
+            out |= full(base, seen | {name})
+        return out
+
+    return {name: full(name) for name in own}
+
+
+def missing_identifiers(text: str) -> list[str]:
+    """Bare identifiers of `text` with a part that is neither a name the repo defines
+    nor a string it writes nor a listed literal. A chain whose first part is a repo
+    class is resolved as a chain: its second part must be a member of that class."""
+    known = repo_names() | repo_strings() | set(ARCH_LITERALS)
+    members = repo_class_members()
+
+    def defined(span: str) -> bool:
+        first, *rest = span.split(".")
+        if rest and first in members and rest[0] not in members[first]:
+            return False
+        return span in known or all(p in known for p in span.split("."))
+
+    return sorted({span for span in bare_identifiers(text) if not defined(span)})
+
+
+def _onnx_graph(tmp_path):
+    """A tiny exported risk model, loaded back."""
+    import onnx
+
+    from export.to_onnx import export_to_onnx
+    from models.dignity import Dignity
+
+    model = Dignity(task="risk", input_size=3, hidden_size=8, n_layers=1)
+    path = tmp_path / "tiny.onnx"
+    assert export_to_onnx(model, str(path), input_shape=(1, 12, 3))
+    return onnx.load(str(path))
+
+
+class TestArchitectureDoc:
+    """docs/ARCHITECTURE.md describes the code as it is: its tables, constants,
+    shapes and scope sentences are parsed and compared with the code, and every
+    backticked name must be one the repo defines."""
+
+    ARCH = ROOT / "docs" / "ARCHITECTURE.md"
+
+    def _frame(self):
+        from core.config import SyntheticConfig
+        from data.source.synthetic import SyntheticGenerator
+
+        config = SyntheticConfig(n_blocks=2, block_len=20)
+        return SyntheticGenerator(config).generate()
+
+    def test_data_contract_table_is_exactly_the_generated_frame(self):
+        frame = self._frame()
+        text = self.ARCH.read_text()
+        rows = _first_table(_between(text, "## Data contract", "### Labels"))
+        documented = {cells[0].strip("`"): cells[1] for cells in rows}
+        assert list(documented) == list(frame.columns)
+        for col, cell in documented.items():
+            actual = str(frame[col].dtype)
+            if cell.startswith("str"):
+                # object under pandas 2, str under pandas 3; the cell says so
+                assert actual in ("object", "str", "string"), col
+                assert actual != "object" or "object under pandas 2" in cell, col
+            else:
+                assert cell == actual, col
+
+    def test_anomaly_ids_count_every_injected_anomaly_once(self):
+        from core.config import SyntheticConfig
+        from data.source.synthetic import SyntheticGenerator
+
+        config = SyntheticConfig(n_blocks=40, block_len=160, contamination=1.0)
+        frame = SyntheticGenerator(config).generate()
+        ids = frame["anomaly_id"].to_numpy()
+        injected = ids[ids >= 0]
+        assert (ids[~frame["is_anomalous"].to_numpy()] == -1).all()
+        assert (np.diff(injected) >= 0).all()
+        assert sorted(set(injected.tolist())) == list(range(injected.max() + 1))
+
+    def test_doc_names_every_implemented_anomaly_type(self):
+        from data.source.anomalies import ANOMALY_TYPES
+
+        text = self.ARCH.read_text()
+        assert all(f"`{t}`" in text for t in ANOMALY_TYPES)
+
+    def test_each_anomaly_row_names_the_columns_its_injector_changes(self):
+        # Swapping two rows of the mechanism table must fail: the row of a type
+        # lists the raw columns that injector changes at full severity, each with
+        # the direction it moves, and every claim is measured on a real block.
+        from core.config import SyntheticConfig
+        from data.source.anomalies import ANOMALY_INJECTORS, ANOMALY_TYPES
+        from data.source.synthetic import RAW_COLUMNS, SyntheticGenerator
+
+        block = SyntheticGenerator(
+            SyntheticConfig(n_blocks=1, block_len=120, contamination=0.0)
+        ).generate()
+        start, duration = 40, 20
+        span = slice(start, start + duration)
+        text = self.ARCH.read_text()
+        rows = _first_table(_between(text, "`data.source.anomalies.", "### Labels"))
+        by_type = {cells[0].strip("`"): cells for cells in rows}
+        assert set(by_type) == set(ANOMALY_TYPES)
+        for kind in ANOMALY_TYPES:
+            out = ANOMALY_INJECTORS[kind](
+                block, start, duration, 1.0, np.random.default_rng(0)
+            )
+            changed = {
+                c
+                for c in RAW_COLUMNS
+                if not np.allclose(out[c].to_numpy(float), block[c].to_numpy(float))
+            }
+            documented = dict(re.findall(r"`(\w+)` (\w+)", by_type[kind][1]))
+            assert set(documented) == changed, kind
+            for col, word in documented.items():
+                new = out[col].to_numpy(float)
+                old = block[col].to_numpy(float)
+                if word == "up":
+                    assert (new >= old - 1e-9).all() and (new > old + 1e-9).any(), kind
+                elif word == "down":
+                    assert (new <= old + 1e-9).all() and (new < old - 1e-9).any(), kind
+        price = {
+            kind: ANOMALY_INJECTORS[kind](
+                block, start, duration, 1.0, np.random.default_rng(0)
+            )["price"].to_numpy(float)
+            for kind in ("wash_trading", "pump_and_dump", "flash_crash")
+        }
+        old = block["price"].to_numpy(float)
+        assert "damped" in by_type["wash_trading"][1]
+        wash = np.abs(np.diff(np.log(price["wash_trading"])))[
+            start - 1 : start - 1 + duration
+        ]
+        assert (
+            wash < np.abs(np.diff(np.log(old)))[start - 1 : start - 1 + duration]
+        ).all()
+        assert "rises" in by_type["pump_and_dump"][1]
+        assert price["pump_and_dump"][start] > old[start]
+        assert "drops" in by_type["flash_crash"][1]
+        assert price["flash_crash"][start] < old[start]
+        assert "first row, where volume peaks" in by_type["flash_crash"][2]
+        crash = ANOMALY_INJECTORS["flash_crash"](
+            block, start, duration, 1.0, np.random.default_rng(0)
+        )["volume"].to_numpy(float)
+        ratio = crash[span] / block["volume"].to_numpy(float)[span]
+        assert ratio[0] > ratio[1:].max() and (ratio[1:] > 1).all()
+        assert (
+            "volume stays raised for the rest of the span" in by_type["flash_crash"][2]
+        )
+
+    def test_fee_spike_and_layering_rows_state_the_measured_multipliers(self):
+        from core.config import SyntheticConfig
+        from data.source.anomalies import ANOMALY_INJECTORS
+        from data.source.synthetic import SyntheticGenerator
+
+        block = SyntheticGenerator(
+            SyntheticConfig(n_blocks=1, block_len=120, contamination=0.0)
+        ).generate()
+        start, duration = 40, 20
+        span = slice(start, start + duration)
+        rng = np.random.default_rng(0)
+        spike = ANOMALY_INJECTORS["fee_spike"](block, start, duration, 1.0, rng)
+        fee = spike["fee_rate"].to_numpy(float) / block["fee_rate"].to_numpy(float)
+        tx = spike["tx_count"].to_numpy(float) / block["tx_count"].to_numpy(float)
+        assert np.allclose(fee[span], 10.0) and np.allclose(tx[span], 2.0)
+        layered = ANOMALY_INJECTORS["layering"](block, start, duration, 1.0, rng)
+        rows = np.flatnonzero(
+            ~np.isclose(layered["volume"].to_numpy(), block["volume"].to_numpy())
+        )
+        assert rows.tolist() == list(range(start, start + duration, 4))
+        text = _flat(self.ARCH.read_text())
+        assert "`fee_rate` is multiplied by up to 10 and `tx_count` by up to 2" in text
+        assert "Every fourth row gets an added volume spike" in text
+
+    def test_doc_makes_no_trading_or_agent_claim(self):
+        # Regression guard: green before the rewrite. Word-bounded so that
+        # "support" and UnsupportedCheckpointError stay writable; the REMOVED
+        # list already covers the forecasting phrases.
+        text = self.ARCH.read_text().lower()
+        assert re.search(r"\b(ppo|a3c)\b", text) is None
+        assert "trading agent" not in text
+        # the three tasks are about risk: no trading or price-forecasting framing
+        assert re.search(r"\b(trading|quant|alpha)\b", text) is None
+        assert re.search(r"price (forecast|prediction)|predict prices", text) is None
+
+    def test_architecture_doc_has_no_pre_v1_names(self):
+        # Guard: red on the old document, which named load_crypto_prices,
+        # create_dignity_model, create_dataloaders and load_and_process; it keeps
+        # every name that is defined nowhere in the code out of the new one.
+        text = self.ARCH.read_text()
+        for stale in (
+            "compute_volatility",
+            "compute_entropy",
+            "compute_momentum",
+            "compute_all_signals",
+            "detect_regime",
+            "load_crypto_prices",
+            "create_dignity_model",
+            "create_dataloaders",
+            "load_and_process",
+            "test_size",
+        ):
+            assert stale not in text, stale
+
+    def test_every_signal_the_pipeline_derives_is_documented(self):
+        from data.pipeline import SIGNAL_SOURCES
+
+        text = self.ARCH.read_text()
+        for name in SIGNAL_SOURCES:
+            assert f"`{name}`" in text, name
+
+    def test_signal_constants_are_the_ones_the_pipeline_computes_with(self):
+        from data.pipeline import SIGNAL_SOURCES, TransactionPipeline
+
+        text = _flat(self.ARCH.read_text())
+        (window,) = re.findall(r"standard deviation of the (\d+) rows before", text)
+        (lag,) = re.findall(r"\(x\[i\] - x\[i-(\d+)\]\) / x\[i-\1\]", text)
+        up, down = re.findall(r"1 above `\+([\d.]+)`, -1 below `-([\d.]+)`", text)[0]
+        assert up == down
+        window, lag, threshold = int(window), int(lag), float(up)
+        rng = np.random.default_rng(7)
+        n = window + 40
+        frame = pd.DataFrame(
+            {
+                "volume": rng.uniform(1, 100, n),
+                "price": 100 * np.exp(np.cumsum(rng.normal(0, 0.02, n))),
+            }
+        )
+        out = TransactionPipeline().compute_signals(frame)
+        assert set(SIGNAL_SOURCES) <= set(out.columns)
+        i = window + 15
+        for name, source in (("volume_volatility", "volume"), ("volatility", "price")):
+            values = frame[source].to_numpy()
+            assert out[name].iloc[0] == 0
+            assert out[name].iloc[i] == pytest.approx(
+                np.std(values[i - window : i]), rel=1e-9
+            )
+            assert out[name].iloc[3] == pytest.approx(np.std(values[0:3]), rel=1e-9)
+        price = frame["price"].to_numpy()
+        momentum = out["momentum"].to_numpy()
+        assert (momentum[:lag] == 0).all()
+        assert momentum[lag] == pytest.approx((price[lag] - price[0]) / price[0])
+        assert momentum[i] == pytest.approx(
+            (price[i] - price[i - lag]) / price[i - lag]
+        )
+        steps = np.array(
+            [
+                1.0,
+                1 + 1.5 * threshold,
+                1 - 1.5 * threshold,
+                1 + 0.5 * threshold,
+                1 - 0.5 * threshold,
+                1.0,
+            ]
+        )
+        series = pd.DataFrame({"volume": np.ones(6), "price": 100 * np.cumprod(steps)})
+        direction = TransactionPipeline().compute_signals(series)["directional_change"]
+        assert direction.tolist() == [0, 1, -1, 0, 0, 0]
+
+    def test_sections_that_later_docs_link_to_exist_in_pipeline_order(self):
+        text = self.ARCH.read_text()
+        headings = re.findall(r"^## (.+)$", text, re.MULTILINE)
+        wanted = [
+            "Data contract",
+            "Pipeline",
+            "Signals",
+            "Backbone",
+            "Heads",
+            "Training and evaluation",
+            "Checkpoint and export",
+        ]
+        assert [h for h in headings if h in wanted] == wanted
+
+    def test_every_triage_action_is_named(self):
+        from models.head.policy import ACTIONS
+
+        text = self.ARCH.read_text()
+        for action in ACTIONS:
+            assert f"`{action}`" in text, action
+
+    def test_cost_table_is_the_shipped_policy_cost_table(self):
+        text = self.ARCH.read_text()
+        rows = _first_table(_between(text, "| Action |", "### Presets"))
+        documented = {
+            cells[0].strip("`"): {"anomaly": float(cells[1]), "normal": float(cells[2])}
+            for cells in rows
+        }
+        assert documented == PolicyConfig().costs
+
+    def test_scope_limits_of_v1_are_stated(self):
+        # data.source is synthetic-only and nothing releases at inference time;
+        # a doc that implied otherwise would describe paths that do not exist.
+        text = self.ARCH.read_text()
+        assert "`data.source`" in text and "`CryptoSource`" in text
+        assert "DGNTY-27" in text
+        assert "DGNTY-35" in text
+
+    def test_scope_limits_of_v1_hold_in_the_code_and_are_stated_as_sentences(self):
+        text = _flat(self.ARCH.read_text())
+        assert "`data.source` is `synthetic` only in v1.0" in text
+        assert "v1.0 has no inference-time privacy release" in text
+        assert (
+            "nothing in the export path adds noise to or generalizes a live input"
+            in text
+        )
+        with pytest.raises(ValueError, match="crypto"):
+            DataConfig(source="crypto")
+        export_source = (ROOT / "export" / "to_onnx.py").read_text().lower()
+        assert "privacy" not in export_source
+
+    def test_cryptosource_is_unsupported_and_two_features_are_never_derived(
+        self, tmp_path
+    ):
+        # F17, F18: two scope sentences that an inversion would make false. Each is
+        # pinned as a sentence and tied to the code that makes it true.
+        from data.pipeline import TransactionPipeline
+
+        text = _flat(self.ARCH.read_text())
+        assert (
+            "`CryptoSource` in `data/source/crypto.py` is present but unsupported "
+            "until v1.1 (DGNTY-41)" in text
+        )
+        assert (
+            "`price_change`, `regime` and `entropy` are in the `DataConfig` default "
+            "list" in text
+        )
+        assert "but are never derived, so they vanish" in text
+        assert (
+            "`SignalProcessor` also defines `entropy`, `regime_detection` and "
+            "`process_sequence`; the pipeline does not call them" in text
+        )
+        crypto = tmp_path / "crypto.yaml"
+        crypto.write_text("data:\n  source: crypto\n")
+        with pytest.raises(ValueError, match="crypto"):
+            DignityConfig.from_yaml(str(crypto))
+        assert {"entropy", "regime", "price_change"} <= set(DataConfig().features)
+        frame = pd.DataFrame(
+            {"volume": np.arange(1.0, 61), "price": np.linspace(100, 130, 60)}
+        )
+        columns = set(TransactionPipeline().compute_signals(frame).columns)
+        assert columns.isdisjoint({"entropy", "regime", "price_change"})
+        pipeline_source = (ROOT / "data" / "pipeline.py").read_text()
+        assert "regime_detection" not in pipeline_source
+        assert "entropy" not in pipeline_source
+
+    def test_anomaly_table_lead_in_names_the_test_that_checks_it(self):
+        text = _flat(self.ARCH.read_text())
+        cited = (
+            "tests/test_docs.py::TestArchitectureDoc::"
+            "test_each_anomaly_row_names_the_columns_its_injector_changes"
+        )
+        assert f"`{cited}`" in text
+        assert hasattr(type(self), cited.rsplit("::", 1)[1])
+
+    def test_label_policy_and_selection_sentences_are_what_the_code_does(self):
+        # D16, D21, D22, D33, D40: each sentence is pinned and its code is run
+        from models.head.policy import decide_actions
+        from train.loop import _selection_metric
+
+        text = _flat(self.ARCH.read_text())
+        assert "strictly greater than `data.label_overlap`" in text
+        assert "`block` never counts against the review budget" in text
+        assert (
+            "Policy ignores `train.select_metric`, `train.pos_weight` and the "
+            "chance guard" in text
+        )
+        assert "if validation AUROC is below `train.chance_guard_auroc`" in text
+        assert "`model.n_layers` unidirectional layers" in text
+        from data.labels import risk_labels
+
+        flags = np.array([True, False, False, False, False, False])
+        at_limit = risk_labels(flags, np.array([0]), 4, 0.25)
+        below = risk_labels(flags, np.array([0]), 4, 0.2)
+        assert at_limit.tolist() == [0] and below.tolist() == [1]
+        probs = np.array(
+            [[0.1, 0.1, 0.8], [0.1, 0.1, 0.8], [0.1, 0.1, 0.8], [0.2, 0.6, 0.2]]
+        )
+        assert decide_actions(probs, 0.25).tolist() == [2, 2, 2, 1]
+        config = DignityConfig(model=ModelConfig(task="policy"))
+        config.train.select_metric = "auroc"
+        assert _selection_metric(config) == "neg_cost"
+
+    def test_head_output_shapes_are_the_documented_ones(self):
+        import torch
+
+        from models.dignity import Dignity
+
+        text = self.ARCH.read_text()
+        rows = _first_table(_between(text, "| Task | Head |", "Pinned by"))
+        documented = {
+            cells[0].strip("`"): re.search(r"`\[B, ([^\]]+)\]`", cells[2]).group(1)
+            for cells in rows
+        }
+        assert set(documented) == {"risk", "forecast", "policy"}
+        x = torch.randn(2, 12, 3)
+        kwargs = {"risk": {}, "forecast": {"horizon": 4}, "policy": {}}
+        for task, width in documented.items():
+            model = Dignity(task=task, input_size=3, hidden_size=8, **kwargs[task])
+            predictions, attention = model.eval()(x)
+            expected = 4 if width == "horizon" else int(width)
+            assert tuple(predictions.shape) == (2, expected), task
+            assert tuple(attention.shape) == (2, 12), task
+
+    def test_backbone_shapes_and_kernel_caveat_are_the_documented_ones(self):
+        import torch
+
+        from models.dignity import Dignity
+
+        text = _flat(self.ARCH.read_text())
+        assert "maps `x [B, T, F]` to `(context [B, H], attn_weights [B, T])`" in text
+        assert (
+            "An even kernel adds one step per convolution, so `attn_weights` is "
+            "`[B, T+2]`" in text
+        )
+        x = torch.randn(2, 12, 3)
+        for kernel, steps in ((3, 12), (5, 12), (4, 14)):
+            backbone = Dignity(
+                task="risk", input_size=3, hidden_size=8, cnn_kernel_size=kernel
+            ).backbone.eval()
+            context, attention = backbone(x)
+            assert tuple(context.shape) == (2, 8), kernel
+            assert tuple(attention.shape) == (2, steps), kernel
+            assert backbone.lstm.bidirectional is False
+        for path in sorted((ROOT / "config").glob("*.yaml")):
+            assert DignityConfig.from_yaml(str(path)).model.cnn_kernel_size % 2 == 1
+
+    def test_fit_signature_and_record_fields_are_the_documented_ones(self):
+        import inspect
+
+        from data.pipeline import SplitData, WindowSet
+        from train.loop import FitResult, fit
+
+        text = _flat(self.ARCH.read_text())
+        (signature,) = re.findall(r"`train/loop\.py::fit\(([^)]*)\)`", text)
+        documented = [p.split("=")[0].strip() for p in signature.split(",")]
+        assert documented == list(inspect.signature(fit).parameters)
+
+        def named(pattern: str) -> list[str]:
+            (found,) = re.findall(pattern, text)
+            return [s for s in SPAN.findall(found) if IDENT_CHAIN_RE.fullmatch(s)]
+
+        def fields(cls) -> list[str]:
+            return [f.name for f in dataclasses.fields(cls)]
+
+        assert named(r"`train\.loop\.FitResult`: (.*?)\. ") == fields(FitResult)
+        assert named(r"`SplitData` holds (.*?)\. Each") == fields(SplitData)[:3] + [
+            "feature_names",
+            "scaler_center",
+            "scaler_scale",
+            "epsilon_spent",
+            "privacy_mode",
+        ]
+        assert named(r"`WindowSet` carries (.*?) \(the dominant") == fields(WindowSet)
+
+    def test_checkpoint_sentences_are_the_documented_format(self):
+        from train.checkpoint import FORMAT_VERSION, CheckpointMeta
+
+        text = _flat(self.ARCH.read_text())
+        assert re.findall(r"`train\.checkpoint\.FORMAT_VERSION` is (\d+)", text) == [
+            str(FORMAT_VERSION)
+        ]
+        (listed,) = re.findall(
+            r"`train\.checkpoint\.CheckpointMeta`: (.*?) \(the whole", text
+        )
+        documented = SPAN.findall(listed)
+        assert documented == [f.name for f in dataclasses.fields(CheckpointMeta)]
+        assert "`load_checkpoint` returns it as a `CheckpointMeta`" in text
+
+    def test_export_sentences_are_what_the_export_code_does(self, tmp_path):
+        import torch
+
+        from export.to_onnx import main
+
+        text = _flat(self.ARCH.read_text())
+        model = _onnx_graph(tmp_path)
+        graph = model.graph
+        ((opset, input_name, first, second),) = re.findall(
+            r"writes opset (\d+) with input `(\w+)` `\[batch, sequence, features\]` "
+            r"and outputs `(\w+)` and `(\w+)`",
+            text,
+        )
+        assert [o.version for o in model.opset_import if o.domain == ""] == [int(opset)]
+        initializers = {i.name for i in graph.initializer}
+        inputs = [i for i in graph.input if i.name not in initializers]
+        assert [i.name for i in inputs] == [input_name]
+        assert [o.name for o in graph.output] == [first, second]
+        dims = {
+            t.name: [bool(d.dim_param) for d in t.type.tensor_type.shape.dim]
+            for t in [*inputs, *graph.output]
+        }
+        assert dims[input_name][:2] == [True, True]
+        assert dims[first][0] and not any(dims[first][1:])
+        assert dims[second][:2] == [True, True]
+        assert (
+            "the batch axis of every tensor and the sequence axis of the input and "
+            "`attention_weights` are dynamic" in text
+        )
+        (ok, failed, unsupported) = re.findall(
+            r"returns (\d+) on success, (\d+) when verification fails and (\d+) for "
+            r"an unsupported checkpoint",
+            text,
+        )[0]
+        returned = {
+            n.value.value
+            for n in ast.walk(
+                next(
+                    f
+                    for f in ast.parse((ROOT / "export/to_onnx.py").read_text()).body
+                    if isinstance(f, ast.FunctionDef) and f.name == "main"
+                )
+            )
+            if isinstance(n, ast.Return) and isinstance(n.value, ast.Constant)
+        }
+        assert returned == {int(ok), int(failed), int(unsupported)}
+        old = tmp_path / "pre_v1.pt"
+        torch.save({"model_state_dict": {}}, old)
+        assert main(
+            ["--checkpoint", str(old), "--output", str(tmp_path / "x.onnx")]
+        ) == int(unsupported)
+
+    def test_onnx_consumer_paragraph_tells_the_truth_about_released_inputs(self):
+        # The exported model was fitted to released inputs. Under a privacy block
+        # volume is released in log1p units and the generalization classes are
+        # fitted on train, and the checkpoint stores neither: v1.0 ships no way to
+        # prepare new private inputs for it.
+        from train.checkpoint import CheckpointMeta
+
+        text = _flat(self.ARCH.read_text())
+        assert "privacy release, then signals, then" in text
+        assert "`(x - meta.scaler_center) / meta.scaler_scale`" in text
+        assert "`volume` is in log1p units, clipped to the block's `bounds`" in text
+        assert "the checkpoint does not store them" in text
+        assert "no way to prepare new private inputs" in text
+        assert "needs only the signals and the scaler" in text
+        fields = {f.name for f in dataclasses.fields(CheckpointMeta)}
+        assert not {f for f in fields if "general" in f or f == "privacy"}
+        for path in sorted((ROOT / "config").glob("*.yaml")):
+            privacy = DignityConfig.from_yaml(str(path)).privacy
+            if privacy is not None:
+                assert privacy.features["volume"].transform == "log1p", path.name
+
+    def test_a_privacy_trained_scaler_is_fitted_in_log1p_units_of_volume(self):
+        from train.loop import prepare_data
+
+        template = DignityConfig.from_yaml(str(ROOT / "config/train_risk.yaml"))
+        config = DignityConfig.from_yaml(str(ROOT / "config/smoke.yaml"))
+        privacy = dataclasses.replace(template.privacy, deterministic_rng=True)
+        config = dataclasses.replace(
+            config,
+            privacy=privacy,
+            data=dataclasses.replace(config.data, features=template.data.features),
+        )
+        frame, split = prepare_data(config, privacy_seed=0)
+        centre = split.scaler_center[split.feature_names.index("volume")]
+        raw_median = float(np.median(frame["volume"]))
+        assert abs(centre - np.log1p(raw_median)) < abs(centre - raw_median)
+        assert privacy.features["volume"].bounds[1] < raw_median
+
+    def test_doc_quotes_no_metric_number_and_has_no_results_zone(self):
+        text = self.ARCH.read_text()
+        assert "<!--" not in text
+        prose = strip_code(text)
+        metric = r"\b(AUROC|PR-AUC|recall|Brier|prevalence|precision|cost)\b"
+        assert re.search(metric + r"[^.\n]{0,40}\b\d\.\d+", prose, re.I) is None
+        assert numbers_problems([self.ARCH]) == []
+
+    def test_every_bare_name_the_doc_backticks_is_defined_in_the_repo(self):
+        assert missing_identifiers(self.ARCH.read_text()) == []
+
+    def test_a_renamed_name_in_the_doc_is_reported(self):
+        text = self.ARCH.read_text()
+        renamed = text.replace("`_fit_scaler`", "`_fit_nothing`")
+        assert missing_identifiers(renamed) == ["_fit_nothing"]
+
+    def test_a_dotted_chain_is_resolved_as_a_chain_not_part_by_part(self):
+        # `costs` is a field of PolicyConfig, not of SplitData
+        assert missing_identifiers("`SplitData.costs`") == ["SplitData.costs"]
+        assert missing_identifiers("`SplitData.epsilon_spent`") == []
+        assert missing_identifiers("`SignalProcessor.price_momentum`") == []
+
+    def test_a_renamed_config_key_in_the_doc_is_reported(self, tmp_path):
+        doc = tmp_path / "doc.md"
+        doc.write_text(
+            "`model.dropout` `policy.review_budget` "
+            "`model.nope_dropout` `policy.review_nope`"
+        )
+        assert missing_symbols([doc]) == [
+            f"{doc}: model.nope_dropout",
+            f"{doc}: policy.review_nope",
+        ]
+        assert missing_symbols([self.ARCH]) == []
+
+
+class TestBaseConfigDoc:
+    """config/base.yaml is the configuration reference: every key, live or in the
+    commented blocks, carries a comment of at least three words, the load-bearing
+    comments are pinned to the code, and the file still loads to the shipped
+    values."""
+
+    BASE = ROOT / "config/base.yaml"
+    SHIPPED_FEATURES = [
+        "volume",
+        "fee_rate",
+        "tx_count",
+        "volatility",
+        "price_change",
+        "momentum",
+        "directional_change",
+        "volume_volatility",
+        "regime",
+    ]
+
+    def test_every_config_field_is_documented_in_base_yaml(self):
+        raw = yaml.safe_load(self.BASE.read_text())
+        # data.synthetic stays commented out on purpose (a live block would make
+        # every run that sets only part of it inherit the whole thing), so its
+        # fields are checked against the commented block instead
+        assert set(raw) == {f.name for f in dataclasses.fields(DignityConfig)} - {
+            "privacy"
+        }
+        sections = {
+            "model": ModelConfig,
+            "data": DataConfig,
+            "train": TrainConfig,
+            "policy": PolicyConfig,
+            "eval": EvalConfig,
+        }
+        for section, cls in sections.items():
+            expected = {f.name for f in dataclasses.fields(cls)}
+            if section == "data":
+                expected -= {"synthetic"}
+            assert expected <= set(raw[section]), section
+        text = self.BASE.read_text()
+        block = text[text.index("# Event-record generator") : text.index("\ntrain:")]
+        commented = set(re.findall(r"^#\s+(\w+):", block, re.M))
+        wanted = {f.name for f in dataclasses.fields(SyntheticConfig)}
+        assert wanted <= commented, wanted - commented
+
+    @staticmethod
+    def _words(lines: list[str], i: int) -> int:
+        """Words of the comment on line i plus the comment lines right above it."""
+        words = lines[i].partition("#")[2].split()
+        j = i - 1
+        while j >= 0 and lines[j].lstrip().startswith("#"):
+            words += lines[j].split()[1:]
+            j -= 1
+        return len(words)
+
+    def test_every_key_in_base_yaml_carries_a_comment_of_three_words(self):
+        # A comment can still say the wrong thing: the load-bearing ones are
+        # pinned below, and the rest are reviewed against the code with the file.
+        lines = self.BASE.read_text().splitlines()
+        short = [
+            line
+            for i, line in enumerate(lines)
+            if re.match(r"\s*[a-z_]+:", line) and self._words(lines, i) < 3
+        ]
+        assert short == []
+
+    def test_every_key_of_the_commented_synthetic_block_carries_a_comment(self):
+        block = self._synthetic_block()
+        text = "\n".join(block)
+        for field in dataclasses.fields(SyntheticConfig):
+            chunk = re.search(
+                rf"^ +{field.name}:(.*?)(?=^ {{4}}\w+:|\Z)", text, re.M | re.S
+            )
+            assert chunk is not None, field.name
+            comment = " ".join(
+                line.partition(" #")[2] for line in chunk.group(0).splitlines()
+            )
+            assert len(comment.split()) >= 3, field.name
+
+    def _synthetic_block(self) -> list[str]:
+        lines = self.BASE.read_text().splitlines()
+        block = []
+        for line in lines[lines.index("#   synthetic:") :]:
+            if not line.startswith("#   "):
+                break
+            block.append(line[2:])
+        return block
+
+    def test_commented_synthetic_block_holds_the_generator_defaults(self):
+        # the header says "every field at default": the values must be, too
+        shown = yaml.safe_load("\n".join(self._synthetic_block()))
+        default = json.loads(json.dumps(dataclasses.asdict(SyntheticConfig())))
+        assert shown == {"synthetic": default}
+
+    def test_load_bearing_comments_say_what_the_code_does(self):
+        lines = self.BASE.read_text().splitlines()
+        pinned = {
+            "input_size": "IGNORED",
+            "source": 'only "synthetic" in v1.0',
+            "label_overlap": "> this",
+            "use_amp": "takes effect only on CUDA",
+            "eval_seed": "never tune on it",
+            "severity_range": "drawn per anomaly",
+            "epsilons": "n_train_seeds risk models per value, plus a no-privacy",
+        }
+        for key, phrase in pinned.items():
+            (line,) = [ln for ln in lines if re.match(rf"#?\s+{key}:", ln)]
+            assert phrase in line, key
+        assert EvalConfig().eval_seed == 2026
+
+    def test_base_yaml_loads_to_the_shipped_defaults(self):
+        loaded = DignityConfig.from_yaml(str(self.BASE))
+        default = DignityConfig()
+        # data.features is excluded by name: the shipped list is pinned in
+        # test_shipped_feature_list_resolves_to_seven_features and differs from
+        # the DataConfig default, which names entropy and lacks volume_volatility
+        loaded = dataclasses.replace(
+            loaded,
+            data=dataclasses.replace(loaded.data, features=default.data.features),
+        )
+        assert loaded == default
+
+    def test_shipped_feature_list_resolves_to_seven_features(self):
+        from train.loop import prepare_data
+
+        config = DignityConfig.from_yaml(str(self.BASE))
+        assert config.data.features == self.SHIPPED_FEATURES
+        synthetic = dataclasses.replace(config.data.synthetic, n_blocks=12)
+        config = dataclasses.replace(
+            config, data=dataclasses.replace(config.data, synthetic=synthetic)
+        )
+        _, split = prepare_data(config)
+        assert split.feature_names == [
+            f for f in self.SHIPPED_FEATURES if f not in ("price_change", "regime")
+        ]
+
+    def test_the_architecture_link_in_base_yaml_names_a_heading(self):
+        (anchor,) = re.findall(r"docs/ARCHITECTURE\.md#([\w-]+)", self.BASE.read_text())
+        assert anchor in heading_slugs(ROOT / "docs" / "ARCHITECTURE.md")
+
+    def test_commented_privacy_example_is_the_shipped_risk_block(self):
+        # the example must not drift from what config/train_risk.yaml runs with
+        lines = self.BASE.read_text().splitlines()
+        start = lines.index("# privacy:")
+        block = []
+        for line in lines[start:]:
+            if not (line == "# privacy:" or line.startswith("#   ")):
+                break
+            block.append(line[2:])
+        example = yaml.safe_load("\n".join(block))["privacy"]
+        shipped = yaml.safe_load((ROOT / "config/train_risk.yaml").read_text())
+        assert example == shipped["privacy"]
+        PrivacyConfig(**example)
+
+
+# Trading framing: Dignity is a risk project (detection, early warning, triage).
+# Matching is case-insensitive and word-bounded, so an identifier such as
+# `wash_trading` (underscores are word characters) is never a hit by itself.
+FRAMING_WORDS = [
+    "trade",
+    "trades",
+    "traded",
+    "trader",
+    "traders",
+    "trading",
+    "buy",
+    "buys",
+    "buying",
+    "bought",
+    "sell",
+    "sells",
+    "selling",
+    "sold",
+    "investor",
+    "investors",
+    "investing",
+    "investment",
+    "portfolio",
+    "portfolios",
+    "profit",
+    "profits",
+    "profitable",
+    "pnl",
+    "p&l",
+    "alpha",
+    "quant",
+    "quants",
+]
+FRAMING_PHRASES = (
+    "go long",
+    "going long",
+    "go short",
+    "going short",
+    "long position",
+    "short position",
+    "quantitative trading",
+    "trading strategy",
+    "trading agent",
+    "price move",
+    "price moves",
+    "price movement",
+    "price target",
+    "next price",
+    "predict the price",
+    "predicts the price",
+    "predict prices",
+    "price prediction",
+    "price forecast",
+    "price forecasting",
+    "high return",
+    "high returns",
+)
+FRAMING_PATTERNS = (
+    # plural "returns" qualified by what is earned: "earns returns", "expected returns"
+    r"(?:earn(?:s|ing)?|portfolio|strategy|excess|expected"
+    r"|maximi[sz](?:e|es|ed|ing)|chas(?:e|es|ed|ing))\s+returns",
+    # "strategy" followed within three words by a return or a profit
+    r"strategy(?:\s+\w+){0,2}\s+(?:returns?|profits?)",
+    r"forecast\w*\s+(?:the\s+)?price",
+)
+FRAMING_RE = re.compile(
+    "|".join(
+        [rf"\b{re.escape(w)}\b" for w in FRAMING_WORDS]
+        + [
+            r"\b" + r"\s+".join(map(re.escape, p.split())) + r"\b"
+            for p in FRAMING_PHRASES
+        ]
+        + [rf"\b{p}\b" for p in FRAMING_PATTERNS]
+    ),
+    re.I,
+)
+# The only forms removed before matching: anomaly types the generator injects,
+# in identifier and prose form, and "trade-off". "layering" and "pump and dump"
+# never match the pattern; they are listed because the maintainer named them.
+FRAMING_ALLOWED = (
+    re.compile(r"wash[_ -]trading", re.I),  # anomaly type, six injectors
+    re.compile(r"pump[_ -]and[_ -]dump", re.I),  # anomaly type
+    re.compile(r"\blayering\b", re.I),  # anomaly type
+    re.compile(r"\btrade-?offs?\b", re.I),  # a compromise, not a transaction
+)
+
+
+def framing_hits(text: str) -> list[str]:
+    """Trading-framed phrases of `text`, after the allowed forms are removed.
+
+    A tripwire over the fixed vocabulary above, not a proof that a text is free
+    of such framing: a denylist cannot be complete, and review does not extend it.
+    """
+    for allowed in FRAMING_ALLOWED:
+        text = allowed.sub(" ", text)
+    return [m.group(0) for m in FRAMING_RE.finditer(text)]
+
+
+FRAMING_REJECTED = {
+    "trade": "Traders place a trade each day.",
+    "trades": "The policy trades often.",
+    "traded": "The asset was traded yesterday.",
+    "trader": "The trader reads the score.",
+    "traders": "Traders read the score.",
+    "trading": "A trading desk reads the score.",
+    "buy": "The policy tells you to buy.",
+    "buys": "The policy buys early.",
+    "buying": "The policy is buying early.",
+    "sell": "The policy tells you to sell.",
+    "sells": "The policy sells early.",
+    "selling": "The policy is selling early.",
+    "go long": "Go long when risk is low.",
+    "going long": "Going long when risk is low.",
+    "go short": "Go short on the asset.",
+    "going short": "Going short on the asset.",
+    "long position": "Hold a long position until the alert.",
+    "short position": "Hold a short position until the alert.",
+    "investor": "An investor reads the score.",
+    "investors": "Investors benefit.",
+    "investing": "Investing in the model pays.",
+    "investment": "The investment grows.",
+    "portfolio": "The portfolio is rebalanced.",
+    "profit": "The policy makes a profit.",
+    "profits": "The policy keeps its profits.",
+    "profitable": "The policy is profitable.",
+    "pnl": "Maximizes PnL.",
+    "p&l": "Reports the P&L.",
+    "alpha": "The model has alpha.",
+    "quant": "A quant wrote it.",
+    "quants": "Quants wrote it.",
+    "quantitative trading": "A quantitative trading model.",
+    "price move": "Anticipates the price move.",
+    "price moves": "Anticipates price moves.",
+    "price movement": "Anticipates price movement.",
+    "price target": "Sets a price target.",
+    "next price": "Predicts the next price.",
+    "predict the price": "Models predict the price.",
+    "predicts the price": "The model predicts the price.",
+    "predict prices": "Models predict prices.",
+    "price prediction": "A price prediction head.",
+    "price forecast": "A price forecast head.",
+    "price forecasting": "A price forecasting head.",
+    "high return": "The strategy earns a high return.",
+    "earn returns": "Users earn returns.",
+    "earns returns": "The model earns returns.",
+    "earning returns": "Earning returns is not the goal.",
+    "portfolio returns": "Reports portfolio returns.",
+    "strategy returns": "Reports strategy returns.",
+    "excess returns": "Reports excess returns.",
+    "expected returns": "Reports expected returns.",
+    "trading strategy": "A trading strategy built on the score.",
+    "strategy return": "The strategy return is reported.",
+    "strategy returns, three words": "The strategy used here returns nothing.",
+    "strategy profit": "The strategy profit is reported.",
+    "strategy profits, three words": "The strategy we ship profits nobody.",
+}
+FRAMING_PASSING = {
+    "trade-off": "There is a trade-off between recall and review load.",
+    "trade-offs": "The trade-offs are listed below.",
+    "tradeoff": "That is a tradeoff.",
+    "tradeoffs": "Those are tradeoffs.",
+    "wash_trading": "The `wash_trading` anomaly type.",
+    "wash trading": "Wash trading is an injected anomaly.",
+    "pump_and_dump": "The `pump_and_dump` anomaly type.",
+    "pump and dump": "A pump and dump is an injected anomaly.",
+    "layering": "Layering is an injected anomaly.",
+    "price": "The `price` column holds the raw series.",
+    "price column": "The price column is raw input.",
+    "returns a tuple": "The head returns a tuple.",
+    "generator returns": "The generator returns a frame.",
+    "returns on its own": "The call returns on its own.",
+    "asset returns": "Each asset returns a dict.",
+    "log returns": "The log returns a float.",
+    "market returns": "The market returns nothing here.",
+    "generates returns": "The sampler generates returns a list.",
+    "stock returns": "The stock returns no rows.",
+    "expected return type": "The expected return type is a tuple.",
+    "the function returns": "Check what the function returns.",
+    "forecast head": "The forecast head scores early warning.",
+    "forecast labels": "The forecast labels come from the event record.",
+    "forecast horizon": "The forecast horizon is in windows.",
+    "cost": "The cost table is fixed.",
+    "expected cost": "The loss is the expected cost.",
+    "review budget": "The review budget caps alerts.",
+    "risk": "The risk score is a probability.",
+    "triage": "The policy is a triage rule.",
+}
+
+
+def config_comments(path: Path) -> str:
+    """The comment text of a YAML file, live and commented-out keys alike."""
+    return "\n".join(
+        line[line.index("#") :] for line in path.read_text().splitlines() if "#" in line
+    )
+
+
+class TestFramingGuard:
+    """Dignity is a risk project; no public text frames it as trading, price
+    forecasting or quant work (maintainer rule)."""
+
+    def test_public_docs_and_config_comments_do_not_frame_the_project_as_trading(self):
+        hits = {
+            str(path.relative_to(ROOT)): framing_hits(text)
+            for path, text in [
+                *((d, d.read_text()) for d in _public_docs()),
+                *(
+                    (c, config_comments(c))
+                    for c in sorted((ROOT / "config").glob("*.yaml"))
+                ),
+            ]
+            if framing_hits(text)
+        }
+        assert hits == {}
+
+    def test_a_trading_sentence_added_to_the_architecture_doc_is_reported(self):
+        text = (ROOT / "docs" / "ARCHITECTURE.md").read_text()
+        for sentence in (
+            "Traders use the forecast to anticipate the next price move.",
+            "The policy decides whether to buy or sell.",
+        ):
+            assert framing_hits(text) == []
+            assert framing_hits(text + "\n" + sentence) != [], sentence
+
+    def test_a_trading_header_in_a_config_comment_is_reported(self):
+        base = ROOT / "config" / "base.yaml"
+        comments = config_comments(base)
+        assert comments.startswith("# Base Dignity Configuration")
+        framed = comments.replace(
+            "# Base Dignity Configuration", "# Trading-agent model architecture", 1
+        )
+        assert framing_hits(comments) == []
+        assert framing_hits(framed) == ["Trading"]
+
+    @pytest.mark.parametrize(
+        "phrase",
+        [
+            "a quant strategy",
+            "the alpha of the model",
+            "maximise returns",
+            "a portfolio of assets",
+            "chasing profit",
+            "buying and selling",
+            "a price target",
+            "price movement",
+            "the trader",
+        ],
+    )
+    def test_each_forbidden_trading_term_is_reported(self, phrase):
+        assert framing_hits(phrase) != []
+
+    def test_anomaly_type_names_are_allowed_but_do_not_mask_trading_framing(self):
+        allowed = (
+            "`wash_trading`, wash trading, wash-trading, `pump_and_dump`, "
+            "pump and dump, `layering` and the generator's `price` column"
+        )
+        assert framing_hits(allowed) == []
+        assert framing_hits(allowed + " for traders") == ["traders"]
+        assert framing_hits("wash trading helps trading") == ["trading"]
+
+    def test_the_docs_do_use_the_allowlisted_anomaly_names(self):
+        # the allowlist is not dead weight: the docs name the anomaly types
+        text = (ROOT / "docs" / "ARCHITECTURE.md").read_text()
+        assert "wash_trading" in text and "pump_and_dump" in text
+
+    @staticmethod
+    def _in_markdown(sentence: str, tmp_path: Path) -> list[str]:
+        doc = tmp_path / "doc.md"
+        doc.write_text(f"# Title\n\n{sentence}\n")
+        return framing_hits(doc.read_text())
+
+    @staticmethod
+    def _in_yaml_comment(sentence: str, tmp_path: Path) -> list[str]:
+        cfg = tmp_path / "cfg.yaml"
+        cfg.write_text(f"key: 1  # {sentence}\n")
+        return framing_hits(config_comments(cfg))
+
+    @pytest.mark.parametrize("term", list(FRAMING_REJECTED))
+    def test_the_fixed_vocabulary_is_reported_in_docs_and_config_comments(
+        self, term, tmp_path
+    ):
+        sentence = FRAMING_REJECTED[term]
+        assert self._in_markdown(sentence, tmp_path) != [], term
+        assert self._in_yaml_comment(sentence, tmp_path) != [], term
+
+    @pytest.mark.parametrize("term", list(FRAMING_REJECTED))
+    def test_the_fixed_vocabulary_is_reported_in_any_letter_case(self, term):
+        assert framing_hits(FRAMING_REJECTED[term].upper()) != [], term
+
+    @pytest.mark.parametrize("form", list(FRAMING_PASSING))
+    def test_the_allowed_forms_are_not_reported(self, form, tmp_path):
+        sentence = FRAMING_PASSING[form]
+        assert self._in_markdown(sentence, tmp_path) == [], form
+        assert self._in_yaml_comment(sentence, tmp_path) == [], form
+
+    def test_a_noun_subject_before_the_function_verb_returns_passes_but_the_ruled_prefixes_do_not(
+        self,
+    ):
+        assert framing_hits("The sampler returns a list.") == []
+        assert framing_hits("The log returns a float.") == []
+        for phrase in (
+            "earns returns",
+            "expected returns",
+            "portfolio returns",
+            "excess returns",
+            "strategy returns",
+            "maximise returns",
+            "chasing returns",
+        ):
+            assert framing_hits(f"It reports {phrase} daily.") != [], phrase
+
+    def test_a_phrase_wrapped_across_lines_is_still_reported(self):
+        assert framing_hits("Go\nlong when risk is low.") != []
+
+
+class TestBaseConfigRunDirectories:
+    def test_train_header_names_the_directories_each_runner_nests_under_it(self):
+        comments = _flat(
+            config_comments(ROOT / "config" / "base.yaml").replace("#", "")
+        )
+        assert "eval.run nests eval_<seed>/<task>/train_seed_<s> under it" in comments
+        assert (
+            "the privacy sweep nests privacy_sweep/eps_<e>/train_seed_<s> and "
+            "privacy_sweep/reference/train_seed_<s>" in comments
+        )
+        run = (ROOT / "eval" / "run.py").read_text()
+        sweep = (ROOT / "eval" / "privacy_sweep.py").read_text()
+        assert 'f"eval_{seed_name}"' in run and 'f"train_seed_{s}"' in run
+        assert "config.model.task" in run
+        assert '"privacy_sweep"' in sweep
+        assert 'f"eps_{epsilon}"' in sweep and '"reference"' in sweep
+        assert 'f"train_seed_{config.seed + r}"' in sweep

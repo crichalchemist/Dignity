@@ -4,4 +4,5 @@ Dignity Core is a privacy-preserving transaction modeling framework for flexible
 
 - [Architecture](ARCHITECTURE.md)
 - [Privacy](PRIVACY.md)
+- [Results](RESULTS.md)
 - [Threat model](THREAT-MODEL.md)
