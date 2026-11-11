@@ -45,8 +45,8 @@ format that export no longer supports (DGNTY-3, DGNTY-35). No shipped config wri
 ## Commands
 
 ```bash
-# Tests (1092 collected: test_core 65, test_data 118, test_models 23, test_privacy 42,
-# test_operator 4, test_docs 621, test_train 78, test_checkpoint 3, test_export 9,
+# Tests (1141 collected: test_core 65, test_data 118, test_models 23, test_privacy 42,
+# test_operator 4, test_docs 670, test_train 78, test_checkpoint 3, test_export 9,
 # test_calibration 3, test_labels 7, test_gates 11, test_ci 4, test_eval 72,
 # test_colab_eval 13, test_scripts 19 — one skips without CUDA)
 # every test is limited to 300 s (pytest.ini; pytest-timeout), except the README quickstart
@@ -183,12 +183,6 @@ a mechanism, it needs a test in `tests/test_privacy.py` or CI's 100% gate on tha
   to match CCXT's native format. Any new data source must emit ms or a join against crypto data
   will silently match zero rows. Do not reintroduce `// 10**9`.
 
-## Known breakage (do not "discover" these again — fix or leave, but don't be confused)
-
-- **`docs/` and `README.md` drift from the code easily.** `tests/test_docs.py` runs the README
-  quickstart and checks quoted numbers, symbols, paths and removed claims. Trust the source, and
-  when you touch a documented symbol, fix the doc in the same change.
-
 ## Conventions
 
 - `ruff format` at line length 88 is the formatter; `ruff check` (`E,W,F,I,N,UP,B,C4,SIM`) is
@@ -238,6 +232,7 @@ a mechanism, it needs a test in `tests/test_privacy.py` or CI's 100% gate on tha
   `<!--provisional-->**Provisional: numbers are from the tuning seed; the final evaluation has
   not run.**` (one line); once `risk.json` has the evaluation seed the word Provisional and the
   `<!--provisional-->` comment appear in neither.
+- README numbers are marker-checked; change results, then run `scripts/refresh_doc_numbers.py`.
 - Doc references are checked the same way, on inline code only (fenced blocks are skipped).
   Symbol: `^(core|data|models|train|export|eval)(\.\w+)+$` must import and resolve (longest
   importable module prefix, then `getattr`); under `data`, `data.synthetic`, `train` and `eval`

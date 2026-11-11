@@ -195,11 +195,21 @@ class TestDocs:
         # If regenerated results stop supporting those sentences, they have to
         # change with them.
         text = " ".join((ROOT / "docs/PRIVACY.md").read_text().split())
-        for sentence in (
+        headline = (
             "On the tuning seed, the shipped allocation leaves the risk model's "
             "PR-AUC not distinguishable from chance on the hard preset at every ε "
             "on the grid up to 10, and above chance at the two largest grid values, "
-            "30 and 100",
+            "30 and 100"
+        )
+        for name in ("README.md", "docs/RESULTS.md"):
+            page = _flat((ROOT / name).read_text())
+            assert headline in page, (
+                f"{name} must carry the headline sentence of the curve section of "
+                "docs/PRIVACY.md word for word (the curve statement is written "
+                f"once and reused): {headline!r}"
+            )
+        for sentence in (
+            headline,
             "contains the prevalence",
             "wholly below the non-private reference's interval",
             "the interval lies wholly above the prevalence",
@@ -3471,12 +3481,18 @@ TUNING_ONLY_SENTENCES = (
 TUNING_ONLY_WORDING = ("tuning-seed", "On the tuning seed", "not an unbiased estimate")
 
 
-def seed_wording_problems(text: str, results_dir: Path = RESULTS_DIR) -> list[str]:
+def seed_wording_problems(
+    text: str,
+    results_dir: Path = RESULTS_DIR,
+    required: tuple[str, ...] = TUNING_ONLY_SENTENCES,
+) -> list[str]:
+    """`required` is the subset a page must carry on the tuning seed (README
+    carries the short ones); every sentence is forbidden after it."""
     flat = _flat(text)
     if results_on_tuning_seed(results_dir):
         return [
             f"missing while the results are on the tuning seed: {s}"
-            for s in TUNING_ONLY_SENTENCES
+            for s in required
             if s not in flat
         ]
     return [
@@ -4713,10 +4729,23 @@ class TestResultsDoc:
             "generator presets and the evaluation seed do not change after that "
             "tag is created, and the model and the presets are not re-tuned "
             "against the evaluation seed's test split" in flat
+        ), (
+            "the Seeds bullet of the Protocol in docs/RESULTS.md must keep the "
+            "freeze sentence word for word: 'the final run is made from a commit "
+            "tagged `v1.0-freeze`, the generator presets and the evaluation seed "
+            "do not change after that tag is created, and the model and the "
+            "presets are not re-tuned against the evaluation seed's test split'"
         )
         # no sentence may say the tag exists: it is created at the release
-        assert "frozen at the `v1.0-freeze`" not in flat
-        assert "were frozen" not in flat
+        assert "frozen at the `v1.0-freeze`" not in flat, (
+            "the Seeds bullet says the tag already exists ('frozen at the "
+            "`v1.0-freeze`'): the tag is created at the release, so state the "
+            "freeze as a commitment ('is made from a commit tagged')"
+        )
+        assert "were frozen" not in flat, (
+            "the Seeds bullet says the seeds 'were frozen': the freeze happens at "
+            "the release, so write 'are frozen' as a commitment, not a past event"
+        )
 
     def test_the_protocol_states_selection_and_warm_start_per_task(self, text):
         flat = _flat(section_of(text, "## Protocol"))
@@ -5088,7 +5117,11 @@ class TestResultsDoc:
             "privacy_curve.png",
         } <= names
         for alt, name in charts:
-            assert len(alt.split()) >= 6, name
+            assert len(alt.split()) >= 6, (
+                f"the alt text of {name} in docs/RESULTS.md has fewer than six "
+                "words: rewrite it as a phrase that says what the chart shows "
+                "(its axes or series), not a bare title"
+            )
 
 
 HOW_BUILT = ROOT / "docs" / "HOW-IT-WAS-BUILT.md"
@@ -6021,8 +6054,15 @@ class TestHowItWasBuilt:
     def test_m7_is_defined_once_and_v1_1_items_are_planned_not_present(self, text):
         flat = _flat(text)
         definition = "M7 is the release milestone in which the final evaluation runs"
-        assert flat.count(definition) == 1
-        assert flat.index(definition) < flat.index("| Finding |")
+        assert flat.count(definition) == 1, (
+            "docs/HOW-IT-WAS-BUILT.md must define M7 exactly once, in one sentence "
+            f"that starts {definition!r}: rewrite the sentence that repeats the "
+            "definition (or restore the one that was deleted) so it occurs once"
+        )
+        assert flat.index(definition) < flat.index("| Finding |"), (
+            "the sentence that defines M7 must come before the finding table: "
+            "move it above the line that starts '| Finding |'"
+        )
         assert (
             "v1.1 is the planned next release: a deferred item is planned for it "
             "and does not exist in v1.0" in flat
@@ -6081,4 +6121,849 @@ class TestHowItWasBuilt:
         left_over = self.built_fixture("fixed") + "The final evaluation has not run.\n"
         assert any(
             "has not run" in p for p in how_built_seed_problems(left_over, evaluation)
+        )
+
+
+README_MD = ROOT / "README.md"
+README_SECTIONS = (
+    "## What it does",
+    "## Results",
+    "## Quickstart",
+    "## How this was built",
+    "## Limitations",
+    "## Roadmap",
+)
+README_WORD_LIMIT = 1200  # the testable form of "five-minute view"
+# The sentences README carries on the tuning seed (the long first one of
+# TUNING_ONLY_SENTENCES lives in RESULTS only); all three are forbidden after.
+README_SEED_SENTENCES = TUNING_ONLY_SENTENCES[1:]
+README_QUICKSTART = (
+    "python -m train.cli --config config/smoke.yaml",
+    "python -m export.to_onnx --checkpoint runs/smoke/train/best.pt "
+    "--output dignity_risk.onnx",
+    "python -m eval.run --config config/smoke.yaml --seed tuning",
+)
+README_SETUP = (
+    "python -m venv .venv && source .venv/bin/activate",
+    "pip install torch --index-url https://download.pytorch.org/whl/cpu",
+    "pip install -r requirements.txt -r requirements-dev.txt",
+    "pip install -e . --no-deps",
+)
+README_CHARTS = (
+    "risk_pr_curve.png",
+    "forecast_pr_auc_by_horizon.png",
+    "privacy_curve.png",
+)
+# What the build story and the privacy rows may not say: figures nothing re-runs,
+# a data source v1.0 does not have, serving claims, the maintainer's setup, and an
+# attribution of the privacy cost that no committed file shows.
+README_STALE = (
+    (r"\b\d[\d,]*\s+(?:unit\s+)?tests?\b", "a test count"),
+    (r"\bparameters?\b|\bparams\b", "a parameter count"),
+    (r"latency|\bms\b|milliseconds?", "a latency figure"),
+    (r"production", "a serving claim (production-ready and the like)"),
+    (r"crypto api|ccxt|binance|exchange api", "a crypto API as the data source"),
+    (r"dignity-model|conda", "the maintainer's environment instead of a venv"),
+    (r"checkpoints/", "a checkpoint folder that training does not write"),
+    (r"privacy-preserving|privacy-first|privately", "privacy as a selling point"),
+    (r"privacy gate", "gate wording for privacy"),
+    (
+        r"retained signal|comes from the generalized|attribution|candidate",
+        "attribution",
+    ),
+    (r"diagnostic", "a diagnostic run that was never committed"),
+    (r"auroc 1\.0+|1\.000", "a figure for the original benchmark"),
+)
+
+
+def _readme_headings(text: str) -> list[str]:
+    return re.findall(r"^## .+$", FENCE_RE.sub("", text), re.M)
+
+
+def readme_size_problems(text: str) -> list[str]:
+    words = len(text.split())
+    if words <= README_WORD_LIMIT:
+        return []
+    return [
+        f"README.md has {words} words (every word, marker token and link counts; "
+        f"the limit is {README_WORD_LIMIT}): cut prose, never a test"
+    ]
+
+
+def readme_heading_problems(text: str) -> list[str]:
+    found = _readme_headings(text)
+    if found == list(README_SECTIONS):
+        return []
+    return [
+        f"README.md has the sections {found}: it has exactly {list(README_SECTIONS)}, "
+        "in that order, one Quickstart and no other section"
+    ]
+
+
+def readme_claim_problems(text: str) -> list[str]:
+    """Stale claims in prose (code fences are the quickstart, checked apart)."""
+    prose = FENCE_RE.sub("", text)
+    problems = [
+        f"README.md says {why}: rewrite the sentence that matches {pattern!r}"
+        for pattern, why in README_STALE
+        if re.search(pattern, prose, re.I)
+    ]
+    for ref in re.findall(r"\S*best\.pt", text):
+        if not ref.strip("`").startswith("runs/"):
+            problems.append(
+                f"README.md names a checkpoint at {ref!r}: training writes "
+                "runs/<task>/best.pt (runs/smoke/train/best.pt for the smoke preset)"
+            )
+    lowered = text.lower()
+    for banned in ("trading signal", "price prediction", "alpha", "profit"):
+        if banned in lowered:
+            problems.append(f"README.md uses the trading term {banned!r}")
+    return problems
+
+
+def readme_fence_problems(text: str) -> list[str]:
+    problems = []
+    infos = re.findall(r"^```(.*)$", text, re.M)[::2]  # opening fences only
+    for info in infos:
+        if info.strip() not in ("bash", "bash quickstart"):
+            problems.append(
+                f"a code fence of README.md opens as {info!r}: only bash fences "
+                "belong in the five-minute view (no Python snippet outside tests)"
+            )
+    if infos.count("bash quickstart") != 1:
+        problems.append(
+            "README.md must carry exactly one `bash quickstart` fence, found "
+            f"{infos.count('bash quickstart')}"
+        )
+    if quickstart_commands(text) != list(README_QUICKSTART):
+        problems.append(
+            f"the quickstart fence must stay {list(README_QUICKSTART)}, found "
+            f"{quickstart_commands(text)}"
+        )
+    for line in README_SETUP:
+        if line not in text:
+            problems.append(f"the setup block of README.md lacks: {line}")
+    for name in re.findall(r"(?<=-r )\S+", text):
+        if not (ROOT / name).is_file():
+            problems.append(f"README.md installs from {name}, which does not exist")
+    return problems
+
+
+def readme_anchor_problems(text: str) -> list[str]:
+    heads = re.findall(r"^#{1,6} +(.+?) *$", FENCE_RE.sub("", text), re.M)
+    slugs = {re.sub(r"[^\w\- ]", "", h.lower()).replace(" ", "-") for h in heads}
+    return [
+        f"README.md links to #{frag}, which names no heading of README.md"
+        for frag in re.findall(r"\]\(#([^)]*)\)", text)
+        if frag not in slugs
+    ]
+
+
+def readme_trail_problems(text: str, how_built_text: str) -> list[str]:
+    """README claims no more of the finding trail than HOW-IT-WAS-BUILT records:
+    while any finding has no fixing PR, README says it records each status."""
+    unfixed = [n for n, c in built_rows(how_built_text).items() if c[4] != "fixed"]
+    built = _flat(section_of(text, "## How this was built"))
+    problems = []
+    if unfixed and re.search(
+        r"\bevery finding\b|\bissue to a (?:pull request|PR)\b"
+        r"|\bfinding (?:went|was) ",
+        built,
+        re.I,
+    ):
+        problems.append(
+            f"README.md says every finding reached a PR, but {len(unfixed)} rows of "
+            "docs/HOW-IT-WAS-BUILT.md have no fixing PR: rewrite the sentence in "
+            "How this was built that follows each finding to a pull request"
+        )
+    if unfixed and "records the status of every one" not in built:
+        problems.append(
+            "How this was built must say that docs/HOW-IT-WAS-BUILT.md 'records "
+            "the status of every one' of the findings, since some have no fixing PR"
+        )
+    return problems
+
+
+def readme_quickstart_problems(text: str, smoke_dirs: dict[str, str]) -> list[str]:
+    """The Quickstart says where the smoke run writes and that the full evaluation
+    (any config with the default eval.out_dir and eval.img_dir) writes results/v1.0
+    and docs/img (K28)."""
+    section = section_of(text, "## Quickstart")
+    problems = [
+        f"the Quickstart must name {path}, where config/smoke.yaml writes {what}"
+        for what, path in smoke_dirs.items()
+        if f"`{path}`" not in section
+    ]
+    if "`dignity_risk.onnx`" not in section:
+        problems.append("the Quickstart must name `dignity_risk.onnx`, the export")
+    if "](docs/RESULTS.md#colab-runbook)" not in section:
+        problems.append("the Quickstart must link docs/RESULTS.md#colab-runbook")
+    for sentence in sentences_of(section):
+        if not re.search(r"results/v1\.0|docs/img", sentence):
+            continue
+        if not all(n in sentence for n in ("full evaluation", "`eval.out_dir`")):
+            problems.append(
+                "the smoke run does not write results/v1.0 or docs/img; the full "
+                "evaluation does, and so does any config that keeps the default "
+                "`eval.out_dir` and `eval.img_dir`: say 'full evaluation' and name "
+                f"`eval.out_dir` in {sentence[:60]!r}"
+            )
+        if re.search(r"\bonly\b", sentence, re.I):
+            problems.append(
+                "no config-independent 'only' for results/v1.0 or docs/img: a local "
+                "eval.run with a default eval.out_dir overwrites the committed "
+                f"results; rewrite {sentence[:60]!r}"
+            )
+    return problems
+
+
+def readme_section_problems(text: str) -> list[str]:
+    problems = []
+    built = section_of(text, "## How this was built")
+    for need in (
+        "](docs/HOW-IT-WAS-BUILT.md",
+        "a depth-3 tree on per-block statistics separated every block",
+        "DGNTY-10",
+        "`.claude/CLAUDE.md`",
+    ):
+        if need not in _flat(built):
+            problems.append(f"the How this was built section must say: {need}")
+    limits = _flat(section_of(text, "## Limitations"))
+    for need in (
+        "synthetic",
+        "`fee_rate` and `tx_count` are uncalibrated",
+        "`policy.costs`",
+        "no result on real data",
+        "](docs/THREAT-MODEL.md",
+        "DGNTY-27",
+    ):
+        if need not in limits:
+            problems.append(f"the Limitations section must say: {need}")
+    roadmap = section_of(text, "## Roadmap")
+    items = [line for line in roadmap.splitlines() if line.startswith("- ")]
+    for ref in ("DGNTY-7", "DGNTY-13", "DGNTY-14", "DGNTY-15", "DGNTY-41", "DGNTY-44"):
+        if ref not in roadmap:
+            problems.append(f"the Roadmap must name {ref}")
+    for need in ("La Morgia", "per-entity"):
+        if need not in roadmap:
+            problems.append(f"the Roadmap must name {need}")
+    for item in items:
+        if "planned" not in item.lower():
+            problems.append(f"a Roadmap line is not labelled planned: {item[:50]!r}")
+        if re.search(r"\b(done|shipped|fixed|added|implemented|completed?)\b", item):
+            problems.append(f"a Roadmap line reads as done: {item[:50]!r}")
+    return problems
+
+
+def readme_marker_problems(text: str, results_dir: Path = RESULTS_DIR) -> list[str]:
+    """The headline table names every figure through a marker: the risk interval
+    and baseline, the lower median horizon, the lead-time counts, the policy cost,
+    and the privacy reference with the smallest and the largest grid point."""
+    zones = results_zones(text)
+    if len(zones) != 1:
+        return [f"README.md needs exactly one results zone, found {len(zones)}"]
+    zone = zones[0]
+    markers = {(m[1], m[2]) for m in NUM_RE.findall(zone)}
+    horizons = _results_json("forecast", results_dir)["metrics"]["pr_auc_by_horizon"]
+    middle = (len(horizons) - 1) // 2
+    points = _results_json("privacy", results_dir)["metrics"]["points"]
+    last = len(points) - 1
+    wanted = [
+        ("risk", "metrics.auroc.value"),
+        ("risk", "metrics.pr_auc.value"),
+        ("risk", "metrics.pr_auc.ci_low"),
+        ("risk", "metrics.pr_auc.ci_high"),
+        ("risk", "metrics.recall_at_1pct_fpr.value"),
+        ("risk", "metrics.block_level.pr_auc.value"),
+        ("risk", "baselines.window_logistic.pr_auc.value"),
+        ("risk", "baselines.block_tree.pr_auc.value"),
+        ("forecast", f"metrics.pr_auc_by_horizon.{middle}.value"),
+        ("forecast", f"baselines.risk_score_forecast.pr_auc_by_horizon.{middle}.value"),
+        ("forecast", "metrics.lead_time.median"),
+        ("forecast", "baselines.risk_score_forecast.lead_time.median"),
+        ("forecast", "metrics.lead_time.n_missed"),
+        ("forecast", "metrics.lead_time.n_onsets"),
+        ("policy", "metrics.expected_cost.value"),
+        ("policy", "baselines.threshold_policy.expected_cost.value"),
+        ("privacy", "metrics.reference.risk.pr_auc.value"),
+        ("privacy", "metrics.reference.risk.prevalence.value"),
+        ("privacy", "baselines.window_logistic.reference.pr_auc.value"),
+    ]
+    for index in (0, last):
+        wanted += [
+            ("privacy", f"metrics.points.{index}.epsilon"),
+            ("privacy", f"metrics.points.{index}.risk.pr_auc.value"),
+            ("privacy", f"metrics.points.{index}.risk.pr_auc.ci_low"),
+            ("privacy", f"baselines.window_logistic.points.{index}.pr_auc.value"),
+        ]
+    problems = [
+        f"the headline table of README.md must quote {name}.json {path} through "
+        "a marker (the refresh script fills the number)"
+        for name, path in wanted
+        if (name, path) not in markers
+    ]
+    indexes = [
+        int(i)
+        for i in re.findall(r"privacy\.json metrics\.points\.(\d+)\.epsilon", zone)
+    ]
+    if sorted(set(indexes)) != [0, last]:
+        problems.append(
+            f"the privacy rows quote the smallest and the largest epsilon: the "
+            f"points marked are {sorted(set(indexes))}, the file has {last + 1} "
+            f"points, so they must be [0, {last}] (a grid change moves the last)"
+        )
+    rows = [
+        row for _, body in zone_tables(zone)[0] for row in body if "<!--num" not in row
+    ]
+    problems += [f"a row of the headline table has no marker: {r[:50]!r}" for r in rows]
+    return problems
+
+
+def readme_outcome_problems(text: str, results_dir: Path = RESULTS_DIR) -> list[str]:
+    """README's Outcome paragraph is held to the headline phrases of RESULTS."""
+    results = section_of(text, "## Results") if "## Results" in text else ""
+    paragraphs = [p for p in results.split("\n\n") if p.startswith("**Outcome.**")]
+    if len(paragraphs) != 1:
+        return [
+            "the Results section of README.md needs exactly one paragraph that "
+            "starts '**Outcome.**' (copy it from docs/RESULTS.md)"
+        ]
+    problems = []
+    for task, phrases in outcome_phrases(results_dir).items():
+        problems += [
+            f"{task}: {p}"
+            for p in phrase_problems(paragraphs[0], phrases.headline, phrases.forbidden)
+        ]
+    if re.search(r"\d", paragraphs[0]):
+        problems.append("the Outcome paragraph states outcomes in words only: no digit")
+    return problems
+
+
+def readme_seed_problems(text: str, results_dir: Path = RESULTS_DIR) -> list[str]:
+    problems = seed_wording_problems(text, results_dir, README_SEED_SENTENCES)
+    if not results_on_tuning_seed(results_dir) and re.search(
+        r"tuning[ -]seed", text, re.I
+    ):
+        problems.append(
+            "README.md still names the tuning seed, but the results carry the "
+            "evaluation seed: rewrite the sentence that says 'tuning seed'"
+        )
+    return problems
+
+
+def curve_headline(privacy_text: str) -> str:
+    """The bold headline sentence of the curve section of docs/PRIVACY.md."""
+    curve = section_of(privacy_text, "## Privacy-versus-utility curve")
+    found = re.search(r"\*\*(On the .*?shipped allocation.*?):\*\*", curve, re.S)
+    assert found, (
+        "docs/PRIVACY.md curve section has no bold headline sentence that starts "
+        "'On the ... seed, the shipped allocation': restore it"
+    )
+    return _flat(found.group(1))
+
+
+def readme_privacy_problems(
+    text: str, privacy_text: str, results_dir: Path = RESULTS_DIR
+) -> list[str]:
+    headline = curve_headline(privacy_text)
+    claim = re.sub(r"^On the [\w ]+ seed, ", "", headline)
+    problems = []
+    private = [
+        s
+        for paragraph in text.split("\n\n")
+        for s in sentences_of(paragraph)
+        if "differentially private" in s
+    ]
+    needs = (
+        claim,
+        "per-released-value Laplace budget on `volume`",
+        "`fee_rate` and `tx_count`",
+        "k-anonymous",
+        "which ε does not govern",
+        "`price` is not consumed",
+        "the shipped config is not a point on the curve",
+        "](docs/THREAT-MODEL.md)",
+    )
+    if not any(all(n in s for n in needs) for s in private):
+        problems.append(
+            "the sentence that says inputs can be differentially private must also "
+            f"carry, in the same sentence, each of: {list(needs)} (the first is "
+            "the curve statement of docs/PRIVACY.md, rewritten there for the "
+            "evaluation seed)"
+        )
+    limits = section_of(text, "## Limitations")
+    if headline not in _flat(limits):
+        problems.append(
+            f"the Limitations section must carry the curve statement: {headline!r}"
+        )
+    if "](docs/PRIVACY.md#privacy-versus-utility-curve)" not in limits:
+        problems.append(
+            "the Limitations section must link "
+            "docs/PRIVACY.md#privacy-versus-utility-curve"
+        )
+    if "`window_logistic` on the released windows" not in text:
+        problems.append(
+            "the privacy rows must name their baseline: "
+            "`window_logistic` on the released windows"
+        )
+    return problems
+
+
+def readme_fact_problems(
+    text: str, results_dir: Path = RESULTS_DIR, budget: float | None = None
+) -> list[str]:
+    """Two sentences that state a fact of the config or the grid, not a metric."""
+    if budget is None:
+        base = yaml.safe_load((ROOT / "config" / "base.yaml").read_text())
+        budget = base["policy"]["review_budget"]
+    problems = []
+    for percent in re.findall(r"(\d+(?:\.\d+)?)% review budget", text):
+        if float(percent) != round(budget * 100, 6):
+            problems.append(
+                f"README.md says a {percent}% review budget, but "
+                f"policy.review_budget is {budget}: rewrite the sentence that "
+                "says 'review budget'"
+            )
+    grid = [
+        p["epsilon"] for p in _results_json("privacy", results_dir)["metrics"]["points"]
+    ]
+    if "ε of 1.0 is a grid value" in text and 1.0 not in grid:
+        problems.append(
+            f"README.md says the shipped ε of 1.0 is a grid value, but the grid is "
+            f"{grid}: rewrite the sentence that says 'ε of 1.0 is a grid value'"
+        )
+    return problems
+
+
+def readme_chart_problems(text: str) -> list[str]:
+    charts = re.findall(r"!\[([^\]]*)\]\(docs/img/([\w.]+)\)", text)
+    problems = [
+        f"README.md must embed docs/img/{name}"
+        for name in README_CHARTS
+        if name not in {n for _, n in charts}
+    ]
+    for alt, name in charts:
+        if name not in README_CHARTS:
+            problems.append(f"README.md embeds docs/img/{name}: only {README_CHARTS}")
+        if len(alt.split()) < 6:
+            problems.append(
+                f"the alt text of {name} in README.md has fewer than six words: "
+                "say what the chart shows"
+            )
+    return problems
+
+
+def readme_pitch_problems(text: str, docs_index: str) -> list[str]:
+    title, _, rest = text.partition("\n## ")
+    problems = []
+    if "detect, warn early, decide" not in title.lower():
+        problems.append(
+            "the pitch before the first section says 'detect, warn early, decide'"
+        )
+    for needle in ("detect", "warn early", "decide"):
+        if needle not in text.lower():
+            problems.append(f"README.md never says {needle!r}")
+    if "privacy-preserving" in docs_index.lower():
+        problems.append("docs/README.md still calls the project privacy-preserving")
+    return problems
+
+
+def smoke_output_dirs() -> dict[str, str]:
+    smoke = yaml.safe_load((ROOT / "config" / "smoke.yaml").read_text())
+    return {
+        "the checkpoint": smoke["train"]["checkpoint_dir"],
+        "the results": smoke["eval"]["out_dir"],
+        "the charts": smoke["eval"]["img_dir"],
+    }
+
+
+GOOD_QUICKSTART = "```bash quickstart\n" + "\n".join(README_QUICKSTART) + "\n```\n"
+GOOD_SETUP = "```bash\n" + "\n".join(README_SETUP) + "\n```\n"
+
+
+class TestReadme:
+    @pytest.fixture(scope="class")
+    def text(self):
+        return README_MD.read_text()
+
+    def test_readme_is_short_enough_to_read_in_five_minutes(self, text):
+        assert readme_size_problems(text) == []
+
+    def test_readme_has_the_five_minute_sections_in_order(self, text):
+        assert readme_heading_problems(text) == []
+
+    def test_headline_table_quotes_ci_for_risk_and_names_the_baseline(self, text):
+        zone = text.split("<!--results-start-->")[1].split("<!--results-end-->")[0]
+        assert "<!--num risk.json metrics.pr_auc.ci_low" in zone
+        assert "<!--num risk.json baselines." in zone
+
+    def test_every_figure_of_the_headline_table_is_marker_checked(self, text):
+        problems = readme_marker_problems(text)
+        assert problems == [], (
+            "fix the headline table of README.md, then run python "
+            f"scripts/refresh_doc_numbers.py README.md: {problems}"
+        )
+
+    def test_readme_frames_the_project_as_risk_not_trading(self, text):
+        lowered = text.lower()
+        for needle in ("detect", "warn early", "decide"):
+            assert needle in lowered
+        for banned in ("trading signal", "price prediction", "alpha", "profit"):
+            assert banned not in lowered
+
+    def test_the_pitch_is_detect_warn_early_decide_and_privacy_is_no_selling_point(
+        self, text
+    ):
+        index = (ROOT / "docs" / "README.md").read_text()
+        assert readme_pitch_problems(text, index) == []
+
+    def test_readme_links_results_architecture_and_how_built(self, text):
+        for link in (
+            "docs/RESULTS.md",
+            "docs/ARCHITECTURE.md",
+            "docs/HOW-IT-WAS-BUILT.md",
+            "docs/PRIVACY.md",
+            "docs/THREAT-MODEL.md",
+        ):
+            assert f"]({link}" in text
+
+    def test_every_relative_link_and_anchor_of_readme_resolves(self, text):
+        assert dead_links([README_MD]) == []
+        assert readme_anchor_problems(text) == []
+        if "](LICENSE" in text:
+            assert (ROOT / "LICENSE").is_file(), "README.md links a LICENSE file"
+
+    def test_readme_carries_none_of_the_stale_claims_the_audit_fixed(self, text):
+        assert readme_claim_problems(text) == []
+
+    def test_readme_has_one_quickstart_fence_and_no_python_snippet(self, text):
+        assert readme_fence_problems(text) == []
+
+    def test_the_quickstart_says_where_the_smoke_run_writes(self, text):
+        assert readme_quickstart_problems(text, smoke_output_dirs()) == []
+
+    def test_build_story_limits_and_roadmap_say_only_what_the_record_shows(self, text):
+        assert readme_section_problems(text) == []
+
+    def test_the_build_story_claims_no_more_of_the_trail_than_the_record_shows(
+        self, text
+    ):
+        problems = readme_trail_problems(text, HOW_BUILT.read_text())
+        assert problems == [], problems
+
+    def test_readme_names_no_private_string(self, text):
+        assert private_string_problems(text) == []
+
+    def test_every_chart_is_one_the_json_supports_with_alt_text(self, text):
+        assert readme_chart_problems(text) == []
+
+    def test_the_outcome_of_each_task_is_the_one_the_committed_results_support(
+        self, text
+    ):
+        problems = readme_outcome_problems(text)
+        assert problems == [], (
+            "rewrite the Outcome paragraph under Results in README.md: copy the "
+            "'**Outcome.**' paragraph of docs/RESULTS.md, which is recomputed from "
+            f"the committed results (missing = write it, contradicts = it says the "
+            f"opposite of the numbers): {problems}"
+        )
+
+    def test_tuning_seed_wording_follows_the_results_seed(self, text):
+        problems = readme_seed_problems(text)
+        assert problems == [], (
+            "rewrite these sentences of README.md for the evaluation seed (each "
+            "is required while risk.json carries the tuning seed and rejected "
+            f"once it carries the evaluation seed): {problems}"
+        )
+
+    def test_the_privacy_claim_carries_what_the_curve_shows_and_its_scope(self, text):
+        privacy = (ROOT / "docs" / "PRIVACY.md").read_text()
+        problems = readme_privacy_problems(text, privacy)
+        assert problems == [], (
+            "rewrite the privacy sentences of README.md from the curve section of "
+            f"docs/PRIVACY.md: {problems}"
+        )
+
+    def test_the_review_budget_and_the_grid_the_readme_names_are_the_real_ones(
+        self, text
+    ):
+        assert readme_fact_problems(text) == []
+
+    def test_readme_is_checked_by_the_number_and_reference_checkers(self):
+        assert numbers_problems([README_MD]) == []
+        assert missing_symbols([README_MD]) == []
+        assert missing_paths([README_MD]) == []
+        assert missing_nodes([README_MD]) == []
+
+
+class TestReadmeChecksReportWhatTheyShould:
+    """Seeded failures: each check runs on its own fixture text and its own
+    results directory, never the live README."""
+
+    def test_a_readme_over_the_word_limit_is_reported(self):
+        assert readme_size_problems("word " * README_WORD_LIMIT) == []
+        assert readme_size_problems("word " * (README_WORD_LIMIT + 1)) != []
+
+    def test_a_missing_or_duplicated_section_is_reported(self):
+        good = "\n\n".join(f"{h}\n\ntext" for h in README_SECTIONS)
+        assert readme_heading_problems("# T\n\n" + good) == []
+        assert readme_heading_problems(good.replace("## Roadmap", "## Plans")) != []
+        assert readme_heading_problems(good + "\n\n## Quick Start\n\nx") != []
+
+    @pytest.mark.parametrize(
+        "claim",
+        [
+            "It has 31 tests.",
+            "About 2.4M parameters.",
+            "Inference takes under 10 ms.",
+            "Latency is low.",
+            "A production-ready model.",
+            "Pulls prices from a crypto API.",
+            "Run conda create -n dignity-model.",
+            "Weights are in checkpoints/risk.",
+            "Weights are in runs/risk and `best.pt` too.",
+            "A privacy-preserving framework.",
+            "Detect, warn early, decide privately.",
+            "The privacy gate passes.",
+            "Most retained signal is in the generalized columns.",
+            "The original tree reached AUROC 1.000.",
+            "It is not a trading signal.",
+        ],
+    )
+    def test_a_stale_claim_is_reported(self, claim):
+        assert readme_claim_problems("A clean sentence.\n") == []
+        assert readme_claim_problems(f"A clean sentence. {claim}\n") != []
+
+    def test_a_python_snippet_or_a_second_quickstart_is_reported(self):
+        good = GOOD_SETUP + GOOD_QUICKSTART
+        assert readme_fence_problems(good) == []
+        assert readme_fence_problems(good + "```python\nimport x\n```\n") != []
+        assert readme_fence_problems(good + GOOD_QUICKSTART) != []
+        assert readme_fence_problems(good.replace("--seed tuning", "--seed 7")) != []
+        assert readme_fence_problems(GOOD_QUICKSTART) != []  # no setup block
+        missing = GOOD_SETUP.replace("requirements.txt", "no_such_file.txt")
+        assert readme_fence_problems(missing + GOOD_QUICKSTART) != []
+
+    def test_a_dead_anchor_is_reported(self):
+        assert readme_anchor_problems("## Results\n\n[r](#results)\n") == []
+        assert readme_anchor_problems("## Results\n\n[r](#quick-start)\n") != []
+
+    def test_a_quickstart_that_misplaces_its_outputs_is_reported(self):
+        dirs = {"the results": "runs/smoke/results"}
+        good = (
+            "## Quickstart\n\nIt writes `runs/smoke/results` and `dignity_risk.onnx`; "
+            "The full evaluation, and any config with the default `eval.out_dir`, "
+            "writes `results/v1.0` ([Colab runbook](docs/RESULTS.md#colab-runbook)).\n"
+        )
+        assert readme_quickstart_problems(good, dirs) == []
+        wrong = good.replace(
+            "The full evaluation, and any config", "It also, and any config"
+        )
+        assert readme_quickstart_problems(wrong, dirs) != []
+        only = good.replace(
+            "The full evaluation, and any", "Only the full evaluation, not any"
+        )
+        assert readme_quickstart_problems(only, dirs) != []
+        assert readme_quickstart_problems(good.replace("runs/smoke/results", "x"), dirs)
+
+    def test_a_build_story_that_sends_every_finding_to_a_pr_is_reported(self):
+        row = "| f | data | confirmed | DGNTY-7 | deferred (v1.1) | none | none |"
+        record = "| f | data | confirmed | DGNTY-1 | fixed | [#1](x) | y |"
+        good = (
+            "## How this was built\n\nEach finding became an issue, and each fix "
+            "went to a PR and a CI run; [h](docs/HOW-IT-WAS-BUILT.md) records the "
+            "status of every one.\n"
+        )
+        assert readme_trail_problems(good, row) == []
+        for bad in (
+            good.replace(
+                "each fix went to a PR and a CI run",
+                "each finding went from an issue to a pull request to a CI run",
+            ),
+            "## How this was built\n\nEvery finding was fixed by a pull request.\n",
+            good.replace("records the status of every one", "records the trail"),
+        ):
+            assert readme_trail_problems(bad, row) != []
+        assert readme_trail_problems(good.replace("every one", "x"), record) == []
+
+    def test_a_roadmap_line_that_reads_as_done_is_reported(self):
+        roadmap = (
+            "## How this was built\n\n[h](docs/HOW-IT-WAS-BUILT.md) `.claude/CLAUDE.md` "
+            "a depth-3 tree on per-block statistics separated every block DGNTY-10\n\n"
+            "## Limitations\n\nsynthetic `fee_rate` and `tx_count` are uncalibrated "
+            "`policy.costs` no result on real data [t](docs/THREAT-MODEL.md) DGNTY-27\n\n"
+            "## Roadmap\n\n"
+        )
+        items = (
+            "- planned: DGNTY-7, DGNTY-13, DGNTY-14, DGNTY-15\n"
+            "- planned: DGNTY-41, DGNTY-44, La Morgia events, per-entity features\n"
+        )
+        assert readme_section_problems(roadmap + items) == []
+        assert readme_section_problems(roadmap + items + "- fixed CryptoSource\n")
+        assert readme_section_problems(
+            roadmap + items.replace("planned: DGNTY-41", "DGNTY-41")
+        )
+        assert readme_section_problems(roadmap.replace("DGNTY-27", "") + items)
+        assert readme_section_problems(
+            roadmap.replace("separated every block", "AUROC 1") + items
+        )
+
+    def test_a_privacy_row_that_stops_short_of_the_last_point_is_reported(
+        self, tmp_path
+    ):
+        results = outcome_results(tmp_path)
+        forecast = {
+            "metrics": {"pr_auc_by_horizon": [0] * 10},
+        }
+        (results / "forecast.json").write_text(json.dumps(forecast))
+        markers = {
+            "risk": ("metrics.auroc.value", "metrics.pr_auc.value"),
+            "privacy": ("metrics.points.0.epsilon", "metrics.points.4.epsilon"),
+        }
+        row = (
+            "| m | "
+            + " ".join(
+                f"1 <!--num {name}.json {path} .2f-->"
+                for name, paths in markers.items()
+                for path in paths
+            )
+            + " |\n"
+        )
+        text = f"<!--results-start-->\n{row}<!--results-end-->\n"
+        problems = readme_marker_problems(text, results)
+        assert any("must be [0, 6]" in p for p in problems), problems
+        assert any("lead_time.n_onsets" in p for p in problems), problems
+
+    def test_an_outcome_paragraph_fails_when_the_results_change_and_it_does_not(
+        self, tmp_path
+    ):
+        base_dir = outcome_results(tmp_path)
+        base = outcome_phrases(base_dir)
+        words = " ".join(" ".join(base[t].headline) for t in base)
+        text = f"## Results\n\n**Outcome.** {words}\n\nmore\n"
+        assert readme_outcome_problems(text, outcome_results(tmp_path, "same")) == []
+
+        def risk_gate_fails(r):
+            r["metrics"]["pr_auc"]["ci_low"] = 0.1
+
+        def forecast_has_lead_times(r):
+            r["metrics"]["lead_time"].update(n_missed=0, median=3.0)
+
+        def privacy_leaves_chance(r):
+            r["metrics"]["points"][0]["risk"]["pr_auc"]["ci_low"] = 0.99
+
+        def policy_clears(r):
+            r["metrics"]["expected_cost"].update(value=0.1, ci_low=0.05, ci_high=0.2)
+
+        for task, edit in (
+            ("risk", risk_gate_fails),
+            ("forecast", forecast_has_lead_times),
+            ("privacy", privacy_leaves_chance),
+            ("policy", policy_clears),
+        ):
+            changed = outcome_results(tmp_path, f"changed_{task}", **{task: edit})
+            problems = readme_outcome_problems(text, changed)
+            assert any(p.startswith(f"{task}:") for p in problems), task
+        assert readme_outcome_problems(
+            text.replace("**Outcome.**", "Outcome."), base_dir
+        )
+        assert (
+            readme_outcome_problems(
+                text.replace("**Outcome.**", "**Outcome.** 12"), base_dir
+            )
+            != []
+        )
+
+    def test_the_seed_wording_flips_with_the_results_seed(self, tmp_path):
+        tuning = seed_dir(tmp_path, EvalConfig().tuning_seed)
+        final = seed_dir(tmp_path, EvalConfig().eval_seed)
+        text = " ".join(README_SEED_SENTENCES)
+        assert readme_seed_problems(text, tuning) == []
+        assert readme_seed_problems(README_SEED_SENTENCES[0], tuning) != []
+        problems = readme_seed_problems(text, final)
+        assert len(problems) >= len(README_SEED_SENTENCES) + 1, problems
+        assert readme_seed_problems("Scored on the evaluation seed.", final) == []
+        assert readme_seed_problems("Run on the tuning seed.", final) != []
+
+    def test_a_privacy_sentence_without_the_curve_or_its_scope_is_reported(
+        self, tmp_path
+    ):
+        privacy = (
+            "## Privacy-versus-utility curve\n\n**On the tuning seed, the shipped "
+            "allocation leaves the risk model's PR-AUC at chance up to 10:** more\n"
+        )
+        claim = (
+            "the shipped allocation leaves the risk model's PR-AUC at chance up to 10"
+        )
+        scope = (
+            "per-released-value Laplace budget on `volume`, `fee_rate` and "
+            "`tx_count` are released by k-anonymous generalization, which ε does "
+            "not govern, `price` is not consumed, the shipped config is not a "
+            "point on the curve, [t](docs/THREAT-MODEL.md)"
+        )
+        good = (
+            f"Inputs can be made differentially private ({scope}), but {claim}.\n\n"
+            f"## Limitations\n\nOn the tuning seed, {claim}. "
+            "[c](docs/PRIVACY.md#privacy-versus-utility-curve)\n"
+            "`window_logistic` on the released windows\n"
+        )
+        assert readme_privacy_problems(good, privacy) == []
+        assert curve_headline(privacy).startswith("On the tuning seed")
+        for broken in (
+            good.replace(claim + ".\n\n##", "it is fine.\n\n##"),
+            good.replace("`price` is not consumed", "x"),
+            good.replace("per-released-value ", ""),
+            good.replace("k-anonymous ", ""),
+            good.replace("which ε does not govern", "x"),
+            good.replace("the shipped config is not a point on the curve", "x"),
+            good.replace("[t](docs/THREAT-MODEL.md)", "x"),
+            good.replace("On the tuning seed, " + claim, "x"),
+            good.replace("(docs/PRIVACY.md#privacy-versus-utility-curve)", "(x)"),
+            good.replace("`window_logistic` on the released windows", "x"),
+        ):
+            assert readme_privacy_problems(broken, privacy) != []
+        rewritten = privacy.replace("tuning", "evaluation").replace(
+            "at chance", "above"
+        )
+        assert curve_headline(rewritten).startswith("On the evaluation seed")
+        assert readme_privacy_problems(good, rewritten) != []
+
+    def test_a_budget_or_grid_the_config_and_results_do_not_have_is_reported(
+        self, tmp_path
+    ):
+        results = outcome_results(tmp_path)  # a grid of 0.1, 0.3, 1, 3, 10, 30, 100
+        text = "A 5% review budget. The shipped config's ε of 1.0 is a grid value."
+        assert readme_fact_problems(text, results, budget=0.05) == []
+        assert readme_fact_problems(text, results, budget=0.1) != []
+        assert readme_fact_problems("A 7% review budget.", results, budget=0.05) != []
+
+        def grid_loses_one(payload):
+            payload["metrics"]["points"] = payload["metrics"]["points"][:1]
+
+        moved = outcome_results(tmp_path, "moved", privacy=grid_loses_one)
+        assert readme_fact_problems(text, moved, budget=0.05) != []
+
+    def test_a_chart_the_json_does_not_support_is_reported(self):
+        good = "".join(
+            f"![PR-AUC of the model against each baseline per horizon](docs/img/{n})\n"
+            for n in README_CHARTS
+        )
+        assert readme_chart_problems(good) == []
+        lead = (
+            good
+            + "![Lead time of the model per onset](docs/img/forecast_lead_time.png)\n"
+        )
+        assert readme_chart_problems(lead) != []
+        short = good.replace(
+            "PR-AUC of the model against each baseline per horizon", "chart", 1
+        )
+        assert readme_chart_problems(short) != []
+        assert readme_chart_problems(good.splitlines()[0] + "\n") != []
+
+    def test_a_pitch_that_sells_privacy_is_reported(self):
+        good = "# T\n\nDetect, warn early, decide.\n\n## What it does\n\ndetect warn early decide\n"
+        assert readme_pitch_problems(good, "# Docs\n\nA risk framework.") == []
+        assert readme_pitch_problems(good, "A privacy-preserving framework.") != []
+        assert readme_pitch_problems(
+            good.replace("Detect, warn early, decide.", "x"), ""
         )

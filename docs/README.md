@@ -1,6 +1,6 @@
 # Dignity Core Documentation
 
-Dignity Core is a privacy-preserving transaction modeling framework for flexible, modular deep learning on sensitive data.
+Dignity Core is a transaction risk framework: it detects anomalies, warns early and decides what to review or block.
 
 - [Architecture](ARCHITECTURE.md)
 - [Privacy](PRIVACY.md)
