@@ -1,6 +1,6 @@
 # Dignity Core Documentation
 
-Dignity Core is a transaction risk framework: it detects anomalies, warns early and decides what to review or block.
+Dignity Core is a transaction risk framework with three heads (detect an active anomaly, warn of an onset, triage into allow, review or block), each scored against a baseline in [Results](RESULTS.md).
 
 - [Architecture](ARCHITECTURE.md)
 - [Privacy](PRIVACY.md)

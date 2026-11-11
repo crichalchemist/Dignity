@@ -45,8 +45,8 @@ format that export no longer supports (DGNTY-3, DGNTY-35). No shipped config wri
 ## Commands
 
 ```bash
-# Tests (1141 collected: test_core 65, test_data 118, test_models 23, test_privacy 42,
-# test_operator 4, test_docs 670, test_train 78, test_checkpoint 3, test_export 9,
+# Tests (1179 collected: test_core 65, test_data 118, test_models 23, test_privacy 42,
+# test_operator 4, test_docs 708, test_train 78, test_checkpoint 3, test_export 9,
 # test_calibration 3, test_labels 7, test_gates 11, test_ci 4, test_eval 72,
 # test_colab_eval 13, test_scripts 19 — one skips without CUDA)
 # every test is limited to 300 s (pytest.ini; pytest-timeout), except the README quickstart
@@ -56,6 +56,7 @@ pytest tests/test_models.py -v                       # one file
 pytest tests/test_docs.py -v   # doc numbers, symbols, paths and the README quickstart (M6)
 pytest tests/test_models.py::TestDignityModel::test_risk_model -v   # one test
 pytest tests/ -m "not slow" -v                       # marker filter
+pytest tests/test_docs.py -m "not slow" -v         # fast doc run: skips only the README quickstart test (a name filter on Quickstart is case-insensitive and also deselects four README tests)
 
 # Lint / format — ruff only, line length 88, enforced by CI and pre-commit
 ruff check .
@@ -232,7 +233,7 @@ a mechanism, it needs a test in `tests/test_privacy.py` or CI's 100% gate on tha
   `<!--provisional-->**Provisional: numbers are from the tuning seed; the final evaluation has
   not run.**` (one line); once `risk.json` has the evaluation seed the word Provisional and the
   `<!--provisional-->` comment appear in neither.
-- README numbers are marker-checked; change results, then run `scripts/refresh_doc_numbers.py`.
+- The refresh command covers both `README.md` and `docs/RESULTS.md`; after it, rewrite the sentences the doc tests point at.
 - Doc references are checked the same way, on inline code only (fenced blocks are skipped).
   Symbol: `^(core|data|models|train|export|eval)(\.\w+)+$` must import and resolve (longest
   importable module prefix, then `getattr`); under `data`, `data.synthetic`, `train` and `eval`
@@ -251,6 +252,7 @@ a mechanism, it needs a test in `tests/test_privacy.py` or CI's 100% gate on tha
   file and the results JSON files must exist afterwards, and `stray_writes` compares git status
   and the size and mtime of every file under `results/`, `docs/img/`, `runs/` and `checkpoints/`
   and of any root `*.onnx` before and after. The quickstart test carries its own 900 s limit.
+  When you touch a documented symbol, fix the doc in the same change; the doc tests enforce it.
 - Tests are organized as classes (`TestSignalProcessor`, `TestDignityModel`, …); node ids are
   `file::Class::test_name`. They use root-level fixtures in `tests/conftest.py` (`device`,
   `sample_sequence` `[4,100,9]`, `sample_labels`) and an autouse seed reset. Reuse them rather

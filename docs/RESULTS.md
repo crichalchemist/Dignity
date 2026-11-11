@@ -37,7 +37,7 @@ The risk table pairs window rows with `window_logistic` and block rows with `blo
 Window rows are scored on every test window; block rows score a block by its highest window score. `recall_at_1pct_fpr` is the recall at a 1% false-positive rate, and `prevalence` is the share of positive windows or blocks, the chance line of PR-AUC.
 
 <!--results-start-->
-| Metric | Model | Best baseline | Source |
+| Metric | Model | Baseline | Source |
 |---|---|---|---|
 | `auroc` | 0.84 <!--num risk.json metrics.auroc.value .2f--> [0.76 <!--num risk.json metrics.auroc.ci_low .2f-->, 0.90 <!--num risk.json metrics.auroc.ci_high .2f-->] | `window_logistic` 0.68 <!--num risk.json baselines.window_logistic.auroc.value .2f--> [0.59 <!--num risk.json baselines.window_logistic.auroc.ci_low .2f-->, 0.77 <!--num risk.json baselines.window_logistic.auroc.ci_high .2f-->] | `python -m eval.run --config config/synthetic_hard.yaml --seed tuning --tasks risk,forecast,policy --privacy-sweep` -> `results/v1.0/risk.json` |
 | `pr_auc` | 0.81 <!--num risk.json metrics.pr_auc.value .2f--> [0.72 <!--num risk.json metrics.pr_auc.ci_low .2f-->, 0.88 <!--num risk.json metrics.pr_auc.ci_high .2f-->] | `window_logistic` 0.55 <!--num risk.json baselines.window_logistic.pr_auc.value .2f--> [0.41 <!--num risk.json baselines.window_logistic.pr_auc.ci_low .2f-->, 0.68 <!--num risk.json baselines.window_logistic.pr_auc.ci_high .2f-->] | `python -m eval.run --config config/synthetic_hard.yaml --seed tuning --tasks risk,forecast,policy --privacy-sweep` -> `results/v1.0/risk.json` |
@@ -64,7 +64,7 @@ Across the training seeds the window PR-AUC has mean 0.81 <!--num risk.json metr
 `pr_auc_by_horizon.N` is the PR-AUC for an anomaly beginning within the next N plus one rows, on windows with no active anomaly at their last row. Lead time is the number of rows between the first alarm and an anomaly onset, scored only for onsets that a window ends directly before; `n_missed` counts the onsets with no alarm in the windows that could warn of them, of `n_onsets` scored.
 
 <!--results-start-->
-| Metric | Model | Best baseline | Source |
+| Metric | Model | Baseline | Source |
 |---|---|---|---|
 | `pr_auc_by_horizon.0` | 0.0066 <!--num forecast.json metrics.pr_auc_by_horizon.0.value .4f--> [0.0042 <!--num forecast.json metrics.pr_auc_by_horizon.0.ci_low .4f-->, 0.0129 <!--num forecast.json metrics.pr_auc_by_horizon.0.ci_high .4f-->] | `risk_score_forecast` 0.0120 <!--num forecast.json baselines.risk_score_forecast.pr_auc_by_horizon.0.value .4f--> [0.0078 <!--num forecast.json baselines.risk_score_forecast.pr_auc_by_horizon.0.ci_low .4f-->, 0.0205 <!--num forecast.json baselines.risk_score_forecast.pr_auc_by_horizon.0.ci_high .4f-->] | `python -m eval.run --config config/synthetic_hard.yaml --seed tuning --tasks risk,forecast,policy --privacy-sweep` -> `results/v1.0/forecast.json` |
 | `pr_auc_by_horizon.1` | 0.0128 <!--num forecast.json metrics.pr_auc_by_horizon.1.value .4f--> [0.0077 <!--num forecast.json metrics.pr_auc_by_horizon.1.ci_low .4f-->, 0.0235 <!--num forecast.json metrics.pr_auc_by_horizon.1.ci_high .4f-->] | `risk_score_forecast` 0.0236 <!--num forecast.json baselines.risk_score_forecast.pr_auc_by_horizon.1.value .4f--> [0.0147 <!--num forecast.json baselines.risk_score_forecast.pr_auc_by_horizon.1.ci_low .4f-->, 0.0400 <!--num forecast.json baselines.risk_score_forecast.pr_auc_by_horizon.1.ci_high .4f-->] | `python -m eval.run --config config/synthetic_hard.yaml --seed tuning --tasks risk,forecast,policy --privacy-sweep` -> `results/v1.0/forecast.json` |
@@ -106,7 +106,7 @@ The triage head chooses allow, review or block for every window. `policy.costs` 
 Expected cost is the mean cost per window, so lower is better. `anomaly_recall` is the share of anomalous windows that are reviewed or blocked, and `false_block_rate` is the share of normal windows that are blocked.
 
 <!--results-start-->
-| Metric | Model | Best baseline | Source |
+| Metric | Model | Baseline | Source |
 |---|---|---|---|
 | `expected_cost` | 1.20 <!--num policy.json metrics.expected_cost.value .2f--> [0.83 <!--num policy.json metrics.expected_cost.ci_low .2f-->, 1.59 <!--num policy.json metrics.expected_cost.ci_high .2f-->] | `threshold_policy` 1.07 <!--num policy.json baselines.threshold_policy.expected_cost.value .2f--> [0.72 <!--num policy.json baselines.threshold_policy.expected_cost.ci_low .2f-->, 1.46 <!--num policy.json baselines.threshold_policy.expected_cost.ci_high .2f-->] | `python -m eval.run --config config/synthetic_hard.yaml --seed tuning --tasks risk,forecast,policy --privacy-sweep` -> `results/v1.0/policy.json` |
 | `review_rate` | 0.03 <!--num policy.json metrics.review_rate.value .2f--> [0.01 <!--num policy.json metrics.review_rate.ci_low .2f-->, 0.05 <!--num policy.json metrics.review_rate.ci_high .2f-->] | `threshold_policy` 0.05 <!--num policy.json baselines.threshold_policy.review_rate.value .2f--> [0.03 <!--num policy.json baselines.threshold_policy.review_rate.ci_low .2f-->, 0.08 <!--num policy.json baselines.threshold_policy.review_rate.ci_high .2f-->] | `python -m eval.run --config config/synthetic_hard.yaml --seed tuning --tasks risk,forecast,policy --privacy-sweep` -> `results/v1.0/policy.json` |
@@ -133,7 +133,7 @@ by k-anonymous generalization, which ε does not govern, and `price` is not cons
 The baseline in the table is `window_logistic` on the released windows. The reference is a non-private model trained on the privacy feature set with the same training seeds; it is not the headline risk model of `results/v1.0/risk.json`, which uses the full feature set. The `prevalence` row is the chance line of PR-AUC.
 
 <!--results-start-->
-| Metric | Model | Best baseline | Source |
+| Metric | Model | Baseline | Source |
 |---|---|---|---|
 | `pr_auc` without privacy | 0.86 <!--num privacy.json metrics.reference.risk.pr_auc.value .2f--> [0.78 <!--num privacy.json metrics.reference.risk.pr_auc.ci_low .2f-->, 0.93 <!--num privacy.json metrics.reference.risk.pr_auc.ci_high .2f-->] | `window_logistic` 0.54 <!--num privacy.json baselines.window_logistic.reference.pr_auc.value .2f--> [0.40 <!--num privacy.json baselines.window_logistic.reference.pr_auc.ci_low .2f-->, 0.67 <!--num privacy.json baselines.window_logistic.reference.pr_auc.ci_high .2f-->] | `python -m eval.run --config config/synthetic_hard.yaml --seed tuning --tasks risk,forecast,policy --privacy-sweep` -> `results/v1.0/privacy.json` |
 | `prevalence` | 0.27 <!--num privacy.json metrics.reference.risk.prevalence.value .2f--> [0.20 <!--num privacy.json metrics.reference.risk.prevalence.ci_low .2f-->, 0.34 <!--num privacy.json metrics.reference.risk.prevalence.ci_high .2f-->] | n/a | `python -m eval.run --config config/synthetic_hard.yaml --seed tuning --tasks risk,forecast,policy --privacy-sweep` -> `results/v1.0/privacy.json` |
