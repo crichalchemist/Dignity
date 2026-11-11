@@ -3713,3 +3713,159 @@ class TestResultsDoc:
         } <= names
         for alt, name in charts:
             assert len(alt.split()) >= 6, name
+
+
+HOW_BUILT = ROOT / "docs" / "HOW-IT-WAS-BUILT.md"
+STATUSES = (
+    "fixed",
+    "open (maintainer decision)",
+    "closes with the final evaluation (M7)",
+    "deferred (v1.1)",
+)
+PR_LINK = re.compile(r"\[#\d+\]\(https://github\.com/\S+/pull/\d+\)")
+
+
+class TestHowItWasBuilt:
+    """The review-to-PR trail is complete, honest about open items and sanitised."""
+
+    DEFERRED = {7, 13, 14, 15, 35, 41, 42, 43, 44, 45}  # deferred to v1.1
+    OPEN = {8, 27, 40}  # the maintainer's call, partly addressed
+    CLOSES_WITH_EVALUATION = {10, 12}
+
+    @pytest.fixture(scope="class")
+    def text(self):
+        return HOW_BUILT.read_text()
+
+    def _rows(self, text):
+        rows = {}
+        for line in text.splitlines():
+            m = re.search(r"\| DGNTY-(\d+) \|", line)
+            if m:
+                rows[int(m.group(1))] = [c.strip() for c in line.strip("|").split("|")]
+        return rows
+
+    def test_finding_table_covers_every_review_finding_exactly_once(self, text):
+        ids = [int(m) for m in re.findall(r"\| DGNTY-(\d+) \|", text)]
+        assert sorted(ids) == list(range(1, 46))
+
+    def test_every_row_carries_one_status_from_the_closed_vocabulary(self, text):
+        for n, cells in self._rows(text).items():
+            assert cells[4] in STATUSES, (n, cells[4])
+
+    def test_a_fixed_finding_links_a_pr_and_never_reads_as_fixed_otherwise(self, text):
+        for n, cells in self._rows(text).items():
+            status, prs = cells[4], cells[5]
+            if status == "fixed":
+                assert PR_LINK.search(prs), (n, prs)
+            assert (status == "deferred (v1.1)") == (n in self.DEFERRED), n
+            if n in self.OPEN:
+                assert status == "open (maintainer decision)", n
+            if n in self.CLOSES_WITH_EVALUATION:
+                assert status == "closes with the final evaluation (M7)", n
+
+    def test_open_findings_link_the_prs_that_addressed_part_of_them(self, text):
+        rows = self._rows(text)
+        for n in self.OPEN:
+            assert PR_LINK.search(rows[n][5]), n
+
+    def test_this_prs_own_finding_links_its_pull_request(self, text):
+        assert (
+            "(https://github.com/crichalchemist/Dignity/pull/41)"
+            in (self._rows(text)[12][5])
+        )
+
+    def test_a_row_without_a_recorded_ci_run_says_so(self, text):
+        for n, cells in self._rows(text).items():
+            ci = cells[6]
+            assert "/actions/runs/" in ci or ci == "not recorded", (n, ci)
+
+    def test_the_privacy_row_states_the_curve_outcome_without_a_number(self, text):
+        row = self._rows(text)[8]
+        assert "PRIVACY.md#privacy-versus-utility-curve" in " ".join(row)
+        assert "tuning seed" in " ".join(row)
+        assert "not distinguishable from chance" in " ".join(row)
+
+    def test_the_table_is_self_contained_and_names_plane_as_the_private_tracker(
+        self, text
+    ):
+        assert "private tracker" in text
+        assert "app.plane.so" not in text
+        for n in (46, 47, 48):
+            assert f"DGNTY-{n}" in text
+            assert f"| DGNTY-{n} |" not in text
+
+    def test_no_metric_number_appears_in_the_document(self, text):
+        assert "<!--num" not in text
+        assert "<!--results-start-->" not in text
+        bare = re.sub(r"\(3\.1[02]\)|v1\.\d|3\.1[02]", " ", text)
+        bare = re.sub(r"\(https?://\S+\)", " ", bare)
+        assert re.findall(r"\d\.\d", bare) == []
+        assert "1.000" not in text
+
+    def test_the_benchmark_story_is_qualitative(self, text):
+        story = section_of(text, "## The adversarial review")
+        assert "depth-3 tree" in story
+        assert "separated every block" in story
+        assert "AUROC" not in story
+
+    def test_dot_folder_symlinks_are_named_in_prose_not_as_paths(self, text):
+        section = section_of(text, "## Agent conventions")
+        assert "`.claude/CLAUDE.md`" in section
+        assert ".gemini/GEMINI.md" not in text
+        assert ".agents/AGENTS.md" not in text
+        assert "Gemini" in section and "agents" in section
+
+    def test_claude_md_excerpt_is_verbatim_and_sanitised(self, text):
+        block = text.split("<!--excerpt .claude/CLAUDE.md-->")[1].split(
+            "<!--/excerpt-->"
+        )[0]
+        source = (ROOT / ".claude/CLAUDE.md").read_text()
+        lines = [x for x in block.splitlines() if x.strip() and not x.startswith("```")]
+        assert lines
+        assert all(x in source for x in lines)
+        conventions = section_of(source, "## Conventions")
+        surprises = section_of(source, "## Behavior that will surprise you")
+        assert all(x in conventions or x in surprises for x in lines)
+        for secret in (
+            "/Users/",
+            "COGNEE",
+            "FRED",
+            "TWELVEDATA",
+            "Courtney",
+            ".internal",
+        ):
+            assert secret not in block
+
+    def test_page_names_every_required_check_and_the_precommit_hooks(self, text):
+        gates = section_of(text, "## Gates")
+        for needle in (
+            "lint",
+            "test (3.10)",
+            "test (3.12)",
+            "smoke",
+            "100%",
+            "core/privacy.py",
+            "ruff-format",
+            "ruff",
+            "DGNTY-n",
+        ):
+            assert needle in gates, needle
+
+    def test_every_job_the_page_names_exists_in_the_workflow(self):
+        ci = (ROOT / ".github/workflows/ci.yml").read_text()
+        for job in ("lint:", "test:", "smoke:"):
+            assert job in ci
+        hooks = (ROOT / ".pre-commit-config.yaml").read_text()
+        for hook in ("id: ruff", "id: ruff-format"):
+            assert hook in hooks
+
+    def test_the_plane_integration_example_links_a_pull_request(self, text):
+        section = section_of(text, "## Plane to GitHub")
+        assert PR_LINK.search(section)
+
+    def test_the_docs_index_links_the_page(self):
+        assert "(HOW-IT-WAS-BUILT.md)" in (ROOT / "docs/README.md").read_text()
+
+    def test_docs_never_cite_the_gitignored_internal_notes(self):
+        for path in _public_docs():
+            assert ".internal/" not in path.read_text(), path
