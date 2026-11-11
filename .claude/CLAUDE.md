@@ -45,8 +45,8 @@ format that export no longer supports (DGNTY-3, DGNTY-35). No shipped config wri
 ## Commands
 
 ```bash
-# Tests (712 collected: test_core 65, test_data 118, test_models 23, test_privacy 42,
-# test_operator 4, test_docs 262, test_train 78, test_checkpoint 3, test_export 9,
+# Tests (716 collected: test_core 65, test_data 118, test_models 23, test_privacy 42,
+# test_operator 4, test_docs 266, test_train 78, test_checkpoint 3, test_export 9,
 # test_calibration 3, test_labels 7, test_gates 11, test_ci 4, test_eval 72,
 # test_colab_eval 11 — one skips without CUDA)
 # every test is limited to 300 s (pytest.ini; pytest-timeout), except the README quickstart
@@ -197,6 +197,9 @@ a mechanism, it needs a test in `tests/test_privacy.py` or CI's 100% gate on tha
 - Config is dataclass-backed: `DignityConfig{model,data,train}` in `core/config.py`, loaded via
   `DignityConfig.from_yaml`. Add a field to the dataclass **and** to `config/base.yaml`; unknown
   keys, top-level or nested, raise `TypeError` at load. `data.source` accepts only `synthetic`.
+  `config/base.yaml` is the config reference (there is no CONFIGURATION.md): every key carries
+  a comment saying what it does, `tests/test_docs.py::TestBaseConfigDoc` enforces it, and you
+  keep those comments current when you add a field.
 - A `privacy:` block in YAML is optional and validated at load (`PrivacyConfig`). No block =
   no privacy stage. `bounds` are public parameters chosen a priori — never derive them from data.
 - `privacy.deterministic_rng: true` (+ `privacy_seed=`) is the seeded experiment mode; shipped

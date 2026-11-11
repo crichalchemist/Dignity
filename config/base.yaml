@@ -1,23 +1,37 @@
 # Base Dignity Configuration
-# This is the default configuration template
+# This is the default configuration template, and the configuration reference:
+# every key below says what it does, and the comment is the contract. Keep these
+# comments current when you add a field (core/config.py holds the dataclasses).
+# Unknown keys, top-level or nested, raise TypeError when the file is loaded.
+# Every key shown here is also the dataclass default, except data.features (below).
 
+# Model architecture. The backbone (CNN1D -> stacked LSTM -> additive attention)
+# is shared; model.task picks which one head sits on top of it.
 model:
-  task: risk  # risk, forecast, policy
-  input_size: 9
-  hidden_size: 256
-  n_layers: 2
-  dropout: 0.1
-  cnn_kernel_size: 3
-  horizon: 10  # forecast H
-  n_actions: 3  # policy; must equal len(ACTIONS)
+  task: risk  # which head dignity-train fits: risk, forecast or policy
+  input_size: 9  # IGNORED: the width comes from the features that survive (data.features)
+  hidden_size: 256  # backbone width, i.e. the size of the context vector the head reads
+  n_layers: 2  # stacked LSTM layers
+  dropout: 0.1  # dropout probability, applied in the backbone and in the heads
+  cnn_kernel_size: 3  # Conv1d kernel width, in rows, of the backbone's CNN stage
+  horizon: 10  # forecast H: rows ahead the forecast head warns about; the last H rows of every block are reserved for it
+  n_actions: 3  # policy head outputs; must equal len(ACTIONS) = allow, review, block
 
+# Data pipeline: synthetic event record -> privacy stage (if any) -> signals ->
+# scaler -> sliding windows. See docs/ARCHITECTURE.md#data-contract.
 data:
   source: synthetic  # only "synthetic" in v1.0; other sources are v1.1 (DGNTY-41)
-  seq_len: 100
-  batch_size: 64
-  split: [0.7, 0.15, 0.15]  # train / val / test blocks
-  label_overlap: 0.0  # risk positive if anomaly overlap fraction > this
-  num_workers: 4
+  seq_len: 100  # rows per window (the time axis of the model input)
+  batch_size: 64  # windows per batch, for training and for validation scoring
+  split: [0.7, 0.15, 0.15]  # train / val / test shares of BLOCKS; 3 positive fractions summing to 1
+  label_overlap: 0.0  # risk positive if the anomalous fraction of the window is > this (0.0 = any anomalous row)
+  num_workers: 4  # DataLoader worker processes
+  # Columns fed to the model, in this order (the order is stored in checkpoints).
+  # Raw columns of the synthetic frame: volume, fee_rate, tx_count (price is read
+  # to derive signals but is not itself a feature here). Derived signals:
+  # volume_volatility, volatility, momentum, directional_change. A name in neither
+  # set is silently dropped, so price_change and regime below give 7 features, not
+  # 9. This list differs from the DataConfig default, which still names entropy.
   features:
     - volume
     - fee_rate
@@ -31,63 +45,71 @@ data:
 # Event-record generator (data.synthetic) — commented out; every field at default.
 # To override, uncomment these lines in place: they nest under data: above.
 #   synthetic:
-#     n_blocks: 1000
-#     block_len: 160              # >= seq_len + horizon + 1
-#     contamination: 0.3
-#     anomalies_per_block: [1, 3]
-#     duration_range: [3, 60]
-#     severity_range: [0.3, 1.0]
+#     n_blocks: 1000              # blocks generated (split by data.split)
+#     block_len: 160              # rows per block; >= seq_len + horizon + 1
+#     contamination: 0.3          # P(a block contains at least one anomaly)
+#     anomalies_per_block: [1, 3]  # inclusive range, drawn for anomalous blocks
+#     duration_range: [3, 60]     # rows per anomaly, inclusive
+#     severity_range: [0.3, 1.0]  # drawn per block; 0 is invisible, 1 the preset maximum
 #     type_weights: {wash_trading: 1.0, pump_and_dump: 1.0, fee_spike: 1.0,
 #                    flash_crash: 1.0, layering: 1.0, fee_evasion: 1.0}
-#     benign_spike_rate: 0.0
-#     label_noise: 0.0
-#     regime_switch_prob: 0.0
-#     seed: 42
+#     benign_spike_rate: 0.0      # P(a normal block gets an unlabelled burst)
+#     label_noise: 0.0            # P(a block's label is flipped)
+#     regime_switch_prob: 0.0     # per-row P(the Markov regime changes)
+#     seed: 42                    # generator and block-split seed; eval.run overwrites it from eval.<seed>_seed
 
+# Training loop (train/loop.py fit). Every run writes best.pt, last.pt and
+# history.json under checkpoint_dir.
 train:
-  epochs: 50
-  lr: 0.0003
-  weight_decay: 0.00001
-  use_amp: true
-  gradient_clip: 1.0
-  checkpoint_dir: ./runs
-  save_interval: 5
-  select_metric: pr_auc  # best.pt = highest val PR-AUC
-  pos_weight: null  # null = n_neg/n_pos of train
-  chance_guard_auroc: 0.55  # warn if val AUROC is below this at guard_epochs; null disables
-  guard_epochs: 5
-  patience: 10  # early stopping; null disables
-  init_backbone_from: null  # policy only: risk checkpoint to warm-start the backbone
+  epochs: 50  # maximum epochs; the cosine schedule is stretched over exactly this many
+  lr: 0.0003  # AdamW learning rate at epoch 1, cosine-decayed towards 0 at the last epoch
+  weight_decay: 0.00001  # AdamW weight decay
+  use_amp: true  # mixed precision; takes effect only on CUDA (CPU runs in float32)
+  gradient_clip: 1.0  # gradient norm clip; 0 disables
+  checkpoint_dir: ./runs  # run directory (gitignored); never point it at checkpoints/
+  save_interval: 5  # write last.pt every N epochs (and at the final or early-stop epoch)
+  select_metric: pr_auc  # best.pt = highest val value of: pr_auc, auroc or recall_at_1pct_fpr; policy ignores it
+  pos_weight: null  # weight of positive labels in the loss; null = n_neg/n_pos of train; policy ignores it
+  chance_guard_auroc: 0.55  # warn if val AUROC is below this at guard_epochs; null disables (policy has no AUROC)
+  guard_epochs: 5  # the epoch at which the chance guard is checked
+  patience: 10  # early stopping: stop after this many epochs without a better val metric; null disables
+  init_backbone_from: null  # policy only: risk checkpoint (best.pt) to warm-start the backbone from; ignored on resume
 
+# Evaluation run (python -m eval.run). Read by eval.run and the privacy sweep, not by training.
 eval:
-  tuning_seed: 1000  # frozen; the model never sees eval_seed before M7
-  eval_seed: 2026  # frozen; the model never sees eval_seed before M7
-  n_train_seeds: 3
-  n_bootstrap: 1000
-  epsilons: [0.1, 0.3, 1.0, 3.0, 10.0, 30.0, 100.0]
-  out_dir: results/v1.0
-  img_dir: docs/img
+  tuning_seed: 1000  # data seed of `--seed tuning`; the only seed to tune on (eval.gates reads the EvalConfig default, not this file)
+  eval_seed: 2026  # data seed of `--seed eval`; frozen, the final reported run only, never tune on it
+  n_train_seeds: 3  # models trained per task; training seed k is the top-level seed + k
+  n_bootstrap: 1000  # bootstrap resamples (of blocks, not windows) for every confidence interval
+  epsilons: [0.1, 0.3, 1.0, 3.0, 10.0, 30.0, 100.0]  # epsilon grid of --privacy-sweep (one risk model per value)
+  out_dir: results/v1.0  # where risk.json, forecast.json, policy.json (and privacy.json) are written
+  img_dir: docs/img  # where the charts are written
 
-# Triage costs C[action][true state]; review_budget caps the share of windows sent to analysts (blocks do not count).
+# Triage costs C[action][true state]; review_budget caps the share of windows sent to analysts (only review is capped; block is not).
 policy:
-  costs:
-    allow: {anomaly: 10.0, normal: 0.0}
-    review: {anomaly: 1.0, normal: 1.0}
-    block: {anomaly: 0.5, normal: 3.0}
-  review_budget: 0.05
+  costs:  # cost of each action in each true state; must price exactly allow, review, block, each with anomaly and normal
+    allow: {anomaly: 10.0, normal: 0.0}  # let it through: a missed anomaly is the most expensive outcome
+    review: {anomaly: 1.0, normal: 1.0}  # send to an analyst: cheap either way, but capacity-limited
+    block: {anomaly: 0.5, normal: 3.0}  # stop it: cheap when right, costly on a normal window
+  review_budget: 0.05  # share of windows that may be reviewed, 0 < x < 1; the rest go to their next-best action
 # Privacy stage — commented out by default. No block => no privacy stage runs.
-# See docs/PRIVACY.md for what each mechanism guarantees.
+# This is the block config/train_risk.yaml ships; docs/PRIVACY.md says what each
+# mechanism guarantees. Keys, in order: epsilon_total is the epsilon ledger of EACH
+# split (train, val, test are separate releases); k is the smallest equivalence
+# class a generalized column may leave; features maps a raw column to a mechanism,
+# and the epsilons of the laplace features must sum to at most epsilon_total.
+# bounds are public parameters chosen a priori, never derived from data; with
+# transform: log1p they are in log1p units. Two more keys are not in the example:
+# deterministic_rng: true is the seeded experiment mode (reproducible, NOT DP-grade
+# randomness, default false), and key_env names an environment variable holding
+# the HMAC key (it must be set when named; only pseudonymize() reads the key).
 # privacy:
-#   key_env: DIGNITY_PRIVACY_KEY     # env var NAME of the HMAC key; only used by
-#                                     # pseudonymize(), no column mechanism reads it
 #   epsilon_total: 1.0
 #   k: 5
-#   deterministic_rng: false   # true = seeded experiment mode (reproducible, NOT DP-grade randomness)
 #   features:
-#     volume:   {mechanism: laplace, epsilon: 0.5, bounds: [0, 10000]}
-#     # per feature, laplace only: add `transform: log1p`; bounds are then in log1p units
-#     price:    {mechanism: laplace, epsilon: 0.5, bounds: [0, 1000]}
+#     volume:   {mechanism: laplace, epsilon: 1.0, transform: log1p, bounds: [0.12, 13.14]}
 #     fee_rate: {mechanism: generalize, bins: 10}
+#     tx_count: {mechanism: generalize, bins: 10}
 
-device: cuda
-seed: 42
+device: cuda  # torch device; used only when CUDA is available, otherwise training and eval run on cpu
+seed: 42  # training seed (torch); eval.run trains seed + k; the DATA seed is data.synthetic.seed

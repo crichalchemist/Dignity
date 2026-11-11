@@ -14,7 +14,16 @@ from pathlib import Path
 import pytest
 import yaml
 
-from core.config import DataConfig, EvalConfig, SyntheticConfig, TrainConfig
+from core.config import (
+    DataConfig,
+    DignityConfig,
+    EvalConfig,
+    ModelConfig,
+    PolicyConfig,
+    PrivacyConfig,
+    SyntheticConfig,
+    TrainConfig,
+)
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -1854,3 +1863,73 @@ class TestArchitectureDoc:
         assert "`data.source`" in text and "`CryptoSource`" in text
         assert "DGNTY-27" in text
         assert "DGNTY-35" in text
+
+
+class TestBaseConfigDoc:
+    """config/base.yaml is the configuration reference: every key is present and
+    says what it does, and the file still loads to the shipped values."""
+
+    BASE = ROOT / "config/base.yaml"
+
+    def test_every_config_field_is_documented_in_base_yaml(self):
+        raw = yaml.safe_load(self.BASE.read_text())
+        # data.synthetic stays commented out on purpose (a live block would make
+        # every run that sets only part of it inherit the whole thing), so its
+        # fields are checked against the commented block instead
+        assert set(raw) == {f.name for f in dataclasses.fields(DignityConfig)} - {
+            "privacy"
+        }
+        sections = {
+            "model": ModelConfig,
+            "data": DataConfig,
+            "train": TrainConfig,
+            "policy": PolicyConfig,
+            "eval": EvalConfig,
+        }
+        for section, cls in sections.items():
+            expected = {f.name for f in dataclasses.fields(cls)}
+            if section == "data":
+                expected -= {"synthetic"}
+            assert expected <= set(raw[section]), section
+        text = self.BASE.read_text()
+        block = text[text.index("# Event-record generator") : text.index("\ntrain:")]
+        commented = set(re.findall(r"^#\s+(\w+):", block, re.M))
+        wanted = {f.name for f in dataclasses.fields(SyntheticConfig)}
+        assert wanted <= commented, wanted - commented
+
+    def test_every_key_in_base_yaml_says_what_it_does(self):
+        lines = self.BASE.read_text().splitlines()
+        bare = [
+            line
+            for i, line in enumerate(lines)
+            if re.match(r"\s*[a-z_]+:", line)
+            and "#" not in line
+            and not lines[i - 1].lstrip().startswith("#")
+        ]
+        assert bare == []
+
+    def test_base_yaml_loads_to_the_shipped_defaults(self):
+        loaded = DignityConfig.from_yaml(str(self.BASE))
+        default = DignityConfig()
+        # data.features is excluded by name: the DataConfig default still lists a
+        # feature the pipeline never produces and lacks volume_volatility, so the
+        # shipped list differs from it on purpose (tracked separately)
+        loaded = dataclasses.replace(
+            loaded,
+            data=dataclasses.replace(loaded.data, features=default.data.features),
+        )
+        assert loaded == default
+
+    def test_commented_privacy_example_is_the_shipped_risk_block(self):
+        # the example must not drift from what config/train_risk.yaml runs with
+        lines = self.BASE.read_text().splitlines()
+        start = lines.index("# privacy:")
+        block = []
+        for line in lines[start:]:
+            if not (line == "# privacy:" or line.startswith("#   ")):
+                break
+            block.append(line[2:])
+        example = yaml.safe_load("\n".join(block))["privacy"]
+        shipped = yaml.safe_load((ROOT / "config/train_risk.yaml").read_text())
+        assert example == shipped["privacy"]
+        PrivacyConfig(**example)
