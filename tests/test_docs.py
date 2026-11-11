@@ -208,26 +208,13 @@ class TestDocs:
                 "docs/PRIVACY.md word for word (the curve statement is written "
                 f"once and reused): {headline!r}"
             )
-        for sentence in (
-            headline,
-            "contains the prevalence",
-            "wholly below the non-private reference's interval",
-            "the interval lies wholly above the prevalence",
-            "PR-AUC is higher at 100 than at 30",
-            "both point estimates are below the reference's",
-            "every PR-AUC at ε = 100 is above every PR-AUC at a smaller ε",
-            "At ε = 30 the replicates spread more widely than the gap",
-            "the same allocation at ε = 1.0 leaves the model's PR-AUC not "
-            "distinguishable from chance on the tuning seed",
-            "up to ε = 10 its intervals do not all contain 0.5",
-            "Only the noise on `volume` changes along the curve",
-            "The rise at the two largest ε therefore comes from less noise on `volume`",
-        ):
+        for sentence in CURVE_CHECKED + CURVE_PRESENT_ONLY:
             assert sentence in text, sentence
         payload = json.loads((ROOT / "results/v1.0/privacy.json").read_text())
         assert payload["seed"] == EvalConfig().tuning_seed, (
             "this statement is about the tuning seed: rewrite it in PRIVACY.md and "
-            "in docs/RESULTS.md for the evaluation results, then drop this check"
+            "in docs/RESULTS.md for the evaluation results, then drop this check. "
+            + curve_unchecked_message((ROOT / "docs/PRIVACY.md").read_text())
         )
         metrics = payload["metrics"]
         reference = metrics["reference"]["risk"]
@@ -3547,24 +3534,35 @@ def verdict_sentence(results_dir: Path = RESULTS_DIR) -> str:
     forecast = _results_json("forecast", results_dir)
     base = forecast["baselines"]["risk_score_forecast"]["pr_auc_by_horizon"]
     model = forecast["metrics"]["pr_auc_by_horizon"]
-    forecast_clears = all(
-        m["ci_low"] > b["value"] for m, b in zip(model, base, strict=True)
-    )
+    # the interval clears the baseline's point value at every horizon, at some, or
+    # at none: three cases, so a mixed result is not reported as a failure
+    where = _where([m["ci_low"] > b["value"] for m, b in zip(model, base, strict=True)])
     policy = _results_json("policy", results_dir)
     cost = policy["metrics"]["expected_cost"]
     triage_clears = (
         cost["ci_high"]
         < policy["baselines"]["threshold_policy"]["expected_cost"]["value"]
     )
-    if forecast_clears == triage_clears:
-        verb = "clear" if forecast_clears else "do not clear"
-        middle = f"forecast and triage {verb} theirs"
-    else:
-        middle = (
-            "forecast clears its baseline; triage does not clear its own"
-            if forecast_clears
-            else "triage clears its baseline; forecast does not clear its own"
+    if where == "some":
+        triage = (
+            "triage clears its baseline"
+            if triage_clears
+            else "triage does not clear its own"
         )
+        middle = (
+            f"forecast clears its baseline at some horizons and not at others; {triage}"
+        )
+    else:
+        forecast_clears = where == "all"
+        if forecast_clears == triage_clears:
+            verb = "clear" if forecast_clears else "do not clear"
+            middle = f"forecast and triage {verb} theirs"
+        else:
+            middle = (
+                "forecast clears its baseline; triage does not clear its own"
+                if forecast_clears
+                else "triage clears its baseline; forecast does not clear its own"
+            )
     curve = privacy_shape(results_dir).plain
     return f"{risk_clause}; {middle}; the privacy curve is {curve}."
 
@@ -3730,6 +3728,12 @@ def eval_gates_command_problems(text: str) -> list[str]:
     return problems
 
 
+# A prevalence is the chance line of PR-AUC, not something a model scored: the row
+# that quotes it says so in its label, because the Model column of the table beside
+# it holds model scores.
+CHANCE_NOTE = " (chance line, not a model score)"
+
+
 def _triple(base: str) -> list[str]:
     return [f"{base}.value", f"{base}.ci_low", f"{base}.ci_high"]
 
@@ -3739,8 +3743,14 @@ def _expected_cells(heading: str, cells: list[str]):
     paths are the dotted paths of the markers in the Model and baseline cells."""
     label = NUM_RE.sub("", cells[0]).strip()
     if heading == "## Risk":
-        found = re.fullmatch(r"`(\w+)`( per block)?", label)
+        found = re.fullmatch(r"`(\w+)`( per block)?", label.removesuffix(CHANCE_NOTE))
         metric, block = found[1], bool(found[2])
+        if (metric == "prevalence") != label.endswith(CHANCE_NOTE):
+            raise AssertionError(
+                f"{cells[0]}: a prevalence is the chance line, not a model score, "
+                f"so its row label must end with {CHANCE_NOTE.strip()!r} (and no "
+                "other row may)"
+            )
         model = f"metrics.block_level.{metric}" if block else f"metrics.{metric}"
         name = "block_tree" if block else "window_logistic"
         return _triple(model), name, _triple(f"baselines.{name}.{metric}")
@@ -3771,8 +3781,13 @@ def _expected_cells(heading: str, cells: list[str]):
                 name,
                 _triple(f"baselines.{name}.reference.pr_auc"),
             )
-        if label == "`prevalence`":
+        if label == f"`prevalence`{CHANCE_NOTE}":
             return _triple("metrics.reference.risk.prevalence"), None, []
+        if label.startswith("`prevalence`"):
+            raise AssertionError(
+                f"{cells[0]}: a prevalence is the chance line, not a model score, "
+                f"so its row label must be `prevalence`{CHANCE_NOTE}"
+            )
         point = re.search(r"metrics\.points\.(\d+)\.epsilon", cells[0])
         if label == "`pr_auc` at ε" and point:
             n = point[1]
@@ -3816,8 +3831,24 @@ def row_path_problems(text: str) -> list[str]:
     return problems
 
 
-def opening_paragraph(text: str) -> str:
-    return next(par for par in text.split("\n\n") if par.startswith("**Outcome.**"))
+def paragraphs_of(text: str) -> list[str]:
+    """The paragraphs of a page, split at any blank line (one or several, with or
+    without trailing spaces), so deleting the banner line, which leaves a different
+    number of blank lines in each page, finds the same paragraphs."""
+    return [p.strip() for p in re.split(r"\n[ \t]*\n", text) if p.strip()]
+
+
+def opening_paragraph(text: str, name: str = "docs/RESULTS.md") -> str:
+    """The Outcome paragraph of a page, with or without the banner line above it.
+    A page without one fails with a message that names the page."""
+    for par in paragraphs_of(text):
+        if par.startswith("**Outcome.**"):
+            return par
+    raise AssertionError(
+        f"{name} has no Outcome paragraph: it needs a paragraph of its own that "
+        "starts with '**Outcome.**' (one sentence per task, in words), before the "
+        "paragraph that starts 'This file reports'"
+    )
 
 
 def _swap_cells(text: str, label_a: str, label_b: str, column: int) -> str:
@@ -4368,7 +4399,7 @@ class TestResultsDoc:
             t, "`review_rate`", "`block_rate`", 1
         ),
         "swapped privacy no-privacy and prevalence": lambda t: _swap_cells(
-            t, "`pr_auc` without privacy", "`prevalence`", 1
+            t, "`pr_auc` without privacy", f"`prevalence`{CHANCE_NOTE}", 1
         ),
         "policy expected_cost ci_high repointed": lambda t: t.replace(
             "policy.json metrics.expected_cost.ci_high",
@@ -5471,12 +5502,25 @@ def trail_row_problems(text: str) -> list[str]:
     return problems
 
 
+MARKER_RE = re.compile(r"\s*<!--\s*num\b[^>]*-->")
+
+
+def strip_markers(text: str) -> str:
+    """Prose without its number markers, so a sentence with a marked grid label and
+    the same sentence without the marker compare equal."""
+    return MARKER_RE.sub("", text)
+
+
 def privacy_row_expected(privacy_text: str) -> str | None:
     """The DGNTY-8 finding cell: its paraphrase, then the headline paragraph of the
     curve section of docs/PRIVACY.md word for word (up to its Test line, so the
     replicate-0 qualifiers stay with it), then a link to the section."""
     sentences = sentences_of(
-        section_of(privacy_text, "## Privacy-versus-utility curve").split("\n", 1)[1]
+        strip_markers(
+            section_of(privacy_text, "## Privacy-versus-utility curve").split("\n", 1)[
+                1
+            ]
+        )
     )
     try:
         at = next(i for i, s in enumerate(sentences) if "the shipped allocation" in s)
@@ -5499,14 +5543,59 @@ def privacy_row_problems(text: str, privacy_text: str) -> list[str]:
             "with 'the shipped allocation', then a 'Test:' sentence): the DGNTY-8 "
             "cell of HOW-IT-WAS-BUILT.md copies the paragraph between them"
         ]
-    cell = _flat(built_rows(text)[8][0])
+    cell = _flat(strip_markers(built_rows(text)[8][0]))
     if cell == expected:
         return []
     return [
         "the DGNTY-8 finding cell is not the PRIVACY.md curve headline paragraph "
-        f"word for word: the row says {cell!r}, PRIVACY.md gives {expected!r}; "
-        "copy the paragraph into the row again"
+        f"word for word (number markers are ignored on both sides): the row says "
+        f"{cell!r}, PRIVACY.md gives {expected!r}; copy the paragraph into the row "
+        "again"
     ]
+
+
+def built_metric_problems(text: str, results_dir: Path = RESULTS_DIR) -> list[str]:
+    """HOW-IT-WAS-BUILT quotes no metric. The DGNTY-8 row is the exception: it copies
+    the curve headline of docs/PRIVACY.md, so it may carry that headline's number
+    markers, and a value that equals an epsilon of the committed grid, which is a
+    configuration label, not a metric."""
+    grid = {
+        float(point["epsilon"])
+        for point in _results_json("privacy", results_dir)["metrics"]["points"]
+    }
+    lines = text.split("\n")
+    at = [i for i, line in enumerate(lines) if "| DGNTY-8 |" in line]
+    row = "\n".join(lines[i] for i in at)
+    rest = "\n".join(line for i, line in enumerate(lines) if i not in at)
+    problems = []
+    if "<!--results-start-->" in text:
+        problems.append("the page holds a results zone tag: remove it")
+    if "<!--num" in rest:
+        problems.append(
+            "a number marker sits outside the DGNTY-8 row: write that number in "
+            "words, or remove the marker (only the DGNTY-8 row may carry the "
+            "markers of the PRIVACY.md headline it copies)"
+        )
+
+    def values(part: str) -> list[str]:
+        bare = re.sub(r"\(3\.1[02]\)|v1\.\d|3\.1[02]", " ", strip_markers(part))
+        return re.findall(r"\d+\.\d+", re.sub(r"\(https?://\S+\)", " ", bare))
+
+    for token in values(rest):
+        problems.append(
+            f"the page quotes {token!r} outside the DGNTY-8 row: say it in words "
+            "and point to docs/RESULTS.md, where every metric has a marker"
+        )
+    for token in values(row):
+        if float(token) not in grid:
+            problems.append(
+                f"the DGNTY-8 row quotes {token!r}, which is no epsilon of the "
+                f"committed grid {sorted(grid)}: a metric belongs in docs/RESULTS.md, "
+                "so take it out of the row (and out of the PRIVACY.md headline)"
+            )
+    if "1.000" in text:
+        problems.append("the page quotes 1.000, a figure of the original benchmark")
+    return problems
 
 
 def claude_md_bullets(section: str) -> list[str]:
@@ -5932,12 +6021,14 @@ class TestHowItWasBuilt:
             assert f"| DGNTY-{n} |" not in text
 
     def test_no_metric_number_appears_in_the_document(self, text):
-        assert "<!--num" not in text
-        assert "<!--results-start-->" not in text
-        bare = re.sub(r"\(3\.1[02]\)|v1\.\d|3\.1[02]", " ", text)
-        bare = re.sub(r"\(https?://\S+\)", " ", bare)
-        assert re.findall(r"\d\.\d", bare) == []
-        assert "1.000" not in text
+        problems = built_metric_problems(text)
+        assert problems == [], (
+            "docs/HOW-IT-WAS-BUILT.md quotes no metric: say it in words and point "
+            "to docs/RESULTS.md. The one exception is the DGNTY-8 row, which copies "
+            "the curve headline of docs/PRIVACY.md word for word, so it may carry "
+            "that headline's number markers and a value that is an epsilon of the "
+            f"committed grid: {problems}"
+        )
 
     def test_the_dgnty_40_row_says_a_skeptic_checked_its_steps_as_the_prose_does(
         self, text
@@ -6287,6 +6378,12 @@ README_SETUP = (
     "pip install -r requirements.txt -r requirements-dev.txt",
     "pip install -e . --no-deps",
 )
+README_MACOS_SETUP = (
+    'conda create -n dignity -c conda-forge python=3.11 "pytorch>=2.5"',
+    "conda activate dignity",
+    "pip install -r requirements.txt -r requirements-dev.txt",
+    "pip install -e . --no-deps",
+)
 README_CHARTS = (
     "risk_pr_curve.png",
     "forecast_pr_auc_by_horizon.png",
@@ -6318,13 +6415,24 @@ def _readme_headings(text: str) -> list[str]:
     return re.findall(r"^## .+$", FENCE_RE.sub("", text), re.M)
 
 
+def readme_words(text: str) -> int:
+    """The words a reader sees: HTML comments (number markers, zone tags, the
+    banner tag) are not text on the page, so they are not counted."""
+    return len(COMMENT_RE.sub("", text).split())
+
+
 def readme_size_problems(text: str) -> list[str]:
-    words = len(text.split())
+    """The five-minute view: at most README_WORD_LIMIT rendered words (words of the
+    page as rendered, so HTML comments are stripped before counting; link text,
+    table cells and code spans count)."""
+    words = readme_words(text)
     if words <= README_WORD_LIMIT:
         return []
     return [
-        f"README.md has {words} words (every word, marker token and link counts; "
-        f"the limit is {README_WORD_LIMIT}): cut prose, never a test"
+        f"README.md has {words} rendered words (HTML comments, such as number "
+        "markers, zone tags and the banner tag, are not counted; every visible "
+        f"word, link and table cell is; the limit is {README_WORD_LIMIT}): cut "
+        "prose, never a test; leave room, since the release rewrite adds words"
     ]
 
 
@@ -6381,9 +6489,43 @@ def readme_fence_problems(text: str) -> list[str]:
     for line in README_SETUP:
         if line not in text:
             problems.append(f"the setup block of README.md lacks: {line}")
+    for line in README_MACOS_SETUP:
+        if line not in text:
+            problems.append(
+                f"the Intel macOS setup block of README.md lacks: {line} (a venv "
+                "cannot see a conda-installed PyTorch, so Intel macOS has its own "
+                "conda block)"
+            )
     for name in re.findall(r"(?<=-r )\S+", text):
         if not (ROOT / name).is_file():
             problems.append(f"README.md installs from {name}, which does not exist")
+    return problems
+
+
+def readme_pointer_problems(text: str) -> list[str]:
+    """Three pointers a reader needs: why the numbers are not final (the Seeds bullet
+    of the RESULTS protocol), how to run the tests, and where the per-type results
+    are. The anchors themselves are checked by the dead-link test."""
+    flat = _flat(text)
+    problems = []
+    if not re.search(
+        r"Seeds bullet of the \[protocol\]\(docs/RESULTS\.md#protocol\)", flat
+    ):
+        problems.append(
+            "README.md must link the Seeds bullet of docs/RESULTS.md next to the "
+            "tuning-seed sentence: 'see the Seeds bullet of the "
+            "[protocol](docs/RESULTS.md#protocol)'"
+        )
+    if "](docs/RESULTS.md#per-type-results)" not in flat:
+        problems.append(
+            "README.md must point to the per-type results of docs/RESULTS.md: "
+            "link docs/RESULTS.md#per-type-results"
+        )
+    if '`pytest tests/ -m "not slow"`' not in flat or "`pytest tests/`" not in flat:
+        problems.append(
+            'README.md must say how to run the tests: `pytest tests/ -m "not slow"` '
+            "for the fast run and `pytest tests/` for the full run"
+        )
     return problems
 
 
@@ -6570,7 +6712,7 @@ def readme_outcome_problems(text: str, results_dir: Path = RESULTS_DIR) -> list[
     """README's Outcome paragraph is held to the headline phrases of RESULTS for
     risk, forecast and policy."""
     results = section_of(text, "## Results") if "## Results" in text else ""
-    paragraphs = [p for p in results.split("\n\n") if p.startswith("**Outcome.**")]
+    paragraphs = [p for p in paragraphs_of(results) if p.startswith("**Outcome.**")]
     if len(paragraphs) != 1:
         return [
             "the Results section of README.md needs exactly one paragraph that "
@@ -6633,6 +6775,8 @@ def readme_privacy_problems(
         "`fee_rate` and `tx_count`",
         "k-anonymous",
         "which ε does not govern",
+        "`price` is not consumed",
+        "the shipped config is not a point on the curve",
         "](docs/THREAT-MODEL.md)",
     )
     if not any(all(n in s for n in needs) for s in private):
@@ -7014,7 +7158,7 @@ def readme_verdict_problems(text: str, results_dir: Path = RESULTS_DIR) -> list[
     """One plain verdict paragraph, in words, before the Outcome paragraph, and the
     sentence in it is recomputed from the numbers like every outcome phrase."""
     results = section_of(text, "## Results") if "## Results" in text else ""
-    paragraphs = results.split("\n\n")
+    paragraphs = paragraphs_of(results)
     verdicts = [p for p in paragraphs if p.startswith("**Verdict.**")]
     if len(verdicts) != 1:
         return [
@@ -7206,6 +7350,62 @@ def fast_run_problems(texts: dict[str, str]) -> list[str]:
     ]
 
 
+# The phrases of the curve section of docs/PRIVACY.md that the curve-statement test
+# compares with the committed results (each is a phrase of one sentence).
+CURVE_CHECKED = (
+    "On the tuning seed, the shipped allocation leaves the risk model's "
+    "PR-AUC not distinguishable from chance on the hard preset at every ε "
+    "on the grid up to 10, and above chance at the two largest grid values, "
+    "30 and 100",
+    "contains the prevalence",
+    "wholly below the non-private reference's interval",
+    "the interval lies wholly above the prevalence",
+    "PR-AUC is higher at 100 than at 30",
+    "both point estimates are below the reference's",
+    "every PR-AUC at ε = 100 is above every PR-AUC at a smaller ε",
+    "At ε = 30 the replicates spread more widely than the gap",
+    "the same allocation at ε = 1.0 leaves the model's PR-AUC not "
+    "distinguishable from chance on the tuning seed",
+    "up to ε = 10 its intervals do not all contain 0.5",
+)
+# Sentences the test only finds in the text: nothing recomputes them from the
+# results, so they are not in CURVE_CHECKED and the failure message lists them.
+CURVE_PRESENT_ONLY = (
+    "Only the noise on `volume` changes along the curve",
+    "The rise at the two largest ε therefore comes from less noise on `volume`",
+)
+
+
+def curve_unchecked_sentences(privacy_text: str) -> list[str]:
+    """Every sentence of the Privacy-versus-utility curve section of docs/PRIVACY.md
+    that the curve-statement test does not compare with the results (it holds none
+    of the phrases of CURVE_CHECKED), computed from the text given."""
+    curve = section_of(privacy_text, "## Privacy-versus-utility curve")
+    return [
+        sentence
+        for sentence in (s.strip() for s in sentences_of(curve.split("\n", 1)[1]))
+        if sentence and not any(phrase in sentence for phrase in CURVE_CHECKED)
+    ]
+
+
+def curve_unchecked_message(privacy_text: str) -> str:
+    """The instruction that names the WHOLE curve section: these sentences are in
+    no test, so the person re-reads and rewrites each for the new results."""
+    if "## Privacy-versus-utility curve" not in privacy_text:
+        return (
+            "docs/PRIVACY.md has no 'Privacy-versus-utility curve' section: "
+            "restore it and rewrite it for the new results"
+        )
+    sentences = curve_unchecked_sentences(privacy_text)
+    listed = "".join(f"\n  - {sentence}" for sentence in sentences)
+    return (
+        "The whole 'Privacy-versus-utility curve' section of docs/PRIVACY.md is "
+        "about the old results, and no test compares these "
+        f"{len(sentences)} sentences with the new ones: re-read each and rewrite "
+        f"it for the new results:{listed}"
+    )
+
+
 PRIVACY_SEED_ALLOWED = (
     "(tuning seed, deterministic mode)",  # the easy-preset floor test
     "tuning-seed validation evidence",  # when the floor was declared
@@ -7233,6 +7433,11 @@ def privacy_seed_problems(text: str, results_dir: Path = RESULTS_DIR) -> list[st
             "committed curve, but the results carry the evaluation seed: rewrite "
             "that sentence"
         )
+    if problems and "## Privacy-versus-utility curve" in text:
+        # the lines above are the ones a regex finds; the whole section is meant
+        # to be re-read, so name it too (once the lines are rewritten this check
+        # passes: the curve-statement test carries the list until it is dropped)
+        problems.append(curve_unchecked_message(text))
     return problems
 
 
@@ -7246,7 +7451,13 @@ def smoke_output_dirs() -> dict[str, str]:
 
 
 GOOD_QUICKSTART = "```bash quickstart\n" + "\n".join(README_QUICKSTART) + "\n```\n"
-GOOD_SETUP = "```bash\n" + "\n".join(README_SETUP) + "\n```\n"
+GOOD_SETUP = (
+    "```bash\n"
+    + "\n".join(README_SETUP)
+    + "\n```\n\n```bash\n"
+    + "\n".join(README_MACOS_SETUP)
+    + "\n```\n"
+)
 
 
 class TestReadme:
@@ -7407,6 +7618,11 @@ class TestReadme:
         problems = readme_roadmap_problems(text, HOW_BUILT.read_text())
         assert problems == [], problems
 
+    def test_the_readme_points_to_the_seeds_the_tests_and_the_per_type_results(
+        self, text
+    ):
+        assert readme_pointer_problems(text) == []
+
     def test_the_privacy_bullet_carries_the_qualifiers_of_the_privacy_docs(self, text):
         problems = readme_qualifier_problems(text)
         assert problems == [], problems
@@ -7441,6 +7657,15 @@ class TestReadmeChecksReportWhatTheyShould:
     def test_a_readme_over_the_word_limit_is_reported(self):
         assert readme_size_problems("word " * README_WORD_LIMIT) == []
         assert readme_size_problems("word " * (README_WORD_LIMIT + 1)) != []
+
+    def test_the_word_count_is_the_rendered_one_and_the_message_says_so(self):
+        marker = "<!--num risk.json seed d--> <!--provisional-->"
+        assert readme_words("a <!--num x.json y d--> b") == 2
+        assert readme_size_problems(("word " + marker + " ") * README_WORD_LIMIT) == []
+        over = "word " * (README_WORD_LIMIT + 1) + marker
+        (message,) = readme_size_problems(over)
+        assert f"{README_WORD_LIMIT + 1} rendered words" in message
+        assert "HTML comments" in message and "not counted" in message
 
     def test_a_missing_or_duplicated_section_is_reported(self):
         good = "\n\n".join(f"{h}\n\ntext" for h in README_SECTIONS)
@@ -7632,7 +7857,8 @@ class TestReadmeChecksReportWhatTheyShould:
         scope = (
             "per-released-value Laplace budget on `volume`, `fee_rate` and "
             "`tx_count` are released by k-anonymous generalization, which ε does "
-            "not govern, [t](docs/THREAT-MODEL.md)"
+            "not govern, `price` is not consumed, the shipped config is not a point "
+            "on the curve, [t](docs/THREAT-MODEL.md)"
         )
         good = (
             f"Inputs can be made differentially private ({scope}), but {claim}.\n\n"
@@ -7648,6 +7874,8 @@ class TestReadmeChecksReportWhatTheyShould:
             good.replace("per-released-value ", ""),
             good.replace("k-anonymous ", ""),
             good.replace("which ε does not govern", "x"),
+            good.replace("`price` is not consumed", "x"),
+            good.replace("the shipped config is not a point on the curve", "x"),
             good.replace("The shipped config is not a point on this curve", "x"),
             good.replace("[t](docs/THREAT-MODEL.md)", "x"),
             good.replace("On the tuning seed, " + claim, "x"),
@@ -8240,3 +8468,196 @@ class TestReleaseStepChecks:
             "pytest -k not Quickstart",
         ):
             assert fast_run_problems({"a": bad}), bad
+
+    OUTCOME = "**Outcome.** On risk, the window gate passes."
+
+    @pytest.mark.parametrize(
+        "head",
+        [
+            f"# Results\n\n{BANNER}\n\n",  # the banner line is there
+            "# Results\n\n\n",  # only the banner line was deleted
+            "# Results\n\n",  # the banner line and one blank line were deleted
+            "# Results\n\n \n\n",  # a blank line with a trailing space is left
+        ],
+        ids=["banner", "line-deleted", "line-and-blank-deleted", "space-left"],
+    )
+    def test_the_outcome_paragraph_is_found_whether_or_not_the_banner_line_is_there(
+        self, head
+    ):
+        page = f"{head}{self.OUTCOME}\n\nThis file reports x.\n"
+        assert opening_paragraph(page) == self.OUTCOME
+        verdict = "**Verdict.** Risk clears both baselines."
+        readme = head.replace("# Results", "## Results", 1) + (
+            f"{verdict}\n\n{self.OUTCOME}\n"
+        )
+        problems = readme_verdict_problems(readme)
+        assert not any("exactly one paragraph" in p for p in problems), problems
+
+    def test_a_page_without_an_outcome_paragraph_fails_with_a_message_naming_it(self):
+        with pytest.raises(AssertionError) as raised:
+            opening_paragraph("# Results\n\nNothing here.\n", "docs/OTHER.md")
+        message = str(raised.value)
+        assert "docs/OTHER.md" in message
+        assert "starts with '**Outcome.**'" in message
+        with pytest.raises(AssertionError, match=r"docs/RESULTS\.md has no Outcome"):
+            opening_paragraph("# Results\n\n**Outcome** (no full stop).\n")
+
+    def row_page(self, cell: str, rest: str = "") -> str:
+        row = f"| {cell} | privacy | confirmed | DGNTY-8 | open | none | none |"
+        return f"# How it was built\n\n{rest}\n\n{row}\n"
+
+    def test_a_grid_epsilon_in_the_privacy_row_passes_and_a_metric_in_it_fails(
+        self, tmp_path
+    ):
+        results = outcome_results(tmp_path)  # grid 0.1, 0.3, 1, 3, 10, 30, 100
+        label = "<!--num privacy.json metrics.points.1.epsilon g-->"
+        grid_label = f"At ε 0.3 {label} and ε 1.0 and ε 100 the interval is wide."
+        assert built_metric_problems(self.row_page(grid_label), results) == []
+        metric = "At ε 30 the PR-AUC is 0.81 and the interval is wide."
+        (problem,) = built_metric_problems(self.row_page(metric), results)
+        assert "'0.81'" in problem and "DGNTY-8 row" in problem
+        assert (
+            "docs/RESULTS.md" in problem
+            and "no epsilon of the committed grid" in problem
+        )
+        off_grid = "At ε 0.5 the interval is wide."
+        assert built_metric_problems(self.row_page(off_grid), results) != []
+
+    def test_the_exemption_holds_inside_the_privacy_row_only(self, tmp_path):
+        results = outcome_results(tmp_path)
+        label = "<!--num privacy.json metrics.points.1.epsilon g-->"
+        outside = built_metric_problems(
+            self.row_page("x", "At ε 0.3 is a label."), results
+        )
+        assert outside and "outside the DGNTY-8 row" in outside[0]
+        marked = built_metric_problems(
+            self.row_page("x", f"ε 3 {label} here."), results
+        )
+        assert marked and "marker sits outside the DGNTY-8 row" in marked[0]
+        assert (
+            built_metric_problems(self.row_page("x", "Python 3.12 and v1.0."), results)
+            == []
+        )
+
+    def test_the_privacy_row_matches_the_headline_with_or_without_number_markers(self):
+        marker = " <!--num privacy.json metrics.points.5.epsilon g-->"
+        plain = TestHowItWasBuilt.PRIVACY_FIXTURE
+        marked = plain.replace("At epsilon 30 the", f"At epsilon 30{marker} the")
+        assert marked != plain
+        for row_source, privacy in ((plain, marked), (marked, plain), (marked, marked)):
+            cell = privacy_row_expected(row_source)
+            row = f"| {cell} | privacy | confirmed | DGNTY-8 | open | none | none |\n"
+            assert privacy_row_problems(row, privacy) == []
+        drifted = privacy_row_expected(plain).replace("one noise draw", "two draws")
+        row = f"| {drifted} | privacy | confirmed | DGNTY-8 | open | none | none |\n"
+        assert privacy_row_problems(row, marked) != []
+
+    CURVE_FIXTURE = (
+        "# Privacy\n\n## Privacy-versus-utility curve\n\n![chart](img/c.png)\n\n"
+        "The curve answers one question nobody tests. "
+        f"Each point {CURVE_CHECKED[1]} of chance. "
+        f"{CURVE_PRESENT_ONLY[1]}. "
+        "Later work may add more.\n\n## Next section\n\nOutside the curve.\n"
+    )
+
+    def test_the_whole_curve_section_is_listed_except_what_a_test_compares(
+        self, tmp_path
+    ):
+        listed = curve_unchecked_sentences(self.CURVE_FIXTURE)
+        assert "The curve answers one question nobody tests." in listed
+        assert f"{CURVE_PRESENT_ONLY[1]}." in listed  # found in the text, not compared
+        assert "Later work may add more." in listed
+        assert not any(CURVE_CHECKED[1] in s for s in listed)
+        assert "Outside the curve." not in listed
+        tuning = seed_dir(tmp_path, EvalConfig().tuning_seed)
+        final = seed_dir(tmp_path, EvalConfig().eval_seed)
+        assert privacy_seed_problems(self.CURVE_FIXTURE, tuning) == []
+        assert privacy_seed_problems(self.CURVE_FIXTURE, final) == []  # rewritten
+        stale = self.CURVE_FIXTURE.replace("Later work", "The tuning seed shows more")
+        *lines, problem = privacy_seed_problems(stale, final)
+        assert len(lines) == 1 and "rewrite that sentence" in lines[0]
+        assert "re-read each and rewrite it for the new results" in problem
+        assert "3 sentences" in problem
+        for sentence in curve_unchecked_sentences(stale):
+            assert sentence in problem
+        assert CURVE_CHECKED[1] not in problem
+        assert "no 'Privacy-versus-utility curve' section" in curve_unchecked_message(
+            "# Privacy\n"
+        )
+
+    def test_the_forecast_clause_of_the_verdict_has_three_honest_cases(self, tmp_path):
+        def clears_at(*horizons):
+            def edit(r):
+                for n in horizons:
+                    r["metrics"]["pr_auc_by_horizon"][n].update(
+                        value=0.9, ci_low=0.8, ci_high=1.0
+                    )
+
+            return edit
+
+        def triage_clears(r):
+            r["metrics"]["expected_cost"].update(value=0.1, ci_low=0.05, ci_high=0.2)
+
+        every = clears_at(*range(10))
+        some = clears_at(0, 3)
+        cases = {
+            "none": ({}, "forecast and triage do not clear theirs;"),
+            "all": ({"forecast": every}, "forecast clears its baseline; triage does"),
+            "some": (
+                {"forecast": some},
+                "forecast clears its baseline at some horizons and not at others; "
+                "triage does not clear its own;",
+            ),
+            "some-and-triage": (
+                {"forecast": some, "policy": triage_clears},
+                "forecast clears its baseline at some horizons and not at others; "
+                "triage clears its baseline;",
+            ),
+        }
+        for name, (edits, expected) in cases.items():
+            results = outcome_results(tmp_path, name, **edits)
+            assert expected in verdict_sentence(results), name
+        mixed = outcome_results(tmp_path, "mixed", forecast=some)
+        required = outcome_phrases(mixed)["forecast"].headline[0]
+        assert required.endswith("at some horizons and not at others")  # RESULTS.md
+
+    def test_a_prevalence_row_says_it_is_a_chance_line_and_no_other_row_does(self):
+        cells = ["`prevalence`", "0.27", "x", "y"]
+        for heading in ("## Risk", "## Privacy curve"):
+            with pytest.raises(AssertionError, match="chance line"):
+                _expected_cells(heading, cells)
+        labelled = [f"`prevalence`{CHANCE_NOTE}", "0.27", "x", "y"]
+        assert _expected_cells("## Risk", labelled)[0][0] == "metrics.prevalence.value"
+        blocks = [f"`prevalence` per block{CHANCE_NOTE}", "0.31", "x", "y"]
+        assert "block_level.prevalence" in _expected_cells("## Risk", blocks)[0][0]
+        model = _expected_cells("## Privacy curve", labelled)[0][0]
+        assert model == "metrics.reference.risk.prevalence.value"
+        with pytest.raises(AssertionError, match="chance line"):
+            _expected_cells("## Risk", [f"`auroc`{CHANCE_NOTE}", "0.8", "x", "y"])
+
+    def test_the_intel_macos_block_is_its_own_conda_path_without_the_maintainers_name(
+        self,
+    ):
+        assert readme_fence_problems(GOOD_SETUP + GOOD_QUICKSTART) == []
+        venv_only = GOOD_SETUP.split("\n\n```bash")[0] + "\n"
+        problems = readme_fence_problems(venv_only + GOOD_QUICKSTART)
+        assert any("Intel macOS setup block" in p for p in problems), problems
+        assert readme_claim_problems("\n".join(README_MACOS_SETUP)) == []
+        assert readme_claim_problems("conda create -n dignity-model x") != []
+
+    def test_the_readme_pointers_to_seeds_tests_and_per_type_results_are_checked(
+        self,
+    ):
+        good = (
+            "See the Seeds bullet of the [protocol](docs/RESULTS.md#protocol). "
+            "[per-type](docs/RESULTS.md#per-type-results). "
+            '`pytest tests/ -m "not slow"` and `pytest tests/` run the tests.\n'
+        )
+        assert readme_pointer_problems(good) == []
+        for old in (
+            "Seeds bullet of the [protocol](docs/RESULTS.md#protocol)",
+            "](docs/RESULTS.md#per-type-results)",
+            '`pytest tests/ -m "not slow"`',
+            "`pytest tests/`",
+        ):
+            assert readme_pointer_problems(good.replace(old, "x")), old

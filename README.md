@@ -22,7 +22,7 @@ It scores risk and gives no advice on what to transact.
 
 **Outcome.** On risk, the window gate passes against `window_logistic` and the block gate passes against `block_tree`. On forecast, the model's PR-AUC interval clears `risk_score_forecast` at no horizon, its point estimate is below the baseline's at every horizon, the model's PR-AUC interval contains the prevalence at every horizon, the baseline's PR-AUC interval lies wholly above the prevalence at every horizon, the baseline's lower bound is above the model's point estimate at most horizons, and the model warns ahead of no onset. On policy, the triage head's expected cost is higher than the threshold policy's, so the triage head does not beat the threshold policy.
 
-The numbers of the four `eval.run` results are tuning-seed scores. They are for the `hard` preset (`config/synthetic_hard.yaml`). The headline training seed is the first of three training seeds. Intervals are 95% bootstrap intervals over test blocks. `pr_auc_by_horizon.N` scores an onset within the next N plus one rows; chance is the prevalence. Commands, baselines and caveats are in [docs/RESULTS.md](docs/RESULTS.md).
+The numbers of the four `eval.run` results are tuning-seed scores. They are for the `hard` preset (`config/synthetic_hard.yaml`). The headline training seed is the first of three training seeds. Intervals are 95% bootstrap intervals over test blocks. `pr_auc_by_horizon.N` scores an onset within the next N plus one rows; chance is the prevalence. Why they are not final: see the Seeds bullet of the [protocol](docs/RESULTS.md#protocol). Commands, baselines and caveats are in [docs/RESULTS.md](docs/RESULTS.md); recall per anomaly type is in its [per-type results](docs/RESULTS.md#per-type-results).
 
 <!--results-start-->
 | Metric | Model | Baseline | File |
@@ -49,11 +49,20 @@ The privacy baseline is `window_logistic` on the released windows. The reference
 
 ## Quickstart
 
-Python 3.10 to 3.12 (CI runs Linux with 3.10 and 3.12; `numpy<2` caps the range). On Intel macOS PyPI has no torch 2.5 or newer wheel, so install PyTorch from conda-forge first and skip the `pip install torch` line, as the project's macOS checkout does. From a fresh clone:
+Python 3.10 to 3.12 (CI runs Linux with 3.10 and 3.12; `numpy<2` caps the range). From a fresh clone:
 
 ```bash
 python3 -m venv .venv && source .venv/bin/activate
 pip install torch --index-url https://download.pytorch.org/whl/cpu
+pip install -r requirements.txt -r requirements-dev.txt
+pip install -e . --no-deps
+```
+
+On Intel macOS PyPI has no torch 2.5 or newer wheel, and a venv cannot see a conda-installed PyTorch, so use a conda environment instead of the block above, as the project's macOS checkout does (pip counts conda's PyTorch as satisfying `torch>=2.5.0`):
+
+```bash
+conda create -n dignity -c conda-forge python=3.11 "pytorch>=2.5"
+conda activate dignity
 pip install -r requirements.txt -r requirements-dev.txt
 pip install -e . --no-deps
 ```
@@ -68,6 +77,8 @@ python -m eval.run --config config/smoke.yaml --seed tuning
 
 They train a risk model into `runs/smoke/train`, export and verify `dignity_risk.onnx`, and write results to `runs/smoke/results` and charts to `runs/smoke/img`. The full evaluation, and any config that keeps the default `eval.out_dir` and `eval.img_dir`, writes `results/v1.0` and `docs/img` (see the [Colab runbook](docs/RESULTS.md#colab-runbook)). See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
+Tests: `pytest tests/ -m "not slow"` is the fast run; `pytest tests/` is the full run, which also executes the quickstart above.
+
 ## How this was built
 
 Agent workflow rules live in `.claude/CLAUDE.md`. An adversarial review found that the original benchmark was trivially easy: a depth-3 tree on per-block statistics separated every block (DGNTY-10). The generator was rebuilt with difficulty presets; DGNTY-10 closes with the final evaluation. Each finding became an issue (DGNTY ids are rows of [docs/HOW-IT-WAS-BUILT.md](docs/HOW-IT-WAS-BUILT.md); the tracker is private), and each fix went to a PR and a CI run; that page records the status of every one, and DGNTY-8, DGNTY-27 and DGNTY-40 are still open (see its Status column).
@@ -77,7 +88,7 @@ Agent workflow rules live in `.claude/CLAUDE.md`. An adversarial review found th
 - Synthetic data only: `data.source` accepts only `synthetic`, and there is no result on real data.
 - `fee_rate` and `tx_count` are uncalibrated.
 - The triage costs (`policy.costs`) are a stated assumption in the config.
-- Privacy: On the tuning seed, the shipped allocation leaves the risk model's PR-AUC not distinguishable from chance on the hard preset at every ε on the grid up to 10, and above chance at the two largest grid values, 30 and 100 ([curve](docs/PRIVACY.md#privacy-versus-utility-curve)), although inputs can be made differentially private (ε is the per-released-value Laplace budget on `volume`; `fee_rate` and `tx_count` are released by k-anonymous generalization, which ε does not govern; see the [threat model](docs/THREAT-MODEL.md)). The intervals are one noise draw and one training seed, the two largest grid values are not offered as private settings, and k-anonymity holds for the train release only. There is no inference-time privacy release path (DGNTY-27).
+- Privacy: On the tuning seed, the shipped allocation leaves the risk model's PR-AUC not distinguishable from chance on the hard preset at every ε on the grid up to 10, and above chance at the two largest grid values, 30 and 100 ([curve](docs/PRIVACY.md#privacy-versus-utility-curve)), although inputs can be made differentially private (ε is the per-released-value Laplace budget on `volume`; `fee_rate` and `tx_count` are released by k-anonymous generalization, which ε does not govern; `price` is not consumed; the shipped config is not a point on the curve; see the [threat model](docs/THREAT-MODEL.md)). The intervals are one noise draw and one training seed, the two largest grid values are not offered as private settings, and k-anonymity holds for the train release only. There is no inference-time privacy release path (DGNTY-27).
 
 ## Roadmap
 
