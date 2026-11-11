@@ -45,10 +45,10 @@ format that export no longer supports (DGNTY-3, DGNTY-35). No shipped config wri
 ## Commands
 
 ```bash
-# Tests (963 collected: test_core 65, test_data 118, test_models 23, test_privacy 42,
-# test_operator 4, test_docs 502, test_train 78, test_checkpoint 3, test_export 9,
+# Tests (1013 collected: test_core 65, test_data 118, test_models 23, test_privacy 42,
+# test_operator 4, test_docs 542, test_train 78, test_checkpoint 3, test_export 9,
 # test_calibration 3, test_labels 7, test_gates 11, test_ci 4, test_eval 72,
-# test_colab_eval 11, test_scripts 11 — one skips without CUDA)
+# test_colab_eval 13, test_scripts 19 — one skips without CUDA)
 # every test is limited to 300 s (pytest.ini; pytest-timeout), except the README quickstart
 # test, which carries its own 900 s limit (three subprocesses, each capped at 300 s)
 pytest tests/ -v
@@ -70,7 +70,7 @@ python scripts/refresh_doc_numbers.py README.md docs/RESULTS.md   # after any re
 python -m eval.run --smoke --seed tuning  # CI-sized, all three tasks (--tasks defaults to risk,forecast,policy); outputs under runs/smoke/
 python -m eval.run --smoke --seed tuning --tasks risk,forecast  # --tasks forecast also fits risk (baseline) but writes only forecast.json; unknown names exit 2
 python -m eval.run --smoke --seed tuning --privacy-sweep  # also trains risk per epsilon on the config/train_risk.yaml privacy template (own models, so works without --tasks risk); writes privacy.json + privacy_curve.png
-python -m eval.run --config config/synthetic_hard.yaml --seed tuning  # full run on a Colab GPU; see docs/RESULTS.md
+python -m eval.run --config config/synthetic_hard.yaml --seed tuning --tasks risk,forecast,policy --privacy-sweep  # full run on a Colab GPU; see docs/RESULTS.md
 
 # Train
 # checkpoints land in ./runs/<task>/ (gitignored); never in checkpoints/
@@ -214,9 +214,10 @@ a mechanism, it needs a test in `tests/test_privacy.py` or CI's 100% gate on tha
   (dicts by key, lists by non-negative integer: `pr_auc_by_horizon.4.value`; `fmt` is a Python
   format spec: `.2f`, `.1%`, `d`, `g` for ε (floats such as `10.0`), `s` compares the whole token;
   a JSON null renders as `n/a` for every `fmt`; a path through a null or a scalar is "no such
-  path"). Only the number core of the token is compared. `split_token` splits a token into
-  prefix, core and suffix and is the one helper the M6.6 refresh imports, so a refresh rewrites
-  the core and keeps the wrappers. Accepted wrappers: `[0.72 <!--…-->, 0.88 <!--…-->]` and
+  path"). Only the number core of the token is compared. The marker grammar (`NUM_RE`,
+  `TOKEN_RE`, `split_token`, `resolve`, `strip_code`) is defined once in `scripts/refresh_doc_numbers.py`;
+  `tests/test_docs.py` imports it and `check_numbers` there is the checker. `split_token` splits a
+  token into prefix, core and suffix, so a refresh rewrites the core and keeps the wrappers. Accepted wrappers: `[0.72 <!--…-->, 0.88 <!--…-->]` and
   `(0.72, 0.88)` for a CI (three markers), `**0.81**`, `_`/`~`, table pipes glued to the number,
   a `/` glued before or after the number (`0 <!--…-->/34 <!--…-->`) and a trailing `. , ; :`. A range such as `0.72–0.88`
   is rejected: write the bracket form. A `<!--num` comment that does not parse is a malformed

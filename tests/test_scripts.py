@@ -131,3 +131,62 @@ class TestRefreshDocNumbers:
         assert test_docs.split_token is _refresh.split_token
         assert test_docs._resolve is _refresh.resolve
         assert test_docs.strip_code is _refresh.strip_code
+
+    def test_refresh_keeps_a_prefix_and_a_suffix_glued_to_the_token(self, tmp_path):
+        md = _write(
+            tmp_path,
+            "**0.10**<!--num r.json m.v .2f--> (0.10),<!--num r.json m.v .2f-->",
+        )
+        assert refresh(md, tmp_path) == 2
+        assert md.read_text() == (
+            "**0.84**<!--num r.json m.v .2f--> (0.84),<!--num r.json m.v .2f-->"
+        )
+
+    def test_a_value_the_format_cannot_render_fails_and_leaves_the_file(self, tmp_path):
+        text = "0.10 <!--num r.json m.v .2f-->"
+        md = _write(tmp_path, text, m={"v": "text"})
+        with pytest.raises(ValueError, match="m.v cannot be formatted with .2f"):
+            refresh(md, tmp_path)
+        assert md.read_text() == text
+
+    @pytest.mark.parametrize(
+        ("token", "message"),
+        [("abc", "cannot read a number from abc"), ("0.7–0.9", "is a range")],
+    )
+    def test_a_token_that_holds_no_single_number_fails_and_leaves_the_file(
+        self, tmp_path, token, message
+    ):
+        text = f"{token} <!--num r.json m.v .2f-->"
+        md = _write(tmp_path, text)
+        with pytest.raises(ValueError, match=message):
+            refresh(md, tmp_path)
+        assert md.read_text() == text
+
+    def test_the_default_results_directory_is_the_committed_one(self):
+        from tests.test_docs import ROOT
+
+        assert _refresh.DEFAULT_RESULTS == ROOT / "results" / "v1.0"
+        assert _refresh.DEFAULT_RESULTS.is_dir()
+
+    def test_an_error_names_the_line_of_the_marker(self, tmp_path):
+        md = _write(tmp_path, "intro\n0.10 <!--num r.json m.nope .2f-->")
+        with pytest.raises(ValueError, match=r"a\.md:2: no such path m\.nope"):
+            refresh(md, tmp_path)
+
+    def test_a_fence_is_closed_only_by_its_own_kind_of_fence(self, tmp_path):
+        for text in (
+            "```\n~~~\n0.10 <!--num r.json m.v .2f-->\n```\n",
+            "~~~\n```\n0.10 <!--num r.json m.v .2f-->\n~~~\n",
+        ):
+            md = _write(tmp_path, text)
+            assert refresh(md, tmp_path) == 0
+            assert md.read_text() == text
+
+    def test_every_unresolvable_marker_is_reported_not_only_the_first(self, tmp_path):
+        md = _write(
+            tmp_path,
+            "0.1 <!--num r.json m.nope .2f--> 0.2 <!--num r.json m.nada .2f-->",
+        )
+        with pytest.raises(ValueError) as error:
+            refresh(md, tmp_path)
+        assert "m.nope" in str(error.value) and "m.nada" in str(error.value)

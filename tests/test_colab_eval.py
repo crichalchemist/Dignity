@@ -21,6 +21,10 @@ RUNBOOK = (
     "runs/colab/dignity_results_$SEED.tar.gz\n"
     "colab stop -s dignity-eval\n"
     "tar -xzf runs/colab/dignity_results_$SEED.tar.gz -C runs/colab\n"
+    "cp -r runs/colab/results/v1.0/. results/v1.0/\n"
+    "cp -r runs/colab/docs/img/. docs/img/\n"
+    "python scripts/refresh_doc_numbers.py README.md docs/RESULTS.md\n"
+    "python -m pytest tests/test_docs.py\n"
 )
 
 
@@ -159,3 +163,21 @@ class TestResultsRunbook:
         assert "Tested with google-colab-cli 0.7.2." in text
         assert "default of 30 s kills the run" in text
         assert "`git_sha`" in text and "`config_hash`" in text
+
+    def test_runbook_moves_the_archive_into_the_tree_then_refreshes_and_tests(self):
+        from tests.test_docs import runbook_problems
+
+        assert runbook_problems(RUNBOOK) == []
+        lines = RUNBOOK.splitlines()
+        for i, line in enumerate(lines):
+            if line.startswith(("cp ", "python ")):
+                without = "\n".join(lines[:i] + lines[i + 1 :])
+                assert runbook_problems(without), line
+        swapped = lines[:]
+        swapped[-1], swapped[-2] = swapped[-2], swapped[-1]
+        assert runbook_problems("\n".join(swapped))
+        assert "the refresh and the doc tests follow" in self._text()
+
+    def test_runbook_copies_exactly_the_directories_the_script_archives(self):
+        for path in ("results/v1.0", "docs/img"):
+            assert f"cp -r runs/colab/{path}/. {path}/" in RUNBOOK

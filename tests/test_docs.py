@@ -1,6 +1,7 @@
 """Public docs must not reintroduce claims or APIs this project removed."""
 
 import ast
+import collections
 import dataclasses
 import importlib
 import importlib.util
@@ -213,7 +214,10 @@ class TestDocs:
         ):
             assert sentence in text, sentence
         payload = json.loads((ROOT / "results/v1.0/privacy.json").read_text())
-        assert payload["seed"] == EvalConfig().tuning_seed
+        assert payload["seed"] == EvalConfig().tuning_seed, (
+            "this statement is about the tuning seed: rewrite it in PRIVACY.md and "
+            "in docs/RESULTS.md for the evaluation results, then drop this check"
+        )
         metrics = payload["metrics"]
         reference = metrics["reference"]["risk"]
         chance = reference["prevalence"]["value"]
@@ -3013,7 +3017,6 @@ TABLE_SEPARATOR_RE = re.compile(r"\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)*\|?")
 SOURCE_CELL_RE = re.compile(
     r"`(python -m eval\.run[^`]*)` -> `results/v1\.0/(\w+)\.json`"
 )
-ROW_MARKER_RE = re.compile(r"<!--num (\S+?)\.json (\S+) (\S+?)-->")
 RESULTS_HEADERS = (
     "Metric | Model | Best baseline | Source",
     "Type | Recall [CI] | n_windows | Source",
@@ -3071,13 +3074,11 @@ def _cells(row: str) -> list[str]:
     return [c.strip() for c in row.strip().strip("|").split("|")]
 
 
-def eval_run_parser():
-    """The argparse parser of eval.run.main, captured instead of hard-coded."""
+def _main_parser(module):
+    """The argparse parser of module.main, captured instead of hard-coded."""
     import argparse
     import contextlib
     from unittest import mock
-
-    from eval import run as eval_run
 
     class CapturedError(Exception):
         pass
@@ -3092,8 +3093,20 @@ def eval_run_parser():
         mock.patch.object(argparse.ArgumentParser, "parse_args", spy),
         contextlib.suppress(CapturedError),
     ):
-        eval_run.main([])
+        module.main([])
     return captured[0]
+
+
+def eval_run_parser():
+    from eval import run as eval_run
+
+    return _main_parser(eval_run)
+
+
+def gates_parser():
+    from eval import gates
+
+    return _main_parser(gates)
 
 
 def command_problems(command: str, file_name: str, root: Path = ROOT) -> list[str]:
@@ -3115,6 +3128,8 @@ def command_problems(command: str, file_name: str, root: Path = ROOT) -> list[st
     if args.config is None or not (root / args.config).is_file():
         problems.append(f"{command}: --config {args.config} is not a file")
     tasks = {t.strip() for t in args.tasks.split(",")}
+    for task in sorted(tasks - {"risk", "forecast", "policy"}):
+        problems.append(f"{command}: eval.run rejects the unknown task {task!r}")
     if file_name in ("risk", "forecast", "policy") and file_name not in tasks:
         problems.append(f"{command}: --tasks does not include {file_name}")
     if file_name == "privacy" and not args.privacy_sweep:
@@ -3136,7 +3151,9 @@ def zone_problems(zone: str, root: Path = ROOT) -> list[str]:
                 continue
             command, file_name = source.groups()
             problems += command_problems(command, file_name, root)
-            markers = ROW_MARKER_RE.findall(row)
+            markers = [m[1:] for m in NUM_RE.findall(row)]
+            if len(markers) != row.count("<!--num"):
+                problems.append(f"a marker the grammar does not read: {row}")
             for name, dotted, _ in markers:
                 if name != file_name:
                     problems.append(
@@ -3155,8 +3172,7 @@ def zone_problems(zone: str, root: Path = ROOT) -> list[str]:
 def source_seed_problems(text: str, results_dir: Path = RESULTS_DIR) -> list[str]:
     """Every Source cell's --seed word is tuning while risk.json is on the tuning
     seed and eval after."""
-    seed = _results_json("risk", results_dir)["seed"]
-    expected = "tuning" if seed == EvalConfig().tuning_seed else "eval"
+    expected = "tuning" if results_on_tuning_seed(results_dir) else "eval"
     problems = []
     for command, _ in SOURCE_CELL_RE.findall(text):
         argv = shlex.split(command)
@@ -3170,9 +3186,26 @@ def _results_json(name: str, results_dir: Path = RESULTS_DIR) -> dict:
     return json.loads((results_dir / f"{name}.json").read_text())
 
 
-def outcome_phrases(results_dir: Path = RESULTS_DIR) -> dict[str, tuple[list, list]]:
-    """Per task, the outcome phrases the committed JSON supports and the ones it
-    contradicts, recomputed from the numbers (never read from the doc)."""
+def results_on_tuning_seed(results_dir: Path = RESULTS_DIR) -> bool:
+    """Whether the committed results are tuning-seed results, decided from the seed
+    risk.json records against core.config.EvalConfig. Every sentence that holds
+    only while this is true is checked in both directions: required while it is,
+    forbidden once the seed is the evaluation seed."""
+    return _results_json("risk", results_dir)["seed"] == EvalConfig().tuning_seed
+
+
+OutcomePhrases = collections.namedtuple("OutcomePhrases", "required forbidden headline")
+
+
+def _where(flags: list[bool]) -> str:
+    """none / all / some of the horizons (or seeds) a condition holds at."""
+    return "none" if not any(flags) else "all" if all(flags) else "some"
+
+
+def outcome_phrases(results_dir: Path = RESULTS_DIR) -> dict[str, OutcomePhrases]:
+    """Per task, the outcome phrases the committed JSON supports, the ones it
+    contradicts and the headline subset the opening paragraph must repeat, all
+    recomputed from the numbers (never read from the doc)."""
     out = {}
 
     risk = _results_json("risk", results_dir)
@@ -3188,11 +3221,13 @@ def outcome_phrases(results_dir: Path = RESULTS_DIR) -> dict[str, tuple[list, li
         no = f"the {level} gate does not pass against `{best}`"
         required.append(yes if passed else no)
         forbidden.append(no if passed else yes)
-    out["risk"] = (required, forbidden)
+    out["risk"] = OutcomePhrases(required, forbidden, list(required))
 
     forecast = _results_json("forecast", results_dir)
-    model = forecast["metrics"]["pr_auc_by_horizon"]
+    metrics = forecast["metrics"]
+    model = metrics["pr_auc_by_horizon"]
     base = forecast["baselines"]["risk_score_forecast"]["pr_auc_by_horizon"]
+    chance = metrics["prevalence_by_horizon"]
     cleared = [m["ci_low"] > b["value"] for m, b in zip(model, base, strict=True)]
     below = [m["value"] < b["value"] for m, b in zip(model, base, strict=True)]
     where = {
@@ -3200,7 +3235,7 @@ def outcome_phrases(results_dir: Path = RESULTS_DIR) -> dict[str, tuple[list, li
         "all": "at every horizon",
         "some": "at some horizons and not at others",
     }
-    key = "none" if not any(cleared) else "all" if all(cleared) else "some"
+    key = _where(cleared)
     required = [
         f"the model's PR-AUC interval clears `risk_score_forecast` {where[key]}"
     ]
@@ -3209,15 +3244,50 @@ def outcome_phrases(results_dir: Path = RESULTS_DIR) -> dict[str, tuple[list, li
         for k, w in where.items()
         if k != key
     ]
+    headline = [required[0]]
     point = "its point estimate is below the baseline's at every horizon"
     (required if all(below) else forbidden).append(point)
+    # the chance line, in both directions
+    contains = [
+        m["ci_low"] <= c <= m["ci_high"] for m, c in zip(model, chance, strict=True)
+    ]
+    above = [b["ci_low"] > c for b, c in zip(base, chance, strict=True)]
+    for template, flags in (
+        ("the model's PR-AUC interval contains the prevalence {}", contains),
+        ("the baseline's PR-AUC interval lies wholly above the prevalence {}", above),
+    ):
+        key = _where(flags)
+        required.append(template.format(where[key]))
+        forbidden += [template.format(w) for k, w in where.items() if k != key]
+    # at how many horizons the baseline's lower bound is above the model's estimate
+    n_ahead = sum(b["ci_low"] > m["value"] for m, b in zip(model, base, strict=True))
+    if n_ahead == 0:
+        key = "none"
+    elif n_ahead == len(model):
+        key = "every"
+    else:
+        key = "most" if 2 * n_ahead > len(model) else "some"
+    counts = {
+        "none": "at no horizon",
+        "some": "at some horizons, fewer than half of them",
+        "most": "at most horizons",
+        "every": "at every horizon",
+    }
+    template = "the baseline's lower bound is above the model's point estimate {}"
+    required.append(template.format(counts[key]))
+    forbidden += [template.format(w) for k, w in counts.items() if k != key]
+    required += [
+        "On the headline seed, at the alarm threshold, the model warns ahead of",
+        "so on the headline seed the model's median lead time is",
+        "most means more than half of them but not all",
+    ]
     amounts = {
         "none": "warns ahead of no onset",
         "all": "warns ahead of every onset",
         "some": "warns ahead of some onsets",
     }
     for who, lead in (
-        ("the model", forecast["metrics"]["lead_time"]),
+        ("the model", metrics["lead_time"]),
         (
             "`risk_score_forecast`",
             forecast["baselines"]["risk_score_forecast"]["lead_time"],
@@ -3227,11 +3297,22 @@ def outcome_phrases(results_dir: Path = RESULTS_DIR) -> dict[str, tuple[list, li
         key = "none" if missed == onsets else "all" if missed == 0 else "some"
         required.append(f"{who} {amounts[key]}")
         forbidden += [f"{who} {a}" for k, a in amounts.items() if k != key]
+        if who == "the model":
+            headline.append(required[-1])
     median = "the model's median lead time is n/a"
-    (
-        required if forecast["metrics"]["lead_time"]["median"] is None else forbidden
-    ).append(median)
-    out["forecast"] = (required, forbidden)
+    (required if metrics["lead_time"]["median"] is None else forbidden).append(median)
+    # the lead time of every training seed, not only the headline one
+    values = metrics["seed_spread"]["lead_time_median"]["values"]
+    seeds = {
+        "none": "on none of the training seeds",
+        "all": "on every one of the training seeds",
+        "some": "on some of the training seeds",
+    }
+    key = _where([v is not None for v in values])
+    template = "the model warns ahead of at least one onset {}"
+    required.append(template.format(seeds[key]))
+    forbidden += [template.format(w) for k, w in seeds.items() if k != key]
+    out["forecast"] = OutcomePhrases(required, forbidden, headline)
 
     policy = _results_json("policy", results_dir)
     m = policy["metrics"]["expected_cost"]
@@ -3255,11 +3336,54 @@ def outcome_phrases(results_dir: Path = RESULTS_DIR) -> dict[str, tuple[list, li
     (forbidden if key == "clears" else required).append(
         "so the triage head does not beat the threshold policy"
     )
+    headline = list(required)
+    # the rule the verdict applies, as the doc must state it
+    required.append(
+        "the upper end of its interval lies below the threshold policy's expected cost"
+    )
     overlap = m["ci_low"] <= b["ci_high"] and b["ci_low"] <= m["ci_high"]
     yes, no = "the two intervals overlap", "the two intervals do not overlap"
     required.append(yes if overlap else no)
     forbidden.append(no if overlap else yes)
-    out["policy"] = (required, forbidden)
+    spread = policy["metrics"]["seed_spread"]
+    pairs = list(
+        zip(
+            spread["expected_cost"]["values"],
+            spread["baseline_expected_cost"]["values"],
+            strict=True,
+        )
+    )
+    per_seed = {
+        "more": "on every training seed the triage head costs more than the "
+        "threshold policy",
+        "less": "on every training seed the triage head costs less than the "
+        "threshold policy",
+        "mixed": "the triage head costs more than the threshold policy on some "
+        "training seeds and less on others",
+    }
+    if all(a > c for a, c in pairs):
+        key = "more"
+    elif all(a < c for a, c in pairs):
+        key = "less"
+    else:
+        key = "mixed"
+    required.append(per_seed[key])
+    forbidden += [v for k, v in per_seed.items() if k != key]
+    out["policy"] = OutcomePhrases(required, forbidden, headline)
+
+    privacy = _results_json("privacy", results_dir)["metrics"]
+    prevalence = privacy["reference"]["risk"]["prevalence"]["value"]
+    points = sorted(privacy["points"], key=lambda p: p["epsilon"])
+    intervals = [p["risk"]["pr_auc"] for p in points]
+    split = (
+        "not distinguishable from chance at every grid value except the two "
+        "largest, where it is above chance"
+    )
+    holds = all(i["ci_low"] <= prevalence <= i["ci_high"] for i in intervals[:-2])
+    holds = holds and all(i["ci_low"] > prevalence for i in intervals[-2:])
+    required = [split if holds else "(the privacy outcome no longer holds: rewrite it)"]
+    forbidden = ["above chance at every grid value"] + ([] if holds else [split])
+    out["privacy"] = OutcomePhrases(required, forbidden, list(required))
     return out
 
 
@@ -3268,6 +3392,308 @@ def phrase_problems(text: str, required: list[str], forbidden: list[str]) -> lis
     return [f"missing: {p}" for p in required if p not in flat] + [
         f"contradicts the results: {p}" for p in forbidden if p in flat
     ]
+
+
+# A sentence that holds only while the committed results are tuning-seed results.
+# Each is required while results_on_tuning_seed() is true and forbidden after, so
+# the final evaluation fails on exactly the sentences a person must rewrite.
+FOUR_RESULTS = (
+    "`results/v1.0/risk.json`, `results/v1.0/forecast.json`, "
+    "`results/v1.0/policy.json` and `results/v1.0/privacy.json`"
+)
+TUNING_ONLY_SENTENCES = (
+    f"The numbers of the four `eval.run` results ({FOUR_RESULTS}) are tuning-seed "
+    "test scores, and the tuning seed's test split was read during development, "
+    "so they are not an unbiased estimate of the final evaluation, which "
+    "replaces them.",
+    "The numbers of the four `eval.run` results are tuning-seed scores.",
+    "On the tuning seed, the shipped allocation leaves the risk model's PR-AUC "
+    "not distinguishable from chance",
+)
+# Wording that names the tuning seed as the source of the numbers, wherever it is.
+TUNING_ONLY_WORDING = ("tuning-seed", "On the tuning seed", "not an unbiased estimate")
+
+
+def seed_wording_problems(text: str, results_dir: Path = RESULTS_DIR) -> list[str]:
+    flat = _flat(text)
+    if results_on_tuning_seed(results_dir):
+        return [
+            f"missing while the results are on the tuning seed: {s}"
+            for s in TUNING_ONLY_SENTENCES
+            if s not in flat
+        ]
+    return [
+        f"holds only on the tuning seed, but the results carry the evaluation "
+        f"seed; rewrite it: {s}"
+        for s in TUNING_ONLY_SENTENCES
+        if s in flat
+    ] + [
+        f"names the tuning seed as the source of the numbers, but the results "
+        f"carry the evaluation seed; rewrite it: {w}"
+        for w in TUNING_ONLY_WORDING
+        if w in flat
+    ]
+
+
+def eval_seed_literal_problems(text: str) -> list[str]:
+    """The evaluation seed is written in code, or through a marker (which a
+    refresh keeps true); an unmarked literal, or any in a zone, is reported."""
+    seed = str(EvalConfig().eval_seed)
+    problems = [
+        f"a results zone names {seed}" for z in results_zones(text) if seed in z
+    ]
+    if seed in NUM_RE.sub("", strip_code(text)):
+        problems.append(f"{seed} is written outside code and outside a marker")
+    return problems
+
+
+SENTENCE_SPLIT_RE = re.compile(r"(?<=[.?])\s+(?=(?:- )?[A-Zε`!\[(])")
+
+
+def sentences_of(text: str) -> list[str]:
+    """The whole sentences of a Markdown passage: emphasis, images and list
+    dashes dropped, whitespace collapsed, split where a sentence ends."""
+    flat = _flat(re.sub(r"!\[[^\]]*\]\([^)]*\)", "", text))
+    return [re.sub(r"^- ", "", s) for s in SENTENCE_SPLIT_RE.split(flat)]
+
+
+def privacy_verbatim_problems(results_text: str, privacy_text: str) -> list[str]:
+    """Every sentence RESULTS.md reuses from the curve section of PRIVACY.md is
+    reused whole: the scope, the headline paragraph, the AUROC qualifier and the
+    shipped-config sentences."""
+    curve = section_of(privacy_text, "## Privacy-versus-utility curve")
+    sentences = sentences_of(curve.split("\n", 1)[1])
+
+    def at(fragment: str) -> int:
+        return next(i for i, s in enumerate(sentences) if fragment in s)
+
+    wanted = (
+        sentences[at("The curve answers one question") : at("is not consumed") + 1]
+        + sentences[
+            at("On the tuning seed, the shipped allocation") : at(
+                "they are not offered as a private setting"
+            )
+            + 1
+        ]
+        + [
+            sentences[at("The statement is about PR-AUC")],
+            sentences[at("The file also carries AUROC")],
+            sentences[at("The shipped config is not a point on this curve")],
+            sentences[at("Its ε of 1.0 is a grid value")],
+        ]
+    )
+    section = _flat(section_of(results_text, "## Privacy curve"))
+    return [f"not reused whole: {s}" for s in wanted if s not in section]
+
+
+def eval_gates_command_problems(text: str) -> list[str]:
+    """The Reproduce section carries the one command that writes the gate file."""
+    commands = [
+        line
+        for line in section_of(text, "## Reproduce").splitlines()
+        if line.startswith("python -m eval.gates")
+    ]
+    if len(commands) != 1:
+        return [f"expected one python -m eval.gates command, found {len(commands)}"]
+    import contextlib
+    import io
+
+    err = io.StringIO()
+    try:
+        with contextlib.redirect_stderr(err):
+            args = gates_parser().parse_args(shlex.split(commands[0])[3:])
+    except SystemExit:
+        return [f"{commands[0]}: eval.gates rejects it"]
+    problems = []
+    if args.seed != EvalConfig().tuning_seed:
+        problems.append(f"{commands[0]}: --seed is not the tuning seed")
+    if args.out != Path("results/v1.0/data_gate_tuning.json"):
+        problems.append(f"{commands[0]}: --out is not the gate file")
+    return problems
+
+
+def _triple(base: str) -> list[str]:
+    return [f"{base}.value", f"{base}.ci_low", f"{base}.ci_high"]
+
+
+def _expected_cells(heading: str, cells: list[str]):
+    """(model paths, baseline name, baseline paths) a row's label promises; the
+    paths are the dotted paths of the markers in the Model and baseline cells."""
+    label = NUM_RE.sub("", cells[0]).strip()
+    if heading == "## Risk":
+        found = re.fullmatch(r"`(\w+)`( per block)?", label)
+        metric, block = found[1], bool(found[2])
+        model = f"metrics.block_level.{metric}" if block else f"metrics.{metric}"
+        name = "block_tree" if block else "window_logistic"
+        return _triple(model), name, _triple(f"baselines.{name}.{metric}")
+    if heading == "## Forecast":
+        found = re.fullmatch(r"`(pr_auc_by_horizon\.\d+)`", label)
+        name = "risk_score_forecast"
+        if found:
+            return (
+                _triple(f"metrics.{found[1]}"),
+                name,
+                _triple(f"baselines.{name}.{found[1]}"),
+            )
+        found = re.fullmatch(r"`lead_time\.(median|n_missed|n_onsets)`", label)
+        return (
+            [f"metrics.lead_time.{found[1]}"],
+            name,
+            [f"baselines.{name}.lead_time.{found[1]}"],
+        )
+    if heading == "## Policy":
+        metric = re.fullmatch(r"`(\w+)`", label)[1]
+        name = "threshold_policy"
+        return _triple(f"metrics.{metric}"), name, _triple(f"baselines.{name}.{metric}")
+    if heading == "## Privacy curve":
+        name = "window_logistic"
+        if label == "`pr_auc` without privacy":
+            return (
+                _triple("metrics.reference.risk.pr_auc"),
+                name,
+                _triple(f"baselines.{name}.reference.pr_auc"),
+            )
+        if label == "`prevalence`":
+            return _triple("metrics.reference.risk.prevalence"), None, []
+        point = re.search(r"metrics\.points\.(\d+)\.epsilon", cells[0])
+        if label == "`pr_auc` at ε" and point:
+            n = point[1]
+            return (
+                _triple(f"metrics.points.{n}.risk.pr_auc"),
+                name,
+                _triple(f"baselines.{name}.points.{n}.pr_auc"),
+            )
+    raise AssertionError(f"{heading}: no rule for the row label {cells[0]!r}")
+
+
+def row_path_problems(text: str) -> list[str]:
+    """Each risk, forecast, policy, privacy and per-type row quotes the metric its
+    label names: the label, the baseline's name and every marker path agree."""
+    problems = []
+    for heading in ("## Risk", "## Forecast", "## Policy", "## Privacy curve"):
+        zone = results_zones(section_of(text, heading))[0]
+        ((_, rows),) = zone_tables(zone)[0]
+        for row in rows:
+            cells = _cells(row)
+            model, name, baseline = _expected_cells(heading, cells)
+            got_model = [m[2] for m in NUM_RE.findall(cells[1])]
+            got_base = [m[2] for m in NUM_RE.findall(cells[2])]
+            if got_model != model:
+                problems.append(f"{cells[0]}: Model cell reads {got_model}")
+            if got_base != baseline:
+                problems.append(f"{cells[0]}: baseline cell reads {got_base}")
+            if name and not cells[2].startswith(f"`{name}`"):
+                problems.append(f"{cells[0]}: baseline cell is not {name}")
+            if name is None and cells[2] != "n/a":
+                problems.append(f"{cells[0]}: baseline cell should be n/a")
+    zone = results_zones(section_of(text, "## Per-type results"))[0]
+    ((_, rows),) = zone_tables(zone)[0]
+    for row in rows:
+        cells = _cells(row)
+        base = f"metrics.per_type.{cells[0].strip('`')}"
+        if [m[2] for m in NUM_RE.findall(cells[1])] != _triple(base):
+            problems.append(f"{cells[0]}: Recall cell does not read {base}")
+        if [m[2] for m in NUM_RE.findall(cells[2])] != [f"{base}.n_windows"]:
+            problems.append(f"{cells[0]}: n_windows cell does not read {base}")
+    return problems
+
+
+def opening_paragraph(text: str) -> str:
+    return next(par for par in text.split("\n\n") if par.startswith("**Outcome.**"))
+
+
+def _swap_cells(text: str, label_a: str, label_b: str, column: int) -> str:
+    """Swap one cell between the rows labelled a and b (the last such row)."""
+    lines = text.split("\n")
+
+    def row(label):
+        return [i for i, line in enumerate(lines) if line.startswith(f"| {label} |")][
+            -1
+        ]
+
+    a, b = row(label_a), row(label_b)
+    parts_a, parts_b = lines[a].split("|"), lines[b].split("|")
+    parts_a[column + 1], parts_b[column + 1] = parts_b[column + 1], parts_a[column + 1]
+    lines[a], lines[b] = "|".join(parts_a), "|".join(parts_b)
+    return "\n".join(lines)
+
+
+def lead_basis_problems(results_dir: Path = RESULTS_DIR) -> list[str]:
+    """A median lead time rests on the scored onsets less the missed ones."""
+    forecast = _results_json("forecast", results_dir)
+    problems = []
+    for who, lead in (
+        ("model", forecast["metrics"]["lead_time"]),
+        ("baseline", forecast["baselines"]["risk_score_forecast"]["lead_time"]),
+    ):
+        if len(lead["values"]) != lead["n_onsets"] - lead["n_missed"]:
+            problems.append(f"{who}: lead_time values are not onsets less missed")
+    return problems
+
+
+def spread_std_problems(text: str, source: str) -> list[str]:
+    """The doc says the standard deviation is the sample one; eval.run computes it
+    that way."""
+    problems = []
+    if "ddof=1" not in source:
+        problems.append("eval.run does not compute the sample standard deviation")
+    if "sample standard deviation, not the population one" not in _flat(text):
+        problems.append("the Protocol does not say the sample standard deviation")
+    return problems
+
+
+def forecast_cell_problems(text: str) -> list[str]:
+    """Where the outcome sentence says the model's estimate is below the
+    baseline's at every horizon, the printed cells must show it, not a tie."""
+    zone = results_zones(section_of(text, "## Forecast"))[0]
+    ((_, rows),) = zone_tables(zone)[0]
+    problems = []
+    for row in rows:
+        cells = _cells(row)
+        if not cells[0].startswith("`pr_auc_by_horizon."):
+            continue
+        model, baseline = (
+            float(split_token(NUM_RE.findall(cell)[0][0])[1]) for cell in cells[1:3]
+        )
+        if not model < baseline:
+            problems.append(f"{cells[0]}: the cells show {model} against {baseline}")
+    return problems
+
+
+def runbook_problems(runbook: str) -> list[str]:
+    """The runbook moves the archive's files into the tree, then refreshes and
+    tests, in that order, after it has unpacked the archive."""
+    steps = (
+        "tar -xzf runs/colab/dignity_results_$SEED.tar.gz -C runs/colab",
+        "cp -r runs/colab/results/v1.0/. results/v1.0/",
+        "cp -r runs/colab/docs/img/. docs/img/",
+        "python scripts/refresh_doc_numbers.py README.md docs/RESULTS.md",
+        "python -m pytest tests/test_docs.py",
+    )
+    lines = runbook.splitlines()
+    missing = [f"missing step: {s}" for s in steps if s not in lines]
+    if missing:
+        return missing
+    at = [lines.index(s) for s in steps]
+    return [] if at == sorted(at) else ["the steps are out of order"]
+
+
+def agent_guide_problems(results_text: str, guide: str) -> list[str]:
+    """.claude/CLAUDE.md names the full-run command the Source cells name, and says
+    where the marker grammar is defined."""
+    commands = {c for c, _ in SOURCE_CELL_RE.findall(results_text)}
+    problems = []
+    if len(commands) != 1:
+        problems.append(f"the Source cells name {len(commands)} commands")
+    else:
+        (command,) = commands
+        if f"{command}  #" not in guide:
+            problems.append(f"the full-run command line is not: {command}")
+    if "the one helper the M6.6 refresh imports" in guide:
+        problems.append("the import direction of split_token is reversed")
+    if "defined once in `scripts/refresh_doc_numbers.py`" not in guide:
+        problems.append("the guide does not say where the marker grammar is defined")
+    return problems
 
 
 class TestResultsDoc:
@@ -3314,6 +3740,17 @@ class TestResultsDoc:
         assert zone_problems(header + good) == []
         assert any("forecast.json" in p for p in zone_problems(header + wrong))
 
+    def test_a_marker_the_shared_grammar_cannot_read_is_reported_not_skipped(self):
+        source = (
+            "`python -m eval.run --config config/synthetic_hard.yaml --seed tuning "
+            "--tasks risk,forecast,policy --privacy-sweep` -> `results/v1.0/risk.json`"
+        )
+        header = "| Metric | Model | Best baseline | Source |\n|---|---|---|---|\n"
+        row = (
+            f"| `pr_auc` | 0 <!--num risk.json metrics.pr_auc.value--> | x | {source} |"
+        )
+        assert any("grammar" in p for p in zone_problems(header + row))
+
     def test_a_privacy_row_that_mixes_two_points_is_reported(self):
         source = (
             "`python -m eval.run --config config/synthetic_hard.yaml --seed tuning "
@@ -3343,6 +3780,7 @@ class TestResultsDoc:
             (good.replace("--seed tuning", "--seed 7"), "rejects"),
             (good.replace("--privacy-sweep", ""), "needs --privacy-sweep"),
             (good.replace("risk,forecast,policy", "forecast"), "include risk"),
+            (good.replace("risk,forecast,policy", "risk,forcast,policy"), "unknown"),
         ):
             name = "privacy" if "privacy-sweep" not in bad else "risk"
             if "--tasks forecast" in bad:
@@ -3357,6 +3795,124 @@ class TestResultsDoc:
         cell = "`python -m eval.run --config config/synthetic_hard.yaml --seed tuning` -> `results/v1.0/risk.json`"
         assert source_seed_problems(cell, tmp_path) != []
         assert source_seed_problems(cell.replace("tuning", "eval"), tmp_path) == []
+
+    def _evaluation_seed_results(self, tmp_path):
+        payload = _results_json("risk")
+        payload["seed"] = EvalConfig().eval_seed
+        (tmp_path / "risk.json").write_text(json.dumps(payload))
+        return tmp_path
+
+    def test_every_sentence_true_only_on_the_tuning_seed_follows_the_results_seed(
+        self, text
+    ):
+        assert seed_wording_problems(text) == []
+
+    def test_a_tuning_seed_sentence_is_required_while_the_results_use_that_seed(
+        self, text, tmp_path
+    ):
+        tuning = tmp_path / "tuning"
+        tuning.mkdir()
+        payload = _results_json("risk")
+        payload["seed"] = EvalConfig().tuning_seed
+        (tuning / "risk.json").write_text(json.dumps(payload))
+        assert results_on_tuning_seed(tuning)
+        flat = _flat(text)
+        for sentence in TUNING_ONLY_SENTENCES:
+            gone = flat.replace(sentence, "A sentence about something else.")
+            assert gone != flat
+            problems = seed_wording_problems(gone, tuning)
+            assert any(sentence in p for p in problems), sentence
+
+    def test_a_tuning_seed_sentence_is_rejected_once_the_results_carry_the_eval_seed(
+        self, text, tmp_path
+    ):
+        evaluation = self._evaluation_seed_results(tmp_path)
+        assert not results_on_tuning_seed(evaluation)
+        problems = seed_wording_problems(text, evaluation)
+        for sentence in TUNING_ONLY_SENTENCES:
+            assert any(sentence in p for p in problems), sentence
+        for wording in TUNING_ONLY_WORDING:
+            assert any(wording in p for p in problems), wording
+        rewritten = _flat(text)
+        for sentence in TUNING_ONLY_SENTENCES:
+            rewritten = rewritten.replace(
+                sentence, "The numbers are evaluation-seed scores."
+            )
+        assert seed_wording_problems(rewritten, evaluation) == []
+
+    def test_a_refreshed_evaluation_seed_in_the_marked_sentence_is_not_a_stray_literal(
+        self, text
+    ):
+        marked = "seed 1000 <!--num risk.json seed d-->"
+        text = re.sub(r"seed \d+ (<!--num risk\.json seed d-->)", marked, text)
+        assert eval_seed_literal_problems(text) == []
+        refreshed = text.replace(marked, "seed 2026 <!--num risk.json seed d-->")
+        assert refreshed != text
+        assert eval_seed_literal_problems(refreshed) == []
+        typed = refreshed.replace(" <!--num risk.json seed d-->", "")
+        assert eval_seed_literal_problems(typed) != []
+        in_zone = text.replace("<!--results-end-->", "2026 <!--results-end-->", 1)
+        assert eval_seed_literal_problems(in_zone) != []
+
+    def test_every_results_row_quotes_the_metric_its_label_names(self, text):
+        assert row_path_problems(text) == []
+
+    ROW_CORRUPTIONS = {
+        "swapped Model cells of auroc and pr_auc": lambda t: _swap_cells(
+            t, "`auroc`", "`pr_auc`", 1
+        ),
+        "swapped baseline cells of auroc and pr_auc": lambda t: _swap_cells(
+            t, "`auroc`", "`pr_auc`", 2
+        ),
+        "auroc ci_low repointed to pr_auc": lambda t: t.replace(
+            "metrics.auroc.ci_low", "metrics.pr_auc.ci_low", 1
+        ),
+        "per block pr_auc repointed to per block auroc": lambda t: t.replace(
+            "metrics.block_level.pr_auc.value", "metrics.block_level.auroc.value", 1
+        ),
+        "swapped lead_time n_missed and n_onsets": lambda t: _swap_cells(
+            t, "`lead_time.n_missed`", "`lead_time.n_onsets`", 1
+        ),
+        "swapped policy review_rate and block_rate": lambda t: _swap_cells(
+            t, "`review_rate`", "`block_rate`", 1
+        ),
+        "swapped privacy no-privacy and prevalence": lambda t: _swap_cells(
+            t, "`pr_auc` without privacy", "`prevalence`", 1
+        ),
+        "policy expected_cost ci_high repointed": lambda t: t.replace(
+            "policy.json metrics.expected_cost.ci_high",
+            "policy.json metrics.review_rate.ci_high",
+            1,
+        ),
+        "review_rate label renamed block_rate": lambda t: t.replace(
+            "| `review_rate` |", "| `block_rate` |", 1
+        ),
+        "window_logistic named majority": lambda t: t.replace(
+            "`window_logistic` 0.68", "`majority` 0.68", 1
+        ),
+        "block_tree named window_logistic": lambda t: t.replace(
+            "`block_tree` 0.61", "`window_logistic` 0.61", 1
+        ),
+        "privacy baseline repointed to another point": lambda t: t.replace(
+            "baselines.window_logistic.points.2.pr_auc.value",
+            "baselines.window_logistic.points.3.pr_auc.value",
+            1,
+        ),
+        "no-privacy baseline repointed to a grid point": lambda t: t.replace(
+            "baselines.window_logistic.reference.pr_auc.ci_low",
+            "baselines.window_logistic.points.0.pr_auc.ci_low",
+            1,
+        ),
+        "per-type recall repointed to another type": lambda t: t.replace(
+            "metrics.per_type.fee_spike.value", "metrics.per_type.fee_evasion.value", 1
+        ),
+    }
+
+    @pytest.mark.parametrize("name", sorted(ROW_CORRUPTIONS))
+    def test_a_swapped_or_repointed_cell_is_reported(self, text, name):
+        corrupted = self.ROW_CORRUPTIONS[name](text)
+        assert corrupted != text, name
+        assert row_path_problems(corrupted) != [], name
 
     def test_the_header_exemption_covers_every_table_header_and_no_data_row(self):
         zone = (
@@ -3396,14 +3952,29 @@ class TestResultsDoc:
     def test_the_outcome_sentence_of_each_task_matches_the_committed_results(
         self, text, task
     ):
-        required, forbidden = outcome_phrases()[task]
+        phrases = outcome_phrases()[task]
         section = section_of(text, self.SECTION[task])
-        assert phrase_problems(section, required, forbidden) == []
+        assert phrase_problems(section, phrases.required, phrases.forbidden) == []
+
+    @pytest.mark.parametrize("task", ["risk", "forecast", "policy", "privacy"])
+    def test_the_opening_paragraph_gives_the_verdict_of_each_task_and_the_curve(
+        self, text, task
+    ):
+        phrases = outcome_phrases()[task]
+        paragraph = opening_paragraph(text)
+        assert phrase_problems(paragraph, phrases.headline, phrases.forbidden) == []
+
+    def test_the_opening_paragraph_comes_before_the_mechanics_and_holds_no_number(
+        self, text
+    ):
+        paragraph = opening_paragraph(text)
+        assert text.index(paragraph) < text.index("This file reports")
+        assert not re.search(r"\d", paragraph)
 
     def test_an_outcome_sentence_fails_when_the_results_change_and_it_does_not(
         self, text, tmp_path
     ):
-        for name in ("risk", "forecast", "policy"):
+        for name in ("risk", "forecast", "policy", "privacy"):
             (tmp_path / f"{name}.json").write_text(
                 (RESULTS_DIR / f"{name}.json").read_text()
             )
@@ -3414,13 +3985,126 @@ class TestResultsDoc:
         forecast["metrics"]["pr_auc_by_horizon"][0]["ci_low"] = 0.99
         forecast["metrics"]["lead_time"].update(n_missed=0, median=3.0)
         (tmp_path / "forecast.json").write_text(json.dumps(forecast))
+        privacy = _results_json("privacy", tmp_path)
+        privacy["metrics"]["points"][0]["risk"]["pr_auc"]["ci_low"] = 0.99
+        (tmp_path / "privacy.json").write_text(json.dumps(privacy))
         policy = _results_json("policy", tmp_path)
         policy["metrics"]["expected_cost"].update(value=0.1, ci_low=0.05, ci_high=0.2)
         (tmp_path / "policy.json").write_text(json.dumps(policy))
         drifted = outcome_phrases(tmp_path)
         for task in ("risk", "forecast", "policy"):
             section = section_of(text, self.SECTION[task])
-            assert phrase_problems(section, *drifted[task]) != [], task
+            phrases = drifted[task]
+            assert phrase_problems(section, phrases.required, phrases.forbidden), task
+        for task in ("risk", "forecast", "policy", "privacy"):
+            phrases = drifted[task]
+            assert phrase_problems(
+                opening_paragraph(text), phrases.headline, phrases.forbidden
+            ), task
+
+    @pytest.mark.parametrize(
+        ("name", "edit"),
+        [
+            (
+                "the model's interval stops containing the prevalence",
+                lambda r: r["metrics"]["pr_auc_by_horizon"][0].update(
+                    ci_low=0.9, ci_high=1.0
+                ),
+            ),
+            (
+                "the baseline's interval stops lying above the prevalence",
+                lambda r: r["baselines"]["risk_score_forecast"]["pr_auc_by_horizon"][
+                    0
+                ].update(ci_low=0.0),
+            ),
+            (
+                "the baseline's lower bound is above the model's estimate everywhere",
+                lambda r: [
+                    h.update(value=-1.0) for h in r["metrics"]["pr_auc_by_horizon"]
+                ],
+            ),
+            (
+                "every training seed warns ahead of an onset",
+                lambda r: r["metrics"]["seed_spread"]["lead_time_median"].update(
+                    values=[3.0, 3.0, 3.0]
+                ),
+            ),
+        ],
+    )
+    def test_each_forecast_comparison_sentence_fails_when_its_own_numbers_change(
+        self, text, tmp_path, name, edit
+    ):
+        for task in ("risk", "forecast", "policy", "privacy"):
+            (tmp_path / f"{task}.json").write_text(
+                (RESULTS_DIR / f"{task}.json").read_text()
+            )
+        forecast = _results_json("forecast", tmp_path)
+        edit(forecast)
+        (tmp_path / "forecast.json").write_text(json.dumps(forecast))
+        phrases = outcome_phrases(tmp_path)["forecast"]
+        section = section_of(text, "## Forecast")
+        assert phrase_problems(section, phrases.required, phrases.forbidden), name
+
+    def test_the_policy_seed_sentence_fails_when_the_seeds_stop_agreeing(
+        self, text, tmp_path
+    ):
+        for task in ("risk", "forecast", "policy", "privacy"):
+            (tmp_path / f"{task}.json").write_text(
+                (RESULTS_DIR / f"{task}.json").read_text()
+            )
+        policy = _results_json("policy", tmp_path)
+        policy["metrics"]["seed_spread"]["baseline_expected_cost"]["values"] = [9.0] * 3
+        (tmp_path / "policy.json").write_text(json.dumps(policy))
+        phrases = outcome_phrases(tmp_path)["policy"]
+        section = section_of(text, "## Policy")
+        assert phrase_problems(section, phrases.required, phrases.forbidden)
+
+    def test_the_forecast_section_states_the_chance_line_and_the_lead_time_spread(
+        self, text
+    ):
+        section = _flat(section_of(text, "## Forecast"))
+        for needle in (
+            "`prevalence_by_horizon`",
+            "the scored onsets less the missed ones",
+            "metrics.seed_spread.lead_time_median.values.0",
+            "metrics.seed_spread.lead_time_median.values.1",
+            "metrics.seed_spread.lead_time_median.values.2",
+        ):
+            assert needle in section, needle
+
+    def test_a_median_lead_time_rests_on_the_scored_onsets_less_the_missed_ones(
+        self, tmp_path
+    ):
+        assert lead_basis_problems() == []
+        (tmp_path / "forecast.json").write_text(
+            (RESULTS_DIR / "forecast.json").read_text()
+        )
+        forecast = _results_json("forecast", tmp_path)
+        forecast["baselines"]["risk_score_forecast"]["lead_time"]["n_missed"] = 0
+        (tmp_path / "forecast.json").write_text(json.dumps(forecast))
+        assert lead_basis_problems(tmp_path) != []
+
+    def test_the_forecast_cells_show_the_estimate_below_the_baseline_not_a_tie(
+        self, text, tmp_path
+    ):
+        forecast = _results_json("forecast")
+        model = forecast["metrics"]["pr_auc_by_horizon"]
+        base = forecast["baselines"]["risk_score_forecast"]["pr_auc_by_horizon"]
+        assert all(m["value"] < b["value"] for m, b in zip(model, base, strict=True))
+        assert forecast_cell_problems(text) == []
+        coarse = tmp_path / "RESULTS.md"
+        coarse.write_text(text.replace(" .4f-->", " .2f-->"))
+        assert forecast_cell_problems(_refresh.rewrite(coarse, RESULTS_DIR)[0]) != []
+
+    def test_the_spread_is_the_sample_standard_deviation(self, text):
+        import inspect
+
+        from eval import run as eval_run
+
+        source = inspect.getsource(eval_run._spread)
+        assert spread_std_problems(text, source) == []
+        assert spread_std_problems(text, source.replace("ddof=1", "ddof=0")) != []
+        assert spread_std_problems(text.replace("not the population one", ""), source)
 
     def test_every_gate_and_outcome_sentence_is_in_the_section_it_describes(self, text):
         # one outcome sentence per task, written from the JSON, so it names the
@@ -3437,7 +4121,7 @@ class TestResultsDoc:
         assert "`core.config.EvalConfig.eval_seed`" in protocol
         assert "`2026`" in protocol
         assert all("2026" not in zone for zone in results_zones(text))
-        assert "2026" not in CODE_RE.sub("", text)
+        assert eval_seed_literal_problems(text) == []
         # risk.json's seed is quoted only in a sentence with no role for it
         for line in text.splitlines():
             if "<!--num risk.json seed d-->" in line:
@@ -3446,14 +4130,13 @@ class TestResultsDoc:
     def test_the_protocol_states_the_freeze_as_a_standing_commitment(self, text):
         flat = _flat(text)
         assert (
-            "generator presets and the evaluation seed are frozen at the "
-            "`v1.0-freeze` tag before the evaluation seed is first used, and the "
-            "model and the presets are not re-tuned against the evaluation seed's "
-            "test split" in flat
+            "the final run is made from a commit tagged `v1.0-freeze`, the "
+            "generator presets and the evaluation seed do not change after that "
+            "tag is created, and the model and the presets are not re-tuned "
+            "against the evaluation seed's test split" in flat
         )
-        assert "the tuning seed's test split was read during development" in flat, (
-            "the provisional numbers are tuning-seed test scores"
-        )
+        # no sentence may say the tag exists: it is created at the release
+        assert "frozen at the `v1.0-freeze`" not in flat
         assert "were frozen" not in flat
 
     def test_the_protocol_states_selection_and_warm_start_per_task(self, text):
@@ -3467,12 +4150,78 @@ class TestResultsDoc:
             "`train.init_backbone_from`",
             "`eval.n_bootstrap`",
             "`eval.n_train_seeds`",
+            "triage head has no tuned thresholds",
+            "quoted under the risk, forecast and policy tables",
             "95% bootstrap intervals over blocks",
             "first training seed",
             "`metrics.seed_spread`",
             "validation split only",
         ):
             assert needle in flat, needle
+        for stale in ("The policy settings are tuned", "under each table"):
+            assert stale not in flat, stale
+
+    def test_the_provenance_sentences_cover_the_four_eval_run_files_only(self, text):
+        flat = _flat(text)
+        for needle in (
+            "The data-gate numbers in the Protocol are the exception",
+            "Its output is `results/v1.0/data_gate_tuning.json`: validation scores "
+            "that `eval.gates` writes",
+            "The data-gate numbers are validation scores that `eval.gates` writes "
+            "on the tuning seed",
+            "Each of the four `eval.run` results records `git_sha` and `config_hash`",
+            "`results/v1.0/data_gate_tuning.json` records neither",
+            "The four `eval.run` results were produced on a Colab L4",
+            "The numbers of the four `eval.run` results above come from the full run",
+        ):
+            assert needle in flat, needle
+        for stale in (
+            "The committed results were produced",
+            "The numbers above come from the full run",
+            "`results/v1.0/risk.json` records `git_sha`",
+        ):
+            assert stale not in flat, stale
+        for name in ("risk", "forecast", "policy", "privacy"):
+            assert {"git_sha", "config_hash"} <= set(_results_json(name)), name
+        assert not {"git_sha", "config_hash"} & set(_results_json("data_gate_tuning"))
+
+    def test_the_reproduce_section_gives_the_command_that_writes_the_gate_file(
+        self, text
+    ):
+        assert eval_gates_command_problems(text) == []
+
+    def test_a_gate_command_eval_gates_rejects_or_that_writes_elsewhere_is_reported(
+        self,
+    ):
+        command = (
+            "python -m eval.gates --seed 1000 --out results/v1.0/data_gate_tuning.json"
+        )
+        assert eval_gates_command_problems(f"## Reproduce\n\n{command}\n") == []
+        for bad in (
+            command.replace("--out", "--output"),
+            command.replace("1000", "7"),
+            command.replace("data_gate_tuning", "other"),
+            command.replace(" --out results/v1.0/data_gate_tuning.json", ""),
+            "",
+        ):
+            assert eval_gates_command_problems(f"## Reproduce\n\n{bad}\n"), bad
+
+    def test_the_block_level_target_is_not_named_after_the_training_label(self, text):
+        assert "block label" not in _flat(text).lower()
+        assert "block_label" not in _flat(section_of(text, "## Caveats"))
+        assert text.count("`block_label`") == 1
+
+    def test_the_agent_guide_names_the_command_the_source_cells_name(self, text):
+        guide = (ROOT / ".claude" / "CLAUDE.md").read_text()
+        assert agent_guide_problems(text, guide) == []
+        command = " --tasks risk,forecast,policy --privacy-sweep  #"
+        assert command in guide
+        assert agent_guide_problems(text, guide.replace(command, "  #"))
+        reversed_ = guide.replace(
+            "defined once in `scripts/refresh_doc_numbers.py`",
+            "the one helper the M6.6 refresh imports",
+        )
+        assert agent_guide_problems(text, reversed_)
 
     def test_the_baselines_section_names_every_baseline_and_both_logistic_provenances(
         self, text
@@ -3572,37 +4321,39 @@ class TestResultsDoc:
         )
 
     def test_the_privacy_section_reuses_the_privacy_doc_sentences_verbatim(self, text):
-        privacy = _flat(
-            section_of(
-                (ROOT / "docs/PRIVACY.md").read_text(),
-                "## Privacy-versus-utility curve",
-            )
-        )
+        privacy = (ROOT / "docs/PRIVACY.md").read_text()
+        assert privacy_verbatim_problems(text, privacy) == []
         section = _flat(section_of(text, "## Privacy curve"))
-        scope = re.search(r"Here ε is the Laplace budget.*?is not consumed\.", privacy)
-        headline = privacy[
-            privacy.index("On the tuning seed, the shipped allocation") :
-        ]
-        headline = headline[
-            : headline.index("they are not offered as a private setting.")
-        ]
-        headline += "they are not offered as a private setting."
-        start = privacy.index("The shipped config is not a point on this curve.")
-        marker = "`config/train_risk.yaml`"
-        shipped = privacy[start : privacy.index(marker, start) + len(marker)]
-        for sentence in (scope[0], headline, shipped):
-            assert sentence in section, sentence[:60]
         assert (
             "(THREAT-MODEL.md)" in text
             and "PRIVACY.md#privacy-versus-utility-curve" in text
         )
         assert "`window_logistic` on the released windows" in section
 
+    def test_a_sentence_reused_from_the_privacy_doc_is_reused_whole_or_reported(
+        self, text
+    ):
+        privacy = (ROOT / "docs/PRIVACY.md").read_text()
+        # the extraction keeps a sentence to its full stop
+        shipped = sentences_of("A first. The shipped x, with y and z. Third one.")
+        assert shipped[1] == "The shipped x, with y and z."
+        for tail in (
+            ", with unrounded public bounds and in seeded mode",
+            ", and the floor test above runs on the easy preset",
+            "The statement is about PR-AUC. ",
+            " The file also carries AUROC, and up to ε = 10 its intervals do not "
+            "all contain 0.5.",
+        ):
+            assert tail in text, tail
+            cut = text.replace(tail, "")
+            problems = privacy_verbatim_problems(cut, privacy)
+            assert problems, tail
+
     def test_the_privacy_table_marks_the_reference_chance_line_and_every_grid_point(
         self, text
     ):
         zone = results_zones(section_of(text, "## Privacy curve"))[0]
-        paths = [d for _, d, _ in ROW_MARKER_RE.findall(zone)]
+        paths = [m[2] for m in NUM_RE.findall(zone)]
         grid = len(_results_json("privacy")["metrics"]["points"])
         indexes = {int(i) for d in paths for i in re.findall(r"\bpoints\.(\d+)\.", d)}
         assert indexes == set(range(grid))
@@ -3639,7 +4390,6 @@ class TestResultsDoc:
             "fee_rate",
             "tx_count",
             "not calibrated",
-            "tuning seed",
             "evaluation seed",
             "not re-tuned",
             "synthetic data only",
@@ -3679,7 +4429,8 @@ class TestResultsDoc:
         assert "T4" not in runbook
         flat = _flat(runbook)
         assert "produced on a Colab L4" in flat
-        assert "`SEED=eval`" in flat and "`v1.0-freeze`" in flat
+        assert "`SEED=eval`" in flat
+        assert "the commit tagged `v1.0-freeze`" in flat
 
     def test_the_reproduce_section_gives_the_smoke_run_the_doc_check_and_the_refresh(
         self, text
