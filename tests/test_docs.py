@@ -2769,12 +2769,11 @@ FRAMING_PHRASES = (
     "price forecasting",
     "high return",
     "high returns",
-    "returns on",
 )
 FRAMING_PATTERNS = (
-    # "returns" qualified by what is earned: "earns returns", "expected returns"
-    r"(?:earn\w*|portfolio|strategy|excess|expected|maximi[sz]\w*|chas\w*"
-    r"|generat\w*|log|stock|asset|market|investment)\s+returns?",
+    # plural "returns" qualified by what is earned: "earns returns", "expected returns"
+    r"(?:earn(?:s|ing)?|portfolio|strategy|excess|expected"
+    r"|maximi[sz](?:e|es|ed|ing)|chas(?:e|es|ed|ing))\s+returns",
     # "strategy" followed within three words by a return or a profit
     r"strategy(?:\s+\w+){0,2}\s+(?:returns?|profits?)",
     r"forecast\w*\s+(?:the\s+)?price",
@@ -2883,6 +2882,14 @@ FRAMING_PASSING = {
     "price": "The `price` column holds the raw series.",
     "price column": "The price column is raw input.",
     "returns a tuple": "The head returns a tuple.",
+    "generator returns": "The generator returns a frame.",
+    "returns on its own": "The call returns on its own.",
+    "asset returns": "Each asset returns a dict.",
+    "log returns": "The log returns a float.",
+    "market returns": "The market returns nothing here.",
+    "generates returns": "The sampler generates returns a list.",
+    "stock returns": "The stock returns no rows.",
+    "expected return type": "The expected return type is a tuple.",
     "the function returns": "Check what the function returns.",
     "forecast head": "The forecast head scores early warning.",
     "forecast labels": "The forecast labels come from the event record.",
@@ -2999,6 +3006,22 @@ class TestFramingGuard:
         sentence = FRAMING_PASSING[form]
         assert self._in_markdown(sentence, tmp_path) == [], form
         assert self._in_yaml_comment(sentence, tmp_path) == [], form
+
+    def test_a_noun_subject_before_the_function_verb_returns_passes_but_the_ruled_prefixes_do_not(
+        self,
+    ):
+        assert framing_hits("The sampler returns a list.") == []
+        assert framing_hits("The log returns a float.") == []
+        for phrase in (
+            "earns returns",
+            "expected returns",
+            "portfolio returns",
+            "excess returns",
+            "strategy returns",
+            "maximise returns",
+            "chasing returns",
+        ):
+            assert framing_hits(f"It reports {phrase} daily.") != [], phrase
 
     def test_a_phrase_wrapped_across_lines_is_still_reported(self):
         assert framing_hits("Go\nlong when risk is low.") != []
