@@ -85,8 +85,8 @@ def plot_forecast_pr_auc(result: dict, path: str) -> None:
     )
     ax.set_xlabel("horizon (rows ahead)")
     ax.set_ylabel("PR-AUC")
-    ax.set_ylim(0, 1.05)
-    ax.legend(loc="upper right")
+    ax.set_ylim(bottom=0)
+    ax.legend(loc="upper center", bbox_to_anchor=(0.5, -0.18), ncol=3, frameon=False)
     fig.savefig(path, dpi=150, bbox_inches="tight")
     plt.close(fig)
 

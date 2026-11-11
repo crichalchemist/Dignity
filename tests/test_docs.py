@@ -192,59 +192,13 @@ class TestDocs:
 
     def test_privacy_curve_statement_matches_the_committed_results(self):
         # PRIVACY.md says which grid points are at chance and which are above it.
-        # If regenerated results stop supporting those sentences, they have to
-        # change with them.
-        text = " ".join((ROOT / "docs/PRIVACY.md").read_text().split())
-        headline = (
-            "On the tuning seed, the shipped allocation leaves the risk model's "
-            "PR-AUC not distinguishable from chance on the hard preset at every ε "
-            "on the grid up to 10, and above chance at the two largest grid values, "
-            "30 and 100"
-        )
-        for name in ("README.md", "docs/RESULTS.md"):
-            page = _flat((ROOT / name).read_text())
-            assert headline in page, (
-                f"{name} must carry the headline sentence of the curve section of "
-                "docs/PRIVACY.md word for word (the curve statement is written "
-                f"once and reused): {headline!r}"
-            )
-        for sentence in CURVE_CHECKED + CURVE_PRESENT_ONLY:
-            assert sentence in text, sentence
+        # The shape is computed from results/v1.0/privacy.json, so regenerated
+        # results either keep the sentences true or the failure says which to
+        # rewrite.
         payload = json.loads((ROOT / "results/v1.0/privacy.json").read_text())
-        assert payload["seed"] == EvalConfig().tuning_seed, (
-            "this statement is about the tuning seed: rewrite it in PRIVACY.md and "
-            "in docs/RESULTS.md for the evaluation results, then drop this check. "
-            + curve_unchecked_message((ROOT / "docs/PRIVACY.md").read_text())
-        )
-        metrics = payload["metrics"]
-        reference = metrics["reference"]["risk"]
-        chance = reference["prevalence"]["value"]
-        points = {point["epsilon"]: point for point in metrics["points"]}
-        at_chance = [epsilon for epsilon in points if epsilon <= 10]
-        grid = "the sentences name the grid: every value up to 10, then 30 and 100"
-        assert max(at_chance) == 10 and 1.0 in at_chance, grid
-        assert sorted(points)[len(at_chance) :] == [30, 100], grid
-
-        def replicates(epsilon):
-            return points[epsilon]["replicate_spread"]["pr_auc"]["values"]
-
-        for epsilon in at_chance:
-            pr_auc = points[epsilon]["risk"]["pr_auc"]
-            assert pr_auc["ci_low"] <= chance <= pr_auc["ci_high"], epsilon
-            assert pr_auc["ci_high"] < reference["pr_auc"]["ci_low"], epsilon
-        for epsilon in (30, 100):
-            pr_auc = points[epsilon]["risk"]["pr_auc"]
-            assert pr_auc["ci_low"] > chance, epsilon
-            assert pr_auc["value"] < reference["pr_auc"]["value"], epsilon
-        values = {e: points[e]["risk"]["pr_auc"]["value"] for e in points}
-        assert values[100] > values[30] > max(values[e] for e in at_chance)
-        below_30 = max(max(replicates(e)) for e in at_chance)
-        assert min(replicates(100)) > max(below_30, max(replicates(30)))
-        assert (
-            max(replicates(30)) - min(replicates(30)) > min(replicates(30)) - below_30
-        )
-        aurocs = [points[e]["risk"]["auroc"] for e in at_chance]
-        assert not all(a["ci_low"] <= 0.5 <= a["ci_high"] for a in aurocs)
+        docs = {name: (ROOT / name).read_text() for name in CURVE_DOCS}
+        problems = curve_statement_problems(payload, docs)
+        assert not problems, "\n".join(problems)
 
 
 def _load_script(name: str):
@@ -3658,6 +3612,20 @@ def sentences_of(text: str) -> list[str]:
     return [re.sub(r"^- ", "", s) for s in SENTENCE_SPLIT_RE.split(flat)]
 
 
+CURVE_HEADLINE_RE = r"On the [\w ]+ seed, the shipped allocation"
+
+
+def headline_paragraph_sentences(text: str) -> list[str] | None:
+    """The sentences of the paragraph that holds the curve headline, found by its
+    structure (the paragraph that starts at the headline and ends at the next blank
+    line), so that no word of its last sentence, which changes with the shape of the
+    curve, is an anchor. None when no paragraph holds the headline."""
+    for paragraph in re.split(r"\n\s*\n", text):
+        if re.search(CURVE_HEADLINE_RE, _flat(paragraph)):
+            return sentences_of(paragraph)
+    return None
+
+
 def privacy_verbatim_problems(results_text: str, privacy_text: str) -> list[str]:
     """Every sentence RESULTS.md reuses from the curve section of PRIVACY.md is
     reused whole: the scope, the headline paragraph, the AUROC qualifier and the
@@ -3681,14 +3649,18 @@ def privacy_verbatim_problems(results_text: str, privacy_text: str) -> list[str]
         )
         return 0
 
+    paragraph = headline_paragraph_sentences(curve)
+    if paragraph is None:
+        missing.append(
+            "the curve section of docs/PRIVACY.md has no sentence that matches "
+            f"{CURVE_HEADLINE_RE!r}, which docs/RESULTS.md reuses whole: restore "
+            "that sentence in docs/PRIVACY.md, or change the anchor in "
+            "privacy_verbatim_problems"
+        )
+        paragraph = []
     wanted = (
         sentences[at("The curve answers one question") : at("is not consumed") + 1]
-        + sentences[
-            at(r"On the [\w ]+ seed, the shipped allocation") : at(
-                "they are not offered as a private setting"
-            )
-            + 1
-        ]
+        + paragraph
         + [
             sentences[at("The statement is about PR-AUC")],
             sentences[at("The file also carries AUROC")],
@@ -3698,8 +3670,33 @@ def privacy_verbatim_problems(results_text: str, privacy_text: str) -> list[str]
     )
     if missing:
         return list(dict.fromkeys(missing))
-    section = _flat(section_of(results_text, "## Privacy curve"))
-    return [f"not reused whole: {s}" for s in wanted if s not in section]
+    results_section = section_of(results_text, "## Privacy curve")
+    section = _flat(results_section)
+    problems = [f"not reused whole: {s}" for s in wanted if s not in section]
+    copied = headline_paragraph_sentences(results_section)
+    # both ways: a sentence that docs/PRIVACY.md dropped for the new shape must go
+    # from the copy as well, or the copy keeps a sentence the results do not support
+    problems += [
+        f"docs/RESULTS.md keeps a sentence docs/PRIVACY.md no longer has: {s}"
+        for s in copied or []
+        if s not in paragraph
+    ]
+    return problems
+
+
+def privacy_verbatim_message(problems: list[str]) -> str:
+    """What a person does when docs/RESULTS.md and the headline paragraph of
+    docs/PRIVACY.md part ways: docs/PRIVACY.md leads, docs/RESULTS.md follows."""
+    return (
+        "the Privacy curve section of docs/RESULTS.md reuses the headline "
+        "paragraph of the curve section of docs/PRIVACY.md word for word, from "
+        "the headline to the end of that paragraph, and the two have parted. "
+        "docs/PRIVACY.md leads and docs/RESULTS.md follows: write the sentence "
+        "in docs/PRIVACY.md first (or drop it there when the new shape of the "
+        "curve no longer supports it), then copy that paragraph again into "
+        "docs/RESULTS.md, or drop the same sentence from it. Nothing in this "
+        f"test needs a test constant changed: {problems}"
+    )
 
 
 def eval_gates_command_problems(text: str) -> list[str]:
@@ -5129,12 +5126,7 @@ class TestResultsDoc:
     def test_the_privacy_section_reuses_the_privacy_doc_sentences_verbatim(self, text):
         privacy = (ROOT / "docs/PRIVACY.md").read_text()
         problems = privacy_verbatim_problems(text, privacy)
-        assert problems == [], (
-            "the Privacy curve section of docs/RESULTS.md reuses these sentences "
-            "of the curve section of docs/PRIVACY.md word for word, and they have "
-            "changed: copy them again, as the statement is rewritten at the final "
-            f"evaluation: {problems}"
-        )
+        assert problems == [], privacy_verbatim_message(problems)
         section = _flat(section_of(text, "## Privacy curve"))
         assert (
             "(THREAT-MODEL.md)" in text
@@ -5550,7 +5542,9 @@ def privacy_row_problems(text: str, privacy_text: str) -> list[str]:
         "the DGNTY-8 finding cell is not the PRIVACY.md curve headline paragraph "
         f"word for word (number markers are ignored on both sides): the row says "
         f"{cell!r}, PRIVACY.md gives {expected!r}; copy the paragraph into the row "
-        "again"
+        "again. The row starts with the constant PRIVACY_ROW_LEAD in "
+        "tests/test_docs.py: when its sentence has to change (the finding no longer "
+        "holds at the shipped epsilon), change the constant and the row together"
     ]
 
 
@@ -6715,7 +6709,9 @@ def readme_outcome_problems(text: str, results_dir: Path = RESULTS_DIR) -> list[
     if len(paragraphs) != 1:
         return [
             "the Results section of README.md needs exactly one paragraph that "
-            "starts '**Outcome.**' (copy it from docs/RESULTS.md)"
+            "starts '**Outcome.**' (write one that carries the phrases of the "
+            "'**Outcome.**' paragraph of docs/RESULTS.md; do not paste that "
+            "paragraph, it is longer than README's)"
         ]
     problems = []
     for task, phrases in outcome_phrases(results_dir).items():
@@ -6731,6 +6727,21 @@ def readme_outcome_problems(text: str, results_dir: Path = RESULTS_DIR) -> list[
             "marked grid label such as ε 30 with its marker is the one exception)"
         )
     return problems
+
+
+def readme_outcome_message(problems: list[str]) -> str:
+    """README's Outcome paragraph carries the phrases of the one in docs/RESULTS.md;
+    it is a shorter text of its own, and pasting RESULTS' paragraph over it breaks
+    the word limit of the five-minute test."""
+    return (
+        "rewrite the Outcome paragraph under Results in README.md so that it "
+        "carries the phrases listed below, in its own shorter words (keep README's "
+        "paragraph; do not paste the '**Outcome.**' paragraph of docs/RESULTS.md "
+        "over it: that one is longer and breaks the word limit of "
+        "test_readme_is_short_enough_to_read_in_five_minutes). The phrases are "
+        "recomputed from the committed results (missing = write it, contradicts = "
+        f"it says the opposite of the numbers): {problems}"
+    )
 
 
 def readme_seed_problems(text: str, results_dir: Path = RESULTS_DIR) -> list[str]:
@@ -7352,30 +7363,406 @@ def fast_run_problems(texts: dict[str, str]) -> list[str]:
     ]
 
 
-# The phrases of the curve section of docs/PRIVACY.md that the curve-statement test
-# compares with the committed results (each is a phrase of one sentence).
-CURVE_CHECKED = (
-    "On the tuning seed, the shipped allocation leaves the risk model's "
-    "PR-AUC not distinguishable from chance on the hard preset at every ε "
-    "on the grid up to 10, and above chance at the two largest grid values, "
-    "30 and 100",
-    "contains the prevalence",
-    "wholly below the non-private reference's interval",
-    "the interval lies wholly above the prevalence",
-    "PR-AUC is higher at 100 than at 30",
-    "both point estimates are below the reference's",
-    "every PR-AUC at ε = 100 is above every PR-AUC at a smaller ε",
-    "At ε = 30 the replicates spread more widely than the gap",
-    "the same allocation at ε = 1.0 leaves the model's PR-AUC not "
-    "distinguishable from chance on the tuning seed",
-    "up to ε = 10 its intervals do not all contain 0.5",
+# The curve statement in the public docs is checked against the results the way the
+# numbers are: a shape is computed from results/v1.0/privacy.json, the headline
+# sentence is computed from the shape and the seed, and every other claim of the
+# curve section is a (source, phrase, predicate) entry. A phrase may hold {seed},
+# which stands for "tuning" or "evaluation".
+CURVE_DOCS = (
+    "docs/PRIVACY.md",
+    "README.md",
+    "docs/RESULTS.md",
+    "docs/HOW-IT-WAS-BUILT.md",
+)
+CURVE_SEED_WORDS = {
+    EvalConfig().tuning_seed: "tuning",
+    EvalConfig().eval_seed: "evaluation",
+}
+# The shape the prose of the public docs was written for: (grid values not
+# distinguishable from chance, grid values above chance). When the results have
+# another shape the test lists every sentence that depends on it; set this constant
+# to the new shape last, once they are rewritten.
+CURVE_SHAPE_WRITTEN_FOR = ((0.1, 0.3, 1.0, 3.0, 10.0), (30.0, 100.0))
+# The sentences of the curve section name the outcome of the curve, so every one of
+# them is true only for the shape it was written for.
+CURVE_HEADLINE_STEM = "the shipped allocation leaves the risk model's PR-AUC"
+
+
+def _eps(epsilon: float) -> str:
+    """A grid value as the docs print it: 10, not 10.0; 0.3."""
+    return f"{epsilon:g}"
+
+
+def _join(values) -> str:
+    words = [_eps(v) for v in values]
+    return words[0] if len(words) == 1 else f"{', '.join(words[:-1])} and {words[-1]}"
+
+
+# Named curve_grid_shape because privacy_shape (above) is the outcome-phrase helper
+# of the release step and already has a caller for every outcome sentence.
+def curve_grid_shape(payload: dict) -> tuple[tuple[float, ...], tuple[float, ...]]:
+    """(at_chance, above_chance) grid values in ascending order. A value is at
+    chance when its risk PR-AUC interval contains the prevalence and above chance
+    when the interval lies wholly above it; any other point has no template."""
+    metrics = payload["metrics"]
+    chance = metrics["reference"]["risk"]["prevalence"]["value"]
+    at_chance, above = [], []
+    for point in sorted(metrics["points"], key=lambda p: p["epsilon"]):
+        epsilon, pr_auc = float(point["epsilon"]), point["risk"]["pr_auc"]
+        low, high = pr_auc["ci_low"], pr_auc["ci_high"]
+        if low is None or high is None:
+            where = "has no interval (a null)"
+        elif low <= chance <= high:
+            at_chance.append(epsilon)
+            continue
+        elif low > chance:
+            above.append(epsilon)
+            continue
+        else:
+            where = f"[{low:.2f}, {high:.2f}] lies wholly below the prevalence"
+        raise AssertionError(
+            f"ε {_eps(epsilon)}: its PR-AUC interval {where}, so the curve section "
+            "needs new wording that no template covers: rewrite the curve "
+            "statement by hand in docs/PRIVACY.md, README.md and docs/RESULTS.md"
+        )
+    return tuple(at_chance), tuple(above)
+
+
+def computed_curve_headline(payload: dict) -> str:
+    """The headline sentence of the curve section for this seed and this shape;
+    README.md, docs/RESULTS.md and the DGNTY-8 row carry it word for word."""
+    seed = payload["seed"]
+    if seed not in CURVE_SEED_WORDS:
+        raise AssertionError(
+            f"the results carry seed {seed}, which is neither the tuning seed nor "
+            "the evaluation seed: the curve headline has no wording for it"
+        )
+    at_chance, above = curve_grid_shape(payload)
+    chance = "not distinguishable from chance on the hard preset at "
+    if not above:
+        body = f"{chance}every ε on the grid"
+    elif not at_chance:
+        body = "above chance on the hard preset at every ε on the grid"
+    elif max(at_chance) < min(above):  # the largest values are the ones above
+        if len(above) == 1:
+            top = f"the largest grid value, {_eps(above[0])}"
+        else:
+            top = f"the {COUNT_WORDS[len(above)]} largest grid values, {_join(above)}"
+        body = (
+            f"{chance}every ε on the grid up to {_eps(at_chance[-1])}, and above "
+            f"chance at {top}"
+        )
+    else:
+        body = f"{chance}ε {_join(at_chance)}, and above chance at ε {_join(above)}"
+    return f"On the {CURVE_SEED_WORDS[seed]} seed, {CURVE_HEADLINE_STEM} {body}"
+
+
+def _curve_points(payload: dict) -> dict:
+    return {p["epsilon"]: p for p in payload["metrics"]["points"]}
+
+
+def _value(payload: dict, epsilon: float) -> float:
+    return _curve_points(payload)[epsilon]["risk"]["pr_auc"]["value"]
+
+
+def _replicates(payload: dict, epsilon: float) -> list[float]:
+    return _curve_points(payload)[epsilon]["replicate_spread"]["pr_auc"]["values"]
+
+
+def _at_chance_up_to(limit: float):
+    """The grid values up to `limit` are the ones at chance, and `limit` is one."""
+
+    def holds(payload: dict, shape) -> bool:
+        at_chance, above = shape
+        return limit in at_chance and at_chance == tuple(
+            e for e in at_chance + above if e <= limit
+        )
+
+    return holds
+
+
+def _below_the_reference_up_to(limit: float):
+    """As above, and each of those intervals lies wholly below the reference's."""
+
+    def holds(payload: dict, shape) -> bool:
+        reference = payload["metrics"]["reference"]["risk"]["pr_auc"]["ci_low"]
+        points = _curve_points(payload)
+        return _at_chance_up_to(limit)(payload, shape) and all(
+            points[e]["risk"]["pr_auc"]["ci_high"] < reference for e in shape[0]
+        )
+
+    return holds
+
+
+def _30_and_100_above_chance(payload: dict, shape) -> bool:
+    # exactly these two: a sentence that names two values is incomplete, so no
+    # longer true, once a third is above chance too
+    return set(shape[1]) == {30.0, 100.0}
+
+
+def _two_largest_above(payload: dict, shape) -> bool:
+    return shape[1] == (30.0, 100.0)
+
+
+def _higher_at_100_than_at_30(payload: dict, shape) -> bool:
+    return (
+        _value(payload, 100)
+        > _value(payload, 30)
+        > max((_value(payload, e) for e in shape[0]), default=float("-inf"))
+    )
+
+
+def _30_and_100_below_the_reference(payload: dict, shape) -> bool:
+    # "both" are the two values above chance
+    reference = payload["metrics"]["reference"]["risk"]["pr_auc"]["value"]
+    return shape[1] == (30.0, 100.0) and all(
+        _value(payload, e) < reference for e in (30, 100)
+    )
+
+
+def _100_above_every_smaller_replicate(payload: dict, shape) -> bool:
+    # the sentence speaks about the result at ε = 100, so it needs ε = 100 above chance
+    if 100.0 not in shape[1]:
+        return False
+    others = [e for e in _curve_points(payload) if e != 100]
+    return min(_replicates(payload, 100)) > max(
+        (max(_replicates(payload, e)) for e in others), default=float("-inf")
+    )
+
+
+def _30_spreads_wider_than_the_gap(payload: dict, shape) -> bool:
+    # "the result there" is the result at ε = 30, so it needs ε = 30 above chance
+    if 30.0 not in shape[1]:
+        return False
+    smaller = [e for e in _curve_points(payload) if e < 30]
+    at_30 = _replicates(payload, 30)
+    below = max((max(_replicates(payload, e)) for e in smaller), default=float("-inf"))
+    return max(at_30) - min(at_30) > min(at_30) - below
+
+
+def _utility_returns_at_some_values_only(payload: dict, shape) -> bool:
+    # "the grid values where utility returns" are some of the grid: with none above
+    # chance there are no such values, and with every one above chance they include
+    # the shipped ε of 1.0, which the docs do offer
+    return bool(shape[0]) and bool(shape[1])
+
+
+def _shipped_epsilon_at_chance(payload: dict, shape) -> bool:
+    # the DGNTY-8 finding says the shipped block (ε = 1.0) drove the model to chance
+    return 1.0 in shape[0]
+
+
+def _auroc_up_to_10_not_all_at_chance(payload: dict, shape) -> bool:
+    aurocs = [
+        p["risk"]["auroc"] for p in payload["metrics"]["points"] if p["epsilon"] <= 10
+    ]
+    return bool(aurocs) and not all(a["ci_low"] <= 0.5 <= a["ci_high"] for a in aurocs)
+
+
+# (doc, phrase, predicate over (payload, shape)). The phrase is found in the doc and
+# the predicate says what the sentence claims. docs/RESULTS.md and the DGNTY-8 row
+# copy the PRIVACY.md sentences whole (their own tests), so they follow these.
+CURVE_CLAIMS = (
+    (
+        "docs/PRIVACY.md",
+        "up to ε = 10 each point's 95% confidence interval for PR-AUC contains "
+        "the prevalence (the chance line) and lies wholly below the non-private "
+        "reference's interval",
+        _below_the_reference_up_to(10),
+    ),
+    (
+        "docs/PRIVACY.md",
+        "At ε = 30 and ε = 100 the interval lies wholly above the prevalence",
+        _30_and_100_above_chance,
+    ),
+    (
+        "docs/PRIVACY.md",
+        "PR-AUC is higher at 100 than at 30",
+        _higher_at_100_than_at_30,
+    ),
+    (
+        "docs/PRIVACY.md",
+        "both point estimates are below the reference's",
+        _30_and_100_below_the_reference,
+    ),
+    (
+        "docs/PRIVACY.md",
+        "every PR-AUC at ε = 100 is above every PR-AUC at a smaller ε",
+        _100_above_every_smaller_replicate,
+    ),
+    (
+        "docs/PRIVACY.md",
+        "At ε = 30 the replicates spread more widely than the gap",
+        _30_spreads_wider_than_the_gap,
+    ),
+    (
+        "docs/PRIVACY.md",
+        "the same allocation at ε = 1.0 leaves the model's PR-AUC not "
+        "distinguishable from chance on the {seed} seed",
+        lambda payload, shape: 1.0 in shape[0],
+    ),
+    (
+        "docs/PRIVACY.md",
+        "up to ε = 10 its intervals do not all contain 0.5",
+        _auroc_up_to_10_not_all_at_chance,
+    ),
+    (
+        "docs/PRIVACY.md",
+        "The two largest grid values are there to show where utility returns",
+        _two_largest_above,
+    ),
+    (
+        "docs/PRIVACY.md",
+        "The rise at the two largest ε therefore comes from less noise on `volume`",
+        _two_largest_above,
+    ),
+    (
+        "README.md",
+        "the grid values where utility returns are not offered as private settings",
+        _utility_returns_at_some_values_only,
+    ),
+    (
+        "docs/HOW-IT-WAS-BUILT.md",
+        "The shipped privacy block drove the risk model to chance",
+        _shipped_epsilon_at_chance,
+    ),
+)
+# The sentences of docs/PRIVACY.md that a claim above (or the headline) compares with
+# the results; the rest of the curve section is listed for re-reading.
+CURVE_CHECKED = (CURVE_HEADLINE_STEM,) + tuple(
+    dict.fromkeys(
+        phrase.replace("{seed}", word)
+        for source, phrase, _ in CURVE_CLAIMS
+        if source == "docs/PRIVACY.md"
+        for word in CURVE_SEED_WORDS.values()
+    )
 )
 # Sentences the test only finds in the text: nothing recomputes them from the
 # results, so they are not in CURVE_CHECKED and the failure message lists them.
-CURVE_PRESENT_ONLY = (
-    "Only the noise on `volume` changes along the curve",
-    "The rise at the two largest ε therefore comes from less noise on `volume`",
-)
+CURVE_PRESENT_ONLY = ("Only the noise on `volume` changes along the curve",)
+
+
+def curve_shape_message(
+    payload: dict, privacy_text: str, written_for=CURVE_SHAPE_WRITTEN_FOR
+) -> str:
+    """What a person re-reads when the results have a shape the prose was not
+    written for, and in what order to finish."""
+    shape = curve_grid_shape(payload)
+    return (
+        f"results/v1.0/privacy.json has the curve shape {shape!r} (grid values at "
+        "chance, grid values above chance), but the prose of the public docs was "
+        f"written for {written_for!r}. Do these steps in this order:\n"
+        "  1. docs/PRIVACY.md, curve section: write the headline word for word, "
+        f"{computed_curve_headline(payload)!r}; rewrite every sentence this test "
+        "reports as no longer supported, and give its entry in CURVE_CLAIMS the new "
+        "wording and a new predicate function (leave the old predicate functions "
+        "as they are: fixture tests pin them). When no grid value is above chance, "
+        "or every one is, also drop or rewrite the last sentence of the headline "
+        "paragraph ('they are not offered as a private setting') and the sentences "
+        "about the two largest values\n"
+        "  2. README.md, Limitations privacy bullet: the headline; the clause "
+        "'the grid values where utility returns are not offered as private "
+        "settings', which holds only when some but not every grid value is above "
+        "chance (drop it together with its PRIVACY_QUALIFIERS entry in "
+        "tests/test_docs.py); and the connective 'although inputs can be made "
+        "differentially private', which contrasts with a failure and reads "
+        "backwards when every grid value is above chance\n"
+        "  3. docs/RESULTS.md '## Privacy curve': copy the headline paragraph of "
+        "docs/PRIVACY.md again, sentence for sentence (the verbatim check compares "
+        "that whole paragraph both ways and no sentence of it is an anchor, so a "
+        "sentence dropped in step 1 is dropped here too and nothing else has to "
+        "change)\n"
+        "  4. the DGNTY-8 row of docs/HOW-IT-WAS-BUILT.md: the headline, word for "
+        "word; and its lead sentence, the constant PRIVACY_ROW_LEAD in "
+        "tests/test_docs.py ('drove the risk model to chance'), which holds only "
+        "when the shipped ε of 1.0 is at chance (when it is above chance, rewrite "
+        "the constant first, then the row)\n"
+        "  5. README.md Verdict line and the Outcome paragraphs of README.md and "
+        "docs/RESULTS.md: the outcome tests print the phrases to write\n"
+        "  6. last, set CURVE_SHAPE_WRITTEN_FOR in tests/test_docs.py to the new "
+        "shape\n" + curve_unchecked_message(privacy_text)
+    )
+
+
+def _carries_sentence(text: str, sentence: str) -> bool:
+    """`sentence` stands in `text` whole: not as the start of a longer headline (the
+    headline of a curve with nothing above chance begins the one of today's)."""
+    return any(
+        not re.match(r"[,\w]|\s+up to", text[m.end() :])
+        for m in re.finditer(re.escape(sentence), text)
+    )
+
+
+def curve_statement_problems(
+    payload: dict,
+    docs: dict[str, str],
+    claims=CURVE_CLAIMS,
+    present_only=CURVE_PRESENT_ONLY,
+    written_for=CURVE_SHAPE_WRITTEN_FOR,
+) -> list[str]:
+    """Every way the public docs disagree with the privacy results, in one list:
+    the headline each doc must carry, each claim that is missing or no longer true,
+    and the shape the prose was not written for. `docs` maps CURVE_DOCS to text."""
+    try:
+        shape = curve_grid_shape(payload)
+        headline = computed_curve_headline(payload)
+    except AssertionError as error:
+        return [str(error)]
+    flat = {name: _flat(strip_markers(text)) for name, text in docs.items()}
+    problems = []
+    for name in CURVE_DOCS:
+        if not _carries_sentence(flat[name], headline):
+            problems.append(
+                f"{name} must carry the curve headline computed from "
+                "results/v1.0/privacy.json word for word (written in "
+                "docs/PRIVACY.md, copied into the other three): "
+                f"{headline!r}"
+            )
+    word = CURVE_SEED_WORDS[payload["seed"]]
+    for source, template, holds in claims:
+        phrase = template.replace("{seed}", word)
+        if phrase not in flat[source]:
+            stale = [
+                old
+                for other in CURVE_SEED_WORDS.values()
+                if (old := template.replace("{seed}", other)) in flat[source]
+            ]
+            if stale:
+                problems.append(
+                    f"{source} says {stale[0]!r}, but the results carry the {word} "
+                    f"seed: rewrite that sentence as {phrase!r}"
+                )
+                continue
+            problems.append(
+                f"{source} no longer holds the sentence {phrase!r}: if you rewrote "
+                "it, give its entry in CURVE_CLAIMS the new wording and a "
+                "predicate that says what it claims; if you took the claim out, "
+                "remove the entry"
+            )
+        elif not holds(payload, shape):
+            problems.append(
+                f"{source}: {phrase!r}: this sentence is no longer supported by "
+                "results/v1.0/privacy.json: rewrite it, then update or remove its "
+                "entry in CURVE_CLAIMS"
+            )
+    for phrase in present_only:
+        if phrase not in flat["docs/PRIVACY.md"]:
+            problems.append(
+                f"docs/PRIVACY.md no longer holds the sentence {phrase!r}: restore "
+                "it, or remove it from CURVE_PRESENT_ONLY"
+            )
+    if shape != written_for:
+        problems.append(
+            curve_shape_message(payload, docs["docs/PRIVACY.md"], written_for)
+        )
+    return problems
+
+
+CURVE_BOLD_LEAD_RE = re.compile(r"\*\*[^*\n]{1,60}\.\*\*\s*")
+CURVE_TEST_CITATION_RE = re.compile(r"Tests?:")
+# A sentence that names a grid value, "largest", "chance" or "returns" is the one
+# most likely to depend on the shape of the curve. A rule of words, not a proof.
+CURVE_SHAPE_WORDS_RE = re.compile(r"ε\s*=?\s*\d|largest|chance|returns")
 
 
 def curve_unchecked_sentences(privacy_text: str) -> list[str]:
@@ -7383,10 +7770,15 @@ def curve_unchecked_sentences(privacy_text: str) -> list[str]:
     that the curve-statement test does not compare with the results (it holds none
     of the phrases of CURVE_CHECKED), computed from the text given."""
     curve = section_of(privacy_text, "## Privacy-versus-utility curve")
+    # a bold lead ("**Template.**") is a heading, not a sentence; a "Test:" or
+    # "Tests:" sentence only cites a test
+    body = CURVE_BOLD_LEAD_RE.sub("", curve.split("\n", 1)[1])
     return [
         sentence
-        for sentence in (s.strip() for s in sentences_of(curve.split("\n", 1)[1]))
-        if sentence and not any(phrase in sentence for phrase in CURVE_CHECKED)
+        for sentence in (re.sub(r"^- ", "", s.strip()) for s in sentences_of(body))
+        if sentence
+        and not CURVE_TEST_CITATION_RE.match(sentence)
+        and not any(phrase in sentence for phrase in CURVE_CHECKED)
     ]
 
 
@@ -7399,12 +7791,18 @@ def curve_unchecked_message(privacy_text: str) -> str:
             "restore it and rewrite it for the new results"
         )
     sentences = curve_unchecked_sentences(privacy_text)
-    listed = "".join(f"\n  - {sentence}" for sentence in sentences)
+    listed = "".join(
+        f"\n  - {'[shape] ' if CURVE_SHAPE_WORDS_RE.search(s) else ''}{s}"
+        for s in sentences
+    )
     return (
         "The whole 'Privacy-versus-utility curve' section of docs/PRIVACY.md is "
         "about the old results, and no test compares these "
         f"{len(sentences)} sentences with the new ones: re-read each and rewrite "
-        f"it for the new results:{listed}"
+        "it for the new results. A sentence marked [shape] names a grid value, "
+        "'largest', 'chance' or 'returns', so it is the likeliest to depend on the "
+        "shape of the curve; that is a rule of words, not a proof, so the list is "
+        f"complete and an unmarked sentence may depend on it too:{listed}"
     )
 
 
@@ -7438,7 +7836,7 @@ def privacy_seed_problems(text: str, results_dir: Path = RESULTS_DIR) -> list[st
     if problems and "## Privacy-versus-utility curve" in text:
         # the lines above are the ones a regex finds; the whole section is meant
         # to be re-read, so name it too (once the lines are rewritten this check
-        # passes: the curve-statement test carries the list until it is dropped)
+        # passes: the curve-statement test carries the list while the shape differs)
         problems.append(curve_unchecked_message(text))
     return problems
 
@@ -7542,12 +7940,7 @@ class TestReadme:
         self, text
     ):
         problems = readme_outcome_problems(text)
-        assert problems == [], (
-            "rewrite the Outcome paragraph under Results in README.md: copy the "
-            "'**Outcome.**' paragraph of docs/RESULTS.md, which is recomputed from "
-            f"the committed results (missing = write it, contradicts = it says the "
-            f"opposite of the numbers): {problems}"
-        )
+        assert problems == [], readme_outcome_message(problems)
 
     def test_tuning_seed_wording_follows_the_results_seed(self, text):
         problems = readme_seed_problems(text)
@@ -8128,9 +8521,8 @@ class TestReleaseStepChecks:
             "The shipped config is not a point on this curve. "
             "Its ε of 1.0 is a grid value.\n"
         )
-        results = "## Privacy curve\n\n" + _flat(
-            curve.split("\n", 1)[1].split("\n", 1)[1]
-        )
+        # the copy keeps the paragraphs of the fixture, as docs/RESULTS.md does
+        results = "## Privacy curve\n\n" + curve.split("\n", 1)[1].split("\n", 1)[1]
         assert privacy_verbatim_problems(results, curve) == []
         headless = curve.replace("the shipped allocation leaves", "x leaves")
         problems = privacy_verbatim_problems(results, headless)
@@ -8437,6 +8829,29 @@ class TestReleaseStepChecks:
         "THREAT-MODEL.md": "k-anonymity for the generalized column of the train "
         "release",
     }
+    # the fixture's own table, so rewriting a live entry at a release cannot break it
+    QUALIFIERS = (
+        (
+            "intervals are one noise draw and one training seed",
+            "PRIVACY.md",
+            "These intervals are replicate 0's: one noise draw and one training seed",
+        ),
+        (
+            "the grid values where utility returns are not offered as private settings",
+            "PRIVACY.md",
+            "they are not offered as a private setting",
+        ),
+        (
+            "k-anonymity holds for the train release only",
+            "PRIVACY.md",
+            "k-anonymity holds for the train release only",
+        ),
+        (
+            "k-anonymity holds for the train release only",
+            "THREAT-MODEL.md",
+            "the generalized column of the train release",
+        ),
+    )
     LIMITS = (
         "## Limitations\n\n- Privacy: x. The intervals are one noise draw and one "
         "training seed, the grid values where utility returns are not offered as "
@@ -8444,14 +8859,14 @@ class TestReleaseStepChecks:
     )
 
     def test_a_privacy_bullet_without_the_qualifiers_of_the_docs_is_reported(self):
-        assert readme_qualifier_problems(self.LIMITS, self.DOCS) == []
+        assert readme_qualifier_problems(self.LIMITS, self.DOCS, self.QUALIFIERS) == []
         for clause in (
             "intervals are one noise draw and one training seed",
             "the grid values where utility returns are not offered as private settings",
             "k-anonymity holds for the train release only",
         ):
             assert readme_qualifier_problems(
-                self.LIMITS.replace(clause, "x"), self.DOCS
+                self.LIMITS.replace(clause, "x"), self.DOCS, self.QUALIFIERS
             ), clause
         for name, source in (
             ("PRIVACY.md", "replicate 0's"),
@@ -8460,7 +8875,7 @@ class TestReleaseStepChecks:
         ):
             docs = dict(self.DOCS)
             docs[name] = docs[name].replace(source, "x")
-            assert readme_qualifier_problems(self.LIMITS, docs), source
+            assert readme_qualifier_problems(self.LIMITS, docs, self.QUALIFIERS), source
 
     def test_a_qualifier_whose_source_sentence_is_gone_asks_for_one_rewrite(self):
         clause = "the grid values where utility returns are not offered as private"
@@ -8469,10 +8884,10 @@ class TestReleaseStepChecks:
             "they are not offered as a private setting", "x"
         )
         limits = self.LIMITS.replace(clause, "x")
-        problems = readme_qualifier_problems(limits, docs)
+        problems = readme_qualifier_problems(limits, docs, self.QUALIFIERS)
         assert len(problems) == 1
         assert "PRIVACY_QUALIFIERS entry" in problems[0] and "rewrite" in problems[0]
-        kept = tuple(q for q in PRIVACY_QUALIFIERS if "private setting" not in q[2])
+        kept = tuple(q for q in self.QUALIFIERS if "private setting" not in q[2])
         assert readme_qualifier_problems(limits, docs, kept) == []
 
     def test_a_fast_run_that_deselects_readme_tests_is_reported(self):
@@ -8577,11 +8992,12 @@ class TestReleaseStepChecks:
         row = f"| {cell} | privacy | confirmed | DGNTY-8 | open | none | none |\n"
         assert privacy_row_problems(row, plain) == []
 
+    CURVE_COMPARED = CURVE_CLAIMS[2][1]  # a phrase a predicate compares
     CURVE_FIXTURE = (
         "# Privacy\n\n## Privacy-versus-utility curve\n\n![chart](img/c.png)\n\n"
         "The curve answers one question nobody tests. "
-        f"Each point {CURVE_CHECKED[1]} of chance. "
-        f"{CURVE_PRESENT_ONLY[1]}. "
+        f"Each point {CURVE_COMPARED} of chance. "
+        f"{CURVE_PRESENT_ONLY[0]}. "
         "Later work may add more.\n\n## Next section\n\nOutside the curve.\n"
     )
 
@@ -8590,9 +9006,9 @@ class TestReleaseStepChecks:
     ):
         listed = curve_unchecked_sentences(self.CURVE_FIXTURE)
         assert "The curve answers one question nobody tests." in listed
-        assert f"{CURVE_PRESENT_ONLY[1]}." in listed  # found in the text, not compared
+        assert f"{CURVE_PRESENT_ONLY[0]}." in listed  # found in the text, not compared
         assert "Later work may add more." in listed
-        assert not any(CURVE_CHECKED[1] in s for s in listed)
+        assert not any(self.CURVE_COMPARED in s for s in listed)
         assert "Outside the curve." not in listed
         tuning = seed_dir(tmp_path, EvalConfig().tuning_seed)
         final = seed_dir(tmp_path, EvalConfig().eval_seed)
@@ -8605,7 +9021,7 @@ class TestReleaseStepChecks:
         assert "3 sentences" in problem
         for sentence in curve_unchecked_sentences(stale):
             assert sentence in problem
-        assert CURVE_CHECKED[1] not in problem
+        assert self.CURVE_COMPARED not in problem
         assert "no 'Privacy-versus-utility curve' section" in curve_unchecked_message(
             "# Privacy\n"
         )
@@ -8686,3 +9102,558 @@ class TestReleaseStepChecks:
             "`pytest tests/`",
         ):
             assert readme_pointer_problems(good.replace(old, "x")), old
+
+
+CURVE_GRID = (0.1, 0.3, 1.0, 3.0, 10.0, 30.0, 100.0)
+# The fixture tests carry their own claims and written-for shape, so editing the
+# live entries at a release cannot break them.
+FIXTURE_SHAPE = ((0.1, 0.3, 1.0, 3.0, 10.0), (30.0, 100.0))
+FIXTURE_CLAIMS = (
+    (
+        "docs/PRIVACY.md",
+        "At ε = 30 and ε = 100 the interval lies wholly above the prevalence",
+        lambda payload, shape: shape[1] == (30.0, 100.0),
+    ),
+    (
+        "docs/PRIVACY.md",
+        "PR-AUC is higher at 100 than at 30",
+        lambda payload, shape: _value(payload, 100) > _value(payload, 30),
+    ),
+    (
+        "docs/PRIVACY.md",
+        "the same allocation at ε = 1.0 stays at chance on the {seed} seed",
+        lambda payload, shape: 1.0 in shape[0],
+    ),
+    (
+        "README.md",
+        "the grid values where utility returns are not offered as private settings",
+        lambda payload, shape: bool(shape[1]),
+    ),
+)
+FIXTURE_PRESENT_ONLY = ("Only the noise on `volume` changes along the curve",)
+
+
+def curve_payload(moves=None, seed=None):
+    """A privacy.json payload built here (never the live results): the grid of the
+    shipped config, each value at chance by default, the ε 30 and ε 100 values above
+    it. `moves` maps a grid value to 'chance', 'above', 'below' or 'null' to move
+    that point's PR-AUC interval against the prevalence."""
+    seed = EvalConfig().tuning_seed if seed is None else seed
+    where = dict.fromkeys(CURVE_GRID, "chance")
+    where[30.0] = where[100.0] = "above"
+    where.update(moves or {})
+    shape = {
+        "chance": {"value": 0.27, "ci_low": 0.20, "ci_high": 0.34},
+        "above": {"value": 0.50, "ci_low": 0.40, "ci_high": 0.60},
+        "below": {"value": 0.05, "ci_low": 0.01, "ci_high": 0.10},
+        "null": {"value": None, "ci_low": None, "ci_high": None},
+    }
+    points = []
+    for epsilon in CURVE_GRID:
+        pr_auc = dict(shape[where[epsilon]])
+        if epsilon == 100.0 and where[epsilon] == "above":
+            pr_auc.update(value=0.69, ci_low=0.57, ci_high=0.79)
+        points.append(
+            {
+                "epsilon": epsilon,
+                "risk": {"pr_auc": pr_auc},
+                "replicate_spread": {"pr_auc": {"values": [0.25, 0.27, 0.30]}},
+            }
+        )
+    reference = {
+        "prevalence": {"value": 0.27},
+        "pr_auc": {"value": 0.86, "ci_low": 0.78, "ci_high": 0.93},
+    }
+    return {
+        "seed": seed,
+        "metrics": {"points": points, "reference": {"risk": reference}},
+    }
+
+
+def curve_docs(payload, extra=""):
+    """Public-doc fixtures that say, word for word, what the payload supports."""
+    word = CURVE_SEED_WORDS[payload["seed"]]
+    headline = computed_curve_headline(payload)
+    claims = " ".join(
+        phrase.replace("{seed}", word)
+        for source, phrase, _ in FIXTURE_CLAIMS
+        if source == "docs/PRIVACY.md"
+    )
+    privacy = (
+        "# Privacy\n\n## Privacy-versus-utility curve\n\n"
+        f"{headline}. {claims}. {FIXTURE_PRESENT_ONLY[0]}. {extra}\n\n## Next\n"
+    )
+    clause = next(p for s, p, _ in FIXTURE_CLAIMS if s == "README.md")
+    return {
+        "docs/PRIVACY.md": privacy,
+        "README.md": f"- Privacy: {headline} ({clause}).\n",
+        "docs/RESULTS.md": f"{headline}:\n",
+        "docs/HOW-IT-WAS-BUILT.md": f"| {headline} <!--num privacy.json seed d--> |\n",
+    }
+
+
+def fixture_problems(payload, docs):
+    return curve_statement_problems(
+        payload, docs, FIXTURE_CLAIMS, FIXTURE_PRESENT_ONLY, FIXTURE_SHAPE
+    )
+
+
+class TestCurveStatement:
+    """The privacy-curve statement is checked against a shape computed from the
+    results, so a release that moves the curve cannot leave old prose green."""
+
+    def test_a_grid_value_is_at_chance_or_above_by_its_interval_and_nothing_else(
+        self,
+    ):
+        assert curve_grid_shape(curve_payload()) == FIXTURE_SHAPE
+        shape = curve_grid_shape(curve_payload({10.0: "above"}))
+        assert shape == ((0.1, 0.3, 1.0, 3.0), (10.0, 30.0, 100.0))
+        shape = curve_grid_shape(curve_payload({30.0: "chance", 100.0: "chance"}))
+        assert shape == (CURVE_GRID, ())
+        shape = curve_grid_shape(curve_payload({1.0: "above"}))
+        assert shape == ((0.1, 0.3, 3.0, 10.0), (1.0, 30.0, 100.0))
+        shape = curve_grid_shape(curve_payload(dict.fromkeys(CURVE_GRID, "above")))
+        assert shape == ((), CURVE_GRID)
+
+    def test_a_curve_above_chance_everywhere_is_reported_not_a_crash(self):
+        payload = curve_payload(dict.fromkeys(CURVE_GRID, "above"))
+        docs = curve_docs(curve_payload())
+        claims = (
+            (
+                "docs/PRIVACY.md",
+                "PR-AUC is higher at 100 than at 30",
+                _higher_at_100_than_at_30,
+            ),
+        )
+        problems = curve_statement_problems(
+            payload, docs, claims, FIXTURE_PRESENT_ONLY, FIXTURE_SHAPE
+        )
+        assert isinstance(problems, list) and problems
+        assert any("written for" in p or "shape" in p for p in problems)
+
+    @pytest.mark.parametrize("move", ["below", "null"])
+    def test_a_curve_no_template_covers_names_the_epsilon_and_asks_for_new_wording(
+        self, move
+    ):
+        with pytest.raises(AssertionError) as raised:
+            curve_grid_shape(curve_payload({3.0: move}))
+        message = str(raised.value)
+        assert "ε 3" in message and "ε 30" not in message
+        assert "no template covers" in message
+
+    def test_the_headline_of_the_shipped_curve_is_the_headline_the_docs_carry(self):
+        assert computed_curve_headline(curve_payload()) == (
+            "On the tuning seed, the shipped allocation leaves the risk model's "
+            "PR-AUC not distinguishable from chance on the hard preset at every ε "
+            "on the grid up to 10, and above chance at the two largest grid values, "
+            "30 and 100"
+        )
+
+    def test_the_headline_words_each_shape_the_curve_can_take(self):
+        stem = "the shipped allocation leaves the risk model's PR-AUC "
+        chance = "not distinguishable from chance on the hard preset at every ε "
+        cases = {
+            "none above": (
+                {30.0: "chance", 100.0: "chance"},
+                f"{chance}on the grid",
+            ),
+            "the largest value": (
+                {30.0: "chance"},
+                f"{chance}on the grid up to 30, and above chance at the largest "
+                "grid value, 100",
+            ),
+            "three largest": (
+                {10.0: "above"},
+                f"{chance}on the grid up to 3, and above chance at the three "
+                "largest grid values, 10, 30 and 100",
+            ),
+            "every value": (
+                dict.fromkeys(CURVE_GRID, "above"),
+                "above chance on the hard preset at every ε on the grid",
+            ),
+            "not contiguous": (
+                {1.0: "above"},
+                "not distinguishable from chance on the hard preset at ε 0.1, 0.3, "
+                "3 and 10, and above chance at ε 1, 30 and 100",
+            ),
+        }
+        for name, (moves, body) in cases.items():
+            assert computed_curve_headline(curve_payload(moves)) == (
+                f"On the tuning seed, {stem}{body}"
+            ), name
+
+    def test_the_headline_names_the_seed_of_the_results_and_refuses_any_other(self):
+        evaluation = curve_payload(seed=EvalConfig().eval_seed)
+        assert computed_curve_headline(evaluation).startswith(
+            "On the evaluation seed, "
+        )
+        with pytest.raises(AssertionError, match="seed"):
+            computed_curve_headline(curve_payload(seed=7))
+
+    def test_a_statement_the_results_support_has_no_problems(self):
+        for seed in (EvalConfig().tuning_seed, EvalConfig().eval_seed):
+            payload = curve_payload(seed=seed)
+            assert fixture_problems(payload, curve_docs(payload)) == []
+
+    def test_a_sentence_the_results_no_longer_support_is_named_for_rewriting(self):
+        payload = curve_payload()
+        docs = curve_docs(payload)
+        # the shape is unchanged, but ε 100 now scores below ε 30
+        point = next(p for p in payload["metrics"]["points"] if p["epsilon"] == 100.0)
+        point["risk"]["pr_auc"]["value"] = 0.45
+        problems = fixture_problems(payload, docs)
+        assert len(problems) == 1, problems
+        assert "PR-AUC is higher at 100 than at 30" in problems[0]
+        assert "docs/PRIVACY.md" in problems[0]
+        assert "no longer supported by results/v1.0/privacy.json" in problems[0]
+        assert "rewrite it, then update or remove its entry" in problems[0]
+
+    def test_a_missing_sentence_with_a_live_entry_is_named_for_removal(self):
+        payload = curve_payload()
+        docs = curve_docs(payload)
+        gone = "At ε = 30 and ε = 100 the interval lies wholly above the prevalence"
+        docs["docs/PRIVACY.md"] = docs["docs/PRIVACY.md"].replace(gone, "x")
+        problems = fixture_problems(payload, docs)
+        assert len(problems) == 1, problems
+        assert gone in problems[0] and "remove the entry" in problems[0]
+
+    def test_every_problem_is_reported_in_one_run(self):
+        payload = curve_payload()
+        docs = curve_docs(payload)
+        point = next(p for p in payload["metrics"]["points"] if p["epsilon"] == 100.0)
+        point["risk"]["pr_auc"]["value"] = 0.45  # a claim the results do not support
+        docs["docs/PRIVACY.md"] = docs["docs/PRIVACY.md"].replace(
+            "At ε = 30 and ε = 100 the interval lies wholly above the prevalence",
+            "x",
+        )  # a claim that went missing
+        docs["README.md"] = "- Privacy: nothing\n"  # a headline and a clause gone
+        docs["docs/RESULTS.md"] = "nothing\n"
+        problems = fixture_problems(payload, docs)
+        text = "\n".join(problems)
+        assert "PR-AUC is higher at 100 than at 30" in text
+        assert "remove the entry" in text
+        assert "README.md must carry the curve headline" in text
+        assert "docs/RESULTS.md must carry the curve headline" in text
+        assert "docs/HOW-IT-WAS-BUILT.md must carry" not in text
+        assert "the grid values where utility returns" in text  # README clause gone
+        assert len(problems) == 5, problems
+
+    def test_a_new_shape_lists_every_sentence_to_re_read_and_the_constant_last(self):
+        payload = curve_payload({10.0: "above"})
+        docs = curve_docs(payload, extra="Later work may add more.")
+        text = "\n".join(fixture_problems(payload, docs))
+        assert "CURVE_SHAPE_WRITTEN_FOR" in text and "last" in text
+        assert repr(curve_grid_shape(payload)) in text
+        assert repr(FIXTURE_SHAPE) in text
+        assert "Later work may add more." in text  # a sentence no test compares
+        assert "README.md, Limitations" in text
+        assert "Verdict" in text and "Outcome" in text
+        assert computed_curve_headline(payload) in text
+        # a claim written for the old shape is named by the predicate that fails
+        assert "At ε = 30 and ε = 100 the interval lies wholly above" in text
+        assert "this sentence is no longer supported" in text
+
+    def test_a_curve_with_nothing_above_chance_drops_the_utility_returns_clause(
+        self,
+    ):
+        payload = curve_payload({30.0: "chance", 100.0: "chance"})
+        problems = fixture_problems(payload, curve_docs(curve_payload()))
+        clause = "the grid values where utility returns are not offered"
+        assert any(clause in p and "no longer supported" in p for p in problems)
+
+    def test_a_sentence_that_still_names_the_old_seed_is_told_to_name_the_new_one(
+        self,
+    ):
+        payload = curve_payload(seed=EvalConfig().eval_seed)
+        docs = curve_docs(payload)
+        docs["docs/PRIVACY.md"] = docs["docs/PRIVACY.md"].replace(
+            "at chance on the evaluation seed", "at chance on the tuning seed"
+        )
+        problems = fixture_problems(payload, docs)
+        assert len(problems) == 1, problems
+        assert "at chance on the tuning seed" in problems[0]
+        assert "the results carry the evaluation seed" in problems[0]
+        assert "rewrite that sentence as" in problems[0]
+
+    def test_a_headline_that_only_begins_the_new_one_is_not_the_new_one(self):
+        # nothing above chance: its headline is the first half of today's headline
+        old = curve_docs(curve_payload())
+        none_above = curve_payload({30.0: "chance", 100.0: "chance"})
+        assert computed_curve_headline(none_above) in old["README.md"]
+        docs = {**curve_docs(none_above), "README.md": old["README.md"]}
+        problems = fixture_problems(none_above, docs)
+        assert any("README.md must carry the curve headline" in p for p in problems)
+        assert not any("docs/RESULTS.md must carry" in p for p in problems)
+
+    def test_the_live_entries_name_documents_the_statement_is_checked_in(self):
+        for source, phrase, holds in CURVE_CLAIMS:
+            assert source in CURVE_DOCS and phrase and callable(holds), phrase
+
+
+def claim_payload(moves=None, rep30=None, rep100=None, value100=None):
+    """A privacy.json payload for the live-predicate tests: curve_payload plus
+    replicate values for ε 30 and ε 100 that make every claim of today's curve true
+    (ε 100 above every smaller replicate, ε 30 spreading wider than its gap)."""
+    payload = curve_payload(moves)
+    points = {p["epsilon"]: p for p in payload["metrics"]["points"]}
+    points[30.0]["replicate_spread"]["pr_auc"]["values"] = rep30 or [0.30, 0.45, 0.55]
+    points[100.0]["replicate_spread"]["pr_auc"]["values"] = rep100 or [0.6, 0.65, 0.7]
+    if value100 is not None:
+        points[100.0]["risk"]["pr_auc"]["value"] = value100
+    return payload
+
+
+# The five shapes of the release rehearsal, each as its own payload.
+PREDICATE_SHAPES = {
+    "unchanged": claim_payload(),
+    "ten also above": claim_payload({10.0: "above"}),
+    "nothing above": claim_payload({30.0: "chance", 100.0: "chance"}),
+    "everything above": claim_payload(dict.fromkeys(CURVE_GRID, "above")),
+    "unchanged shape, other numbers": claim_payload(
+        rep30=[0.55, 0.56, 0.57], rep100=[0.50, 0.65, 0.70], value100=0.45
+    ),
+}
+# predicate -> does it say "supported", for the shapes above in the same order. A
+# sentence it guards is true exactly when it says so.
+PREDICATE_TABLE = {
+    "up to 10 at chance and below the reference": (
+        _below_the_reference_up_to(10),
+        (True, False, False, False, True),
+    ),
+    "30 and 100 above chance": (
+        _30_and_100_above_chance,
+        (True, False, False, False, True),
+    ),
+    "higher at 100 than at 30": (
+        _higher_at_100_than_at_30,
+        (True, True, False, True, False),
+    ),
+    "both point estimates below the reference": (
+        _30_and_100_below_the_reference,
+        (True, False, False, False, True),
+    ),
+    "100 above every smaller replicate": (
+        _100_above_every_smaller_replicate,
+        (True, True, False, True, False),
+    ),
+    "30 spreads wider than the gap": (
+        _30_spreads_wider_than_the_gap,
+        (True, True, False, True, False),
+    ),
+    "two largest above chance": (
+        _two_largest_above,
+        (True, False, False, False, True),
+    ),
+    "utility returns at some values only": (
+        _utility_returns_at_some_values_only,
+        (True, True, False, False, True),
+    ),
+    "the shipped epsilon of 1.0 is at chance": (
+        _shipped_epsilon_at_chance,
+        (True, True, True, False, True),
+    ),
+}
+
+
+class TestCurveClaimPredicatesFollowTheShape:
+    """Each predicate of CURVE_CLAIMS says "supported" only for the shapes in which
+    its sentence is true, so no sentence about the curve stays false while green."""
+
+    @pytest.mark.parametrize("name", list(PREDICATE_TABLE))
+    def test_a_predicate_says_supported_exactly_where_its_sentence_is_true(self, name):
+        holds, expected = PREDICATE_TABLE[name]
+        said = tuple(
+            holds(payload, curve_grid_shape(payload))
+            for payload in PREDICATE_SHAPES.values()
+        )
+        assert said == expected, dict(zip(PREDICATE_SHAPES, said, strict=True))
+
+    def test_a_sentence_naming_two_values_is_not_supported_once_a_third_is_above(self):
+        for moves in ({10.0: "above"}, dict.fromkeys(CURVE_GRID, "above")):
+            payload = claim_payload(moves)
+            assert not _30_and_100_above_chance(payload, curve_grid_shape(payload))
+
+    def test_the_replicate_sentences_are_unsupported_when_nothing_is_above_chance(
+        self,
+    ):
+        claims = tuple(
+            ("docs/PRIVACY.md", f"sentence {i}", PREDICATE_TABLE[name][0])
+            for i, name in enumerate(PREDICATE_TABLE)
+        )
+        privacy = (
+            "# P\n\n## Privacy-versus-utility curve\n\n"
+            + " ".join(c[1] for c in claims)
+            + ".\n"
+        )
+        payload = PREDICATE_SHAPES["nothing above"]
+        headline = computed_curve_headline(payload)
+        docs = dict.fromkeys(CURVE_DOCS, f"{headline}. {privacy}")
+        problems = curve_statement_problems(payload, docs, claims, (), FIXTURE_SHAPE)
+        text = "\n".join(problems)
+        replicate = [i for i, n in enumerate(PREDICATE_TABLE) if "replicate" in n]
+        replicate += [i for i, n in enumerate(PREDICATE_TABLE) if "spreads" in n]
+        assert len(replicate) == 2
+        for i in replicate:
+            assert f"'sentence {i}': this sentence is no longer supported" in text
+
+    def test_a_curve_above_chance_everywhere_reports_every_claim_without_a_crash(
+        self,
+    ):
+        payload = PREDICATE_SHAPES["everything above"]
+        shape = curve_grid_shape(payload)
+        for name, (holds, _) in PREDICATE_TABLE.items():
+            assert isinstance(holds(payload, shape), bool), name
+
+
+class TestVerbatimParagraphNeedsNoShapeDependentAnchor:
+    """The reuse check of docs/RESULTS.md covers the headline paragraph from its
+    first sentence to its last, found by structure."""
+
+    CURVE = (
+        "## Privacy-versus-utility curve\n\nThe curve answers one question. "
+        "It is not consumed.\n\n"
+        "**On the evaluation seed, the shipped allocation leaves it not "
+        "distinguishable from chance at every ε on the grid:** one claim. Test:\n"
+        "`tests/x.py::T::t`.\nε is per released value. Nothing is offered at all.\n\n"
+        "The statement is about PR-AUC. The file also carries AUROC. The shipped "
+        "config is not a point on this curve. Its ε of 1.0 is a grid value.\n"
+    )
+
+    @staticmethod
+    def results_for(curve: str) -> str:
+        return "## Privacy curve\n\n" + curve.split("\n", 1)[1].lstrip("\n")
+
+    def test_a_paragraph_ending_in_any_words_is_reused_whole_without_an_anchor(self):
+        assert privacy_verbatim_problems(self.results_for(self.CURVE), self.CURVE) == []
+        other = self.CURVE.replace("Nothing is offered at all.", "Words of no kind.")
+        assert privacy_verbatim_problems(self.results_for(other), other) == []
+
+    def test_dropping_the_last_sentence_from_both_docs_breaks_nothing(self):
+        # the step the shape message asks for when no grid value is above chance
+        dropped = self.CURVE.replace(" Nothing is offered at all.", "")
+        assert privacy_verbatim_problems(self.results_for(dropped), dropped) == []
+
+    def test_a_last_sentence_left_out_of_the_copy_is_reported(self):
+        cut = self.results_for(self.CURVE).replace(" Nothing is offered at all.", "")
+        problems = privacy_verbatim_problems(cut, self.CURVE)
+        assert problems == ["not reused whole: Nothing is offered at all."]
+
+    def test_a_sentence_the_privacy_doc_dropped_is_not_kept_in_the_copy(self):
+        dropped = self.CURVE.replace(" Nothing is offered at all.", "")
+        problems = privacy_verbatim_problems(self.results_for(self.CURVE), dropped)
+        assert len(problems) == 1, problems
+        assert "keeps a sentence docs/PRIVACY.md no longer has" in problems[0]
+        assert "Nothing is offered at all." in problems[0]
+
+    def test_the_message_orders_the_doc_that_leads_and_the_one_that_follows(self):
+        text = privacy_verbatim_message(["not reused whole: x"])
+        assert "docs/PRIVACY.md leads and docs/RESULTS.md follows" in text
+        assert "drop the same sentence" in text
+        assert "restore" not in text and "anchor" not in text
+        assert "not reused whole: x" in text
+
+
+class TestShapeMessageNamesEveryStepInOrder:
+    PRIVACY = (
+        "# P\n\n## Privacy-versus-utility curve\n\nA first sentence. "
+        "A second one.\n\n## Next\n"
+    )
+
+    def message(self, moves):
+        return curve_shape_message(curve_payload(moves), self.PRIVACY, FIXTURE_SHAPE)
+
+    def test_the_steps_come_in_order_and_the_constant_comes_last(self):
+        text = self.message({30.0: "chance", 100.0: "chance"})
+        at = [text.index(f"  {n}. ") for n in range(1, 7)]
+        assert at == sorted(at)
+        assert at[0] < text.index("docs/PRIVACY.md, curve section") < at[1]
+        assert "README.md, Limitations privacy bullet" in text[at[1] : at[2]]
+        assert "docs/RESULTS.md '## Privacy curve'" in text[at[2] : at[3]]
+        assert "DGNTY-8 row" in text[at[3] : at[4]]
+        assert "PRIVACY_ROW_LEAD" in text[at[3] : at[4]]
+        assert "Verdict" in text[at[4] : at[5]]
+        assert "CURVE_SHAPE_WRITTEN_FOR" in text[at[5] :]
+        assert "CURVE_SHAPE_WRITTEN_FOR" not in text[: at[5]]
+
+    def test_no_step_sends_the_person_back_to_a_sentence_another_step_dropped(self):
+        text = self.message({30.0: "chance", 100.0: "chance"})
+        assert "restore" not in text
+        assert "PRIVACY_QUALIFIERS" in text and "they are not offered" in text
+        assert "dropped in step 1 is dropped here too" in text
+        assert "leave the old predicate functions as they are" in text
+
+    def test_the_readme_bullet_connective_is_named_for_re_reading(self):
+        text = self.message(dict.fromkeys(CURVE_GRID, "above"))
+        bullet = text[text.index("  2. ") : text.index("  3. ")]
+        assert "README.md, Limitations privacy bullet" in bullet
+        assert "although inputs can be made differentially private" in bullet
+        assert "every grid value is above chance" in bullet
+
+
+class TestReadmeOutcomeMessage:
+    def test_the_message_asks_for_the_phrases_not_for_a_copy_of_results(self):
+        text = readme_outcome_message(["risk: write x"])
+        assert "carries the phrases" in text
+        assert "do not paste" in text and "word limit" in text
+        assert "copy the" not in text
+        assert "risk: write x" in text
+
+    def test_a_missing_outcome_paragraph_asks_for_one_that_carries_the_phrases(self):
+        problems = readme_outcome_problems("## Results\n\nNothing here.\n")
+        assert len(problems) == 1
+        assert "copy it" not in problems[0] and "do not paste" in problems[0]
+
+
+class TestCurveRereadListIsShortAndMarked:
+    FIXTURE = (
+        "# Privacy\n\n## Privacy-versus-utility curve\n\n![c](c.png)\n\n"
+        "- **Template.** The privacy block is the template. Tests: "
+        "`tests/a.py::T::t`.\n"
+        "- **Reference.** The dashed line is a model.\n\n"
+        "Test: `tests/b.py::T::t`.\n"
+        "The curve is not bound to a shape here. At ε = 30 the interval is high.\n\n"
+        "## Next\n"
+    )
+
+    def test_heading_fragments_and_test_citations_are_not_listed(self):
+        listed = curve_unchecked_sentences(self.FIXTURE)
+        assert listed == [
+            "The privacy block is the template.",
+            "The dashed line is a model.",
+            "The curve is not bound to a shape here.",
+            "At ε = 30 the interval is high.",
+        ]
+
+    def test_a_sentence_that_names_a_grid_value_is_marked_and_the_list_is_complete(
+        self,
+    ):
+        text = curve_unchecked_message(self.FIXTURE)
+        assert "  - [shape] At ε = 30 the interval is high." in text
+        assert "  - The curve is not bound to a shape here." in text
+        assert "  - The dashed line is a model." in text
+        assert "4 sentences" in text
+        assert "rule of words, not a proof" in text and "complete" in text
+        assert "Template." not in text.replace("is the template.", "")
+        assert "Test:" not in text and "Tests:" not in text
+
+
+class TestDgnty8RowMessageNamesTheLeadConstant:
+    PRIVACY = (
+        "# P\n\n## Privacy-versus-utility curve\n\n"
+        "**On the evaluation seed, the shipped allocation leaves it at chance.** "
+        "One claim. Test: `x`.\nMore.\n"
+    )
+
+    def test_a_row_that_parted_from_the_lead_constant_is_told_where_the_lead_lives(
+        self,
+    ):
+        row = (
+            "| A rewritten lead. On the evaluation seed, the shipped allocation "
+            "leaves it at chance. One claim. See [Privacy-versus-utility curve]"
+            "(PRIVACY.md#privacy-versus-utility-curve). | privacy | confirmed | "
+            "DGNTY-8 | open | none | none |\n"
+        )
+        problems = privacy_row_problems(row, self.PRIVACY)
+        assert len(problems) == 1, problems
+        assert "PRIVACY_ROW_LEAD" in problems[0]
+        assert "change the constant and the row together" in problems[0]
