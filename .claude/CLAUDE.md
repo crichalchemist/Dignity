@@ -45,13 +45,15 @@ format that export no longer supports (DGNTY-3, DGNTY-35). No shipped config wri
 ## Commands
 
 ```bash
-# Tests (457 collected: test_core 65, test_data 118, test_models 23, test_privacy 42,
-# test_operator 4, test_docs 7, test_train 78, test_checkpoint 3, test_export 9,
+# Tests (704 collected: test_core 65, test_data 118, test_models 23, test_privacy 42,
+# test_operator 4, test_docs 254, test_train 78, test_checkpoint 3, test_export 9,
 # test_calibration 3, test_labels 7, test_gates 11, test_ci 4, test_eval 72,
 # test_colab_eval 11 — one skips without CUDA)
-# every test is limited to 300 s (pytest.ini; pytest-timeout)
+# every test is limited to 300 s (pytest.ini; pytest-timeout), except the README quickstart
+# test, which carries its own 900 s limit (three subprocesses, each capped at 300 s)
 pytest tests/ -v
 pytest tests/test_models.py -v                       # one file
+pytest tests/test_docs.py -v   # doc numbers, symbols, paths and the README quickstart (M6)
 pytest tests/test_models.py::TestDignityModel::test_risk_model -v   # one test
 pytest tests/ -m "not slow" -v                       # marker filter
 
@@ -180,9 +182,9 @@ a mechanism, it needs a test in `tests/test_privacy.py` or CI's 100% gate on tha
 
 ## Known breakage (do not "discover" these again — fix or leave, but don't be confused)
 
-- **`docs/` and `README.md` drift from the code easily.** `tests/test_docs.py` guards removed
-  claims and links to missing files, not stale examples. Trust the source, and when you touch a
-  documented symbol, fix the doc in the same change.
+- **`docs/` and `README.md` drift from the code easily.** `tests/test_docs.py` runs the README
+  quickstart and checks quoted numbers, symbols, paths and removed claims. Trust the source, and
+  when you touch a documented symbol, fix the doc in the same change.
 
 ## Conventions
 
@@ -197,6 +199,54 @@ a mechanism, it needs a test in `tests/test_privacy.py` or CI's 100% gate on tha
   no privacy stage. `bounds` are public parameters chosen a priori — never derive them from data.
 - `privacy.deterministic_rng: true` (+ `privacy_seed=`) is the seeded experiment mode; shipped
   configs stay on SystemRandom.
+- Doc numbers are machine-checked in **every** public doc (`README.md` and `docs/**/*.md`;
+  `tests/test_docs.py`, `check_numbers`). A quoted number is a token directly followed by a marker,
+  `0.84 <!--num risk.json metrics.pr_auc.value .2f-->`, grammar
+  `<!--num <file>.json <dotted.path> <fmt>-->`, resolved against `results/v1.0/<file>.json`
+  (dicts by key, lists by non-negative integer: `pr_auc_by_horizon.4.value`; `fmt` is a Python
+  format spec: `.2f`, `.1%`, `d`, `g` for ε (floats such as `10.0`), `s` compares the whole token;
+  a JSON null renders as `n/a` for every `fmt`; a path through a null or a scalar is "no such
+  path"). Only the number core of the token is compared. `split_token` splits a token into
+  prefix, core and suffix and is the one helper the M6.6 refresh imports, so a refresh rewrites
+  the core and keeps the wrappers. Accepted wrappers: `[0.72 <!--…-->, 0.88 <!--…-->]` and
+  `(0.72, 0.88)` for a CI (three markers), `**0.81**`, `_`/`~`, table pipes glued to the number,
+  a `/` glued before or after the number (`0 <!--…-->/34 <!--…-->`) and a trailing `. , ; :`. A range such as `0.72–0.88`
+  is rejected: write the bracket form. A `<!--num` comment that does not parse is a malformed
+  marker and fails. Text between `<!--results-start-->` and `<!--results-end-->` may hold no
+  number without a marker; the tags must alternate, start first (swapped or nested tags fail),
+  and a backticked purely numeric literal (`` `0.99` ``, `` `-0.5` ``, `` `12%` ``) in a zone is an
+  unmarked number. Labels that merely contain digits stay backticked: keys and paths
+  (`recall_at_1pct_fpr`, `policy.review_budget`, `results/v1.0/risk.json`); an ε label carries
+  its own marker (`metrics.points.N.epsilon`, `g`); a horizon label is a backticked
+  `pr_auc_by_horizon.N` (forecast.json has no list of horizon values); "95% CI" lives in prose
+  outside the zone. A backticked numeric literal such as the evaluation seed `2026` is an unmarked
+  number inside a zone, so it must sit OUTSIDE results zones. Markers and zone tags inside a fenced
+  block (``` or ~~~) or an inline code span are documentation: neither checked nor counted. A
+  comment that looks like a zone tag or the provisional tag but is not written exactly
+  (`<!-- results-start -->`) is reported as a malformed zone tag. Banner: while the four `results/v1.0/*.json`
+  files (one run: same seed, git_sha and config_hash, asserted) carry the tuning seed, README and
+  `docs/RESULTS.md` each contain the line (a substring check)
+  `<!--provisional-->**Provisional: numbers are from the tuning seed; the final evaluation has
+  not run.**` (one line); once `risk.json` has the evaluation seed the word Provisional and the
+  `<!--provisional-->` comment appear in neither.
+- Doc references are checked the same way, on inline code only (fenced blocks are skipped).
+  Symbol: `^(core|data|models|train|export|eval)(\.\w+)+$` must import and resolve (longest
+  importable module prefix, then `getattr`); under `data`, `data.synthetic`, `train` and `eval`
+  a name may instead be a config dataclass field (`data.synthetic.block_len`, `eval.epsilons`).
+  Path: a span with `/` or ending `.py .yaml .md .json .png .ipynb`, and no whitespace, `* { } < >`
+  or `scheme://`, must exist relative to the repo root after stripping a `::` or `#` suffix and a
+  leading `./`; an absolute path or one that climbs out of the repo (`/etc/hosts`, `../x`) is
+  reported as missing even when it exists; only `runs/` and `checkpoints/` (gitignored) may be absent. Node: a non-test
+  `path::name` needs a `.py` repo-relative path and a top-level def or class `name`; a method is
+  `path::Class.method` or `path::Class::method`, and both parts are looked up by AST.
+  `tests/…::Class::test` citations are checked separately and a bare `Test*` name must carry its
+  file. A fenced block opened as `bash quickstart` (exactly) is run by the suite under `tmp_path`
+  on CPU: every command must start with `python` and may only write `runs/…`, `dignity_risk.onnx` and the
+  config's `eval.out_dir` and `img_dir`, which the test redirects under `tmp_path`
+  (`config/smoke.yaml` is an input the test rewrites, not a write target). The checkpoint, the ONNX
+  file and the results JSON files must exist afterwards, and `stray_writes` compares git status
+  and the size and mtime of every file under `results/`, `docs/img/`, `runs/` and `checkpoints/`
+  and of any root `*.onnx` before and after. The quickstart test carries its own 900 s limit.
 - Tests are organized as classes (`TestSignalProcessor`, `TestDignityModel`, …); node ids are
   `file::Class::test_name`. They use root-level fixtures in `tests/conftest.py` (`device`,
   `sample_sequence` `[4,100,9]`, `sample_labels`) and an autouse seed reset. Reuse them rather

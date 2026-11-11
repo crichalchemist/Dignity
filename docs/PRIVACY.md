@@ -279,7 +279,7 @@ in [RESULTS.md](RESULTS.md) runs it after the three tasks):
   the gap on the chart is the cost of the privacy stage, not the distance from the
   headline number. The short dashes at the right edge are its per-seed values.
 - **Baseline.** `window_logistic` on this chart is fit on the released feature windows.
-  The baseline of the same name in `risk.json` is fit on the raw columns.
+  The baseline of the same name in `results/v1.0/risk.json` is fit on the raw columns.
 - **The shipped config is not a point on this curve.** Its ε of 1.0 is a grid value, but
   the curve runs on the hard preset with that preset's training settings
   (`config/synthetic_hard.yaml`), not those of `config/train_risk.yaml`, with unrounded
