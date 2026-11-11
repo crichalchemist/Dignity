@@ -45,8 +45,8 @@ format that export no longer supports (DGNTY-3, DGNTY-35). No shipped config wri
 ## Commands
 
 ```bash
-# Tests (759 collected: test_core 65, test_data 118, test_models 23, test_privacy 42,
-# test_operator 4, test_docs 309, test_train 78, test_checkpoint 3, test_export 9,
+# Tests (893 collected: test_core 65, test_data 118, test_models 23, test_privacy 42,
+# test_operator 4, test_docs 443, test_train 78, test_checkpoint 3, test_export 9,
 # test_calibration 3, test_labels 7, test_gates 11, test_ci 4, test_eval 72,
 # test_colab_eval 11 — one skips without CUDA)
 # every test is limited to 300 s (pytest.ini; pytest-timeout), except the README quickstart
@@ -205,6 +205,7 @@ a mechanism, it needs a test in `tests/test_privacy.py` or CI's 100% gate on tha
   no privacy stage. `bounds` are public parameters chosen a priori — never derive them from data.
 - `privacy.deterministic_rng: true` (+ `privacy_seed=`) is the seeded experiment mode; shipped
   configs stay on SystemRandom.
+- Framing guard (`tests/test_docs.py`, `framing_hits`): a tripwire over a fixed trading/price-forecasting vocabulary in every public doc and `config/*.yaml` comment, not a proof; allowed forms (`trade-off`, `wash_trading`, `pump_and_dump`, `layering`) are listed beside it and the vocabulary is not extended.
 - Doc numbers are machine-checked in **every** public doc (`README.md` and `docs/**/*.md`;
   `tests/test_docs.py`, `check_numbers`). A quoted number is a token directly followed by a marker,
   `0.84 <!--num risk.json metrics.pr_auc.value .2f-->`, grammar

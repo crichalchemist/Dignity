@@ -2716,32 +2716,183 @@ class TestBaseConfigDoc:
 # Trading framing: Dignity is a risk project (detection, early warning, triage).
 # Matching is case-insensitive and word-bounded, so an identifier such as
 # `wash_trading` (underscores are word characters) is never a hit by itself.
+FRAMING_WORDS = [
+    "trade",
+    "trades",
+    "traded",
+    "trader",
+    "traders",
+    "trading",
+    "buy",
+    "buys",
+    "buying",
+    "bought",
+    "sell",
+    "sells",
+    "selling",
+    "sold",
+    "investor",
+    "investors",
+    "investing",
+    "investment",
+    "portfolio",
+    "portfolios",
+    "profit",
+    "profits",
+    "profitable",
+    "pnl",
+    "p&l",
+    "alpha",
+    "quant",
+    "quants",
+]
+FRAMING_PHRASES = (
+    "go long",
+    "going long",
+    "go short",
+    "going short",
+    "long position",
+    "short position",
+    "quantitative trading",
+    "trading strategy",
+    "trading agent",
+    "price move",
+    "price moves",
+    "price movement",
+    "price target",
+    "next price",
+    "predict the price",
+    "predicts the price",
+    "predict prices",
+    "price prediction",
+    "price forecast",
+    "price forecasting",
+    "high return",
+    "high returns",
+    "returns on",
+)
+FRAMING_PATTERNS = (
+    # "returns" qualified by what is earned: "earns returns", "expected returns"
+    r"(?:earn\w*|portfolio|strategy|excess|expected|maximi[sz]\w*|chas\w*"
+    r"|generat\w*|log|stock|asset|market|investment)\s+returns?",
+    # "strategy" followed within three words by a return or a profit
+    r"strategy(?:\s+\w+){0,2}\s+(?:returns?|profits?)",
+    r"forecast\w*\s+(?:the\s+)?price",
+)
 FRAMING_RE = re.compile(
-    r"\btrad(?:e|es|ed|er|ers|ing)\b"
-    r"|\b(?:buy|buys|buying|bought|sell|sells|selling|sold)\b"
-    r"|\bprice (?:move|moves|movement|movements|target|targets)\b"
-    r"|\bportfolios?\b|\bprofit\w*|\balpha\b|\bquants?\b"
-    r"|\b(?:maximi[sz]\w*|chas\w*|earn\w*|generat\w*|expected|excess|investment"
-    r"|log|stock|asset|market)\s+returns?\b|\breturns? on\b"
-    r"|trading agent|price (?:forecast|prediction)|predict prices"
-    r"|\bforecast\w* (?:the )?price",
+    "|".join(
+        [rf"\b{re.escape(w)}\b" for w in FRAMING_WORDS]
+        + [
+            r"\b" + r"\s+".join(map(re.escape, p.split())) + r"\b"
+            for p in FRAMING_PHRASES
+        ]
+        + [rf"\b{p}\b" for p in FRAMING_PATTERNS]
+    ),
     re.I,
 )
-# The only terms removed before matching: anomaly types the generator injects,
-# in identifier and prose form. "layering" and "pump and dump" never match the
-# pattern; they are listed because the maintainer named them.
+# The only forms removed before matching: anomaly types the generator injects,
+# in identifier and prose form, and "trade-off". "layering" and "pump and dump"
+# never match the pattern; they are listed because the maintainer named them.
 FRAMING_ALLOWED = (
     re.compile(r"wash[_ -]trading", re.I),  # anomaly type, six injectors
     re.compile(r"pump[_ -]and[_ -]dump", re.I),  # anomaly type
     re.compile(r"\blayering\b", re.I),  # anomaly type
+    re.compile(r"\btrade-?offs?\b", re.I),  # a compromise, not a transaction
 )
 
 
 def framing_hits(text: str) -> list[str]:
-    """Trading-framed phrases of `text`, after the anomaly-type allowlist."""
+    """Trading-framed phrases of `text`, after the allowed forms are removed.
+
+    A tripwire over the fixed vocabulary above, not a proof that a text is free
+    of such framing: a denylist cannot be complete, and review does not extend it.
+    """
     for allowed in FRAMING_ALLOWED:
         text = allowed.sub(" ", text)
     return [m.group(0) for m in FRAMING_RE.finditer(text)]
+
+
+FRAMING_REJECTED = {
+    "trade": "Traders place a trade each day.",
+    "trades": "The policy trades often.",
+    "traded": "The asset was traded yesterday.",
+    "trader": "The trader reads the score.",
+    "traders": "Traders read the score.",
+    "trading": "A trading desk reads the score.",
+    "buy": "The policy tells you to buy.",
+    "buys": "The policy buys early.",
+    "buying": "The policy is buying early.",
+    "sell": "The policy tells you to sell.",
+    "sells": "The policy sells early.",
+    "selling": "The policy is selling early.",
+    "go long": "Go long when risk is low.",
+    "going long": "Going long when risk is low.",
+    "go short": "Go short on the asset.",
+    "going short": "Going short on the asset.",
+    "long position": "Hold a long position until the alert.",
+    "short position": "Hold a short position until the alert.",
+    "investor": "An investor reads the score.",
+    "investors": "Investors benefit.",
+    "investing": "Investing in the model pays.",
+    "investment": "The investment grows.",
+    "portfolio": "The portfolio is rebalanced.",
+    "profit": "The policy makes a profit.",
+    "profits": "The policy keeps its profits.",
+    "profitable": "The policy is profitable.",
+    "pnl": "Maximizes PnL.",
+    "p&l": "Reports the P&L.",
+    "alpha": "The model has alpha.",
+    "quant": "A quant wrote it.",
+    "quants": "Quants wrote it.",
+    "quantitative trading": "A quantitative trading model.",
+    "price move": "Anticipates the price move.",
+    "price moves": "Anticipates price moves.",
+    "price movement": "Anticipates price movement.",
+    "price target": "Sets a price target.",
+    "next price": "Predicts the next price.",
+    "predict the price": "Models predict the price.",
+    "predicts the price": "The model predicts the price.",
+    "predict prices": "Models predict prices.",
+    "price prediction": "A price prediction head.",
+    "price forecast": "A price forecast head.",
+    "price forecasting": "A price forecasting head.",
+    "high return": "The strategy earns a high return.",
+    "earn returns": "Users earn returns.",
+    "earns returns": "The model earns returns.",
+    "earning returns": "Earning returns is not the goal.",
+    "portfolio returns": "Reports portfolio returns.",
+    "strategy returns": "Reports strategy returns.",
+    "excess returns": "Reports excess returns.",
+    "expected returns": "Reports expected returns.",
+    "trading strategy": "A trading strategy built on the score.",
+    "strategy return": "The strategy return is reported.",
+    "strategy returns, three words": "The strategy used here returns nothing.",
+    "strategy profit": "The strategy profit is reported.",
+    "strategy profits, three words": "The strategy we ship profits nobody.",
+}
+FRAMING_PASSING = {
+    "trade-off": "There is a trade-off between recall and review load.",
+    "trade-offs": "The trade-offs are listed below.",
+    "tradeoff": "That is a tradeoff.",
+    "tradeoffs": "Those are tradeoffs.",
+    "wash_trading": "The `wash_trading` anomaly type.",
+    "wash trading": "Wash trading is an injected anomaly.",
+    "pump_and_dump": "The `pump_and_dump` anomaly type.",
+    "pump and dump": "A pump and dump is an injected anomaly.",
+    "layering": "Layering is an injected anomaly.",
+    "price": "The `price` column holds the raw series.",
+    "price column": "The price column is raw input.",
+    "returns a tuple": "The head returns a tuple.",
+    "the function returns": "Check what the function returns.",
+    "forecast head": "The forecast head scores early warning.",
+    "forecast labels": "The forecast labels come from the event record.",
+    "forecast horizon": "The forecast horizon is in windows.",
+    "cost": "The cost table is fixed.",
+    "expected cost": "The loss is the expected cost.",
+    "review budget": "The review budget caps alerts.",
+    "risk": "The risk score is a probability.",
+    "triage": "The policy is a triage rule.",
+}
 
 
 def config_comments(path: Path) -> str:
@@ -2818,6 +2969,39 @@ class TestFramingGuard:
         # the allowlist is not dead weight: the docs name the anomaly types
         text = (ROOT / "docs" / "ARCHITECTURE.md").read_text()
         assert "wash_trading" in text and "pump_and_dump" in text
+
+    @staticmethod
+    def _in_markdown(sentence: str, tmp_path: Path) -> list[str]:
+        doc = tmp_path / "doc.md"
+        doc.write_text(f"# Title\n\n{sentence}\n")
+        return framing_hits(doc.read_text())
+
+    @staticmethod
+    def _in_yaml_comment(sentence: str, tmp_path: Path) -> list[str]:
+        cfg = tmp_path / "cfg.yaml"
+        cfg.write_text(f"key: 1  # {sentence}\n")
+        return framing_hits(config_comments(cfg))
+
+    @pytest.mark.parametrize("term", list(FRAMING_REJECTED))
+    def test_the_fixed_vocabulary_is_reported_in_docs_and_config_comments(
+        self, term, tmp_path
+    ):
+        sentence = FRAMING_REJECTED[term]
+        assert self._in_markdown(sentence, tmp_path) != [], term
+        assert self._in_yaml_comment(sentence, tmp_path) != [], term
+
+    @pytest.mark.parametrize("term", list(FRAMING_REJECTED))
+    def test_the_fixed_vocabulary_is_reported_in_any_letter_case(self, term):
+        assert framing_hits(FRAMING_REJECTED[term].upper()) != [], term
+
+    @pytest.mark.parametrize("form", list(FRAMING_PASSING))
+    def test_the_allowed_forms_are_not_reported(self, form, tmp_path):
+        sentence = FRAMING_PASSING[form]
+        assert self._in_markdown(sentence, tmp_path) == [], form
+        assert self._in_yaml_comment(sentence, tmp_path) == [], form
+
+    def test_a_phrase_wrapped_across_lines_is_still_reported(self):
+        assert framing_hits("Go\nlong when risk is low.") != []
 
 
 class TestBaseConfigRunDirectories:
