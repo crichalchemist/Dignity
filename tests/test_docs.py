@@ -1769,3 +1769,88 @@ class TestQuickstart:
         stray = stray_writes(before, _write_snapshot())
         assert compared and compared[0][0] is before, "the comparison did not run"
         assert stray == [], "the quickstart wrote into the repo"
+
+
+class TestArchitectureDoc:
+    """docs/ARCHITECTURE.md describes the code as it is, section by section."""
+
+    ARCH = ROOT / "docs" / "ARCHITECTURE.md"
+
+    def test_data_contract_table_lists_every_generator_column(self):
+        from core.config import SyntheticConfig
+        from data.source.synthetic import SyntheticGenerator
+
+        frame = SyntheticGenerator(SyntheticConfig(n_blocks=2, block_len=20)).generate()
+        columns = list(frame.columns)
+        assert len(columns) == 10, columns
+        text = self.ARCH.read_text()
+        for col in columns:
+            assert f"| `{col}` |" in text, col
+
+    def test_doc_names_every_implemented_anomaly_type(self):
+        from data.source.anomalies import ANOMALY_TYPES
+
+        text = self.ARCH.read_text()
+        assert all(f"`{t}`" in text for t in ANOMALY_TYPES)
+
+    def test_doc_makes_no_trading_or_agent_claim(self):
+        # Regression guard: green before the rewrite. Word-bounded so that
+        # "support" and UnsupportedCheckpointError stay writable; the REMOVED
+        # list already covers the forecasting phrases.
+        text = self.ARCH.read_text().lower()
+        assert re.search(r"\b(ppo|a3c)\b", text) is None
+        assert "trading agent" not in text
+
+    def test_architecture_doc_has_no_pre_v1_names(self):
+        # Regression guard: green before the rewrite. Every name here was in
+        # the old ARCHITECTURE.md or SIGNALS.md and is defined nowhere in the code.
+        text = self.ARCH.read_text()
+        for stale in (
+            "compute_volatility",
+            "compute_entropy",
+            "compute_momentum",
+            "compute_all_signals",
+            "detect_regime",
+            "load_crypto_prices",
+            "create_dignity_model",
+            "create_dataloaders",
+            "load_and_process",
+            "test_size",
+        ):
+            assert stale not in text, stale
+
+    def test_every_signal_the_pipeline_derives_is_documented(self):
+        from data.pipeline import SIGNAL_SOURCES
+
+        text = self.ARCH.read_text()
+        for name in SIGNAL_SOURCES:
+            assert f"`{name}`" in text, name
+
+    def test_sections_that_later_docs_link_to_exist_in_pipeline_order(self):
+        text = self.ARCH.read_text()
+        headings = re.findall(r"^## (.+)$", text, re.MULTILINE)
+        wanted = [
+            "Data contract",
+            "Pipeline",
+            "Signals",
+            "Backbone",
+            "Heads",
+            "Training and evaluation",
+            "Checkpoint and export",
+        ]
+        assert [h for h in headings if h in wanted] == wanted
+
+    def test_every_triage_action_is_named(self):
+        from models.head.policy import ACTIONS
+
+        text = self.ARCH.read_text()
+        for action in ACTIONS:
+            assert f"`{action}`" in text, action
+
+    def test_scope_limits_of_v1_are_stated(self):
+        # data.source is synthetic-only and nothing releases at inference time;
+        # a doc that implied otherwise would describe paths that do not exist.
+        text = self.ARCH.read_text()
+        assert "`data.source`" in text and "`CryptoSource`" in text
+        assert "DGNTY-27" in text
+        assert "DGNTY-35" in text
