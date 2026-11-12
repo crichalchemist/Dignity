@@ -31,7 +31,7 @@ conda-forge's current pytorch (2.6) also satisfies it if you prefer a conda env.
 
 **On the macOS boot** the Linux `.venv/` is unusable. Use the existing conda env instead,
 prefixing every command with `conda run -n dignity-model` (torch 2.10, Python 3.11). Verified
-2026-11-08: 100 passed, 1 skipped (CUDA), and `pre-commit run --all-files` is clean.
+2026-11-11: 1347 passed, 1 skipped (CUDA), and `pre-commit run --all-files` is clean.
 `requirements-dev.txt` must also be installed into that env:
 `conda run -n dignity-model pip install -r requirements-dev.txt`.
 
@@ -45,8 +45,8 @@ format that export no longer supports (DGNTY-3, DGNTY-35). No shipped config wri
 ## Commands
 
 ```bash
-# Tests (1345 collected: test_core 65, test_data 118, test_models 23, test_privacy 42,
-# test_operator 4, test_docs 766, test_train 78, test_checkpoint 3, test_export 9,
+# Tests (1348 collected: test_core 65, test_data 118, test_models 23, test_privacy 42,
+# test_operator 4, test_docs 769, test_train 78, test_checkpoint 3, test_export 9,
 # test_calibration 3, test_labels 7, test_gates 11, test_ci 4, test_eval 75,
 # test_colab_eval 13, test_scripts 19, test_release 105 — one skips without CUDA)
 # every test is limited to 300 s (pytest.ini; pytest-timeout), except the README quickstart
