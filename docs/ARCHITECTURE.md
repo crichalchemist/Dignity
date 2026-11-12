@@ -140,15 +140,25 @@ All labels come from the per-row event record, never from a single row
 `config/synthetic_{easy,medium,hard}.yaml` are the three difficulty presets.
 `eval/gates.py::data_gate` generates each preset once per seed on the ten tuning
 seeds, splits it by block and scores two baselines on the val and the test split:
-`window_logistic` on windows and `block_tree` on blocks. Every number it judges is a
-mean over seeds. It passes when all five checks hold: each baseline's hard-preset
+`window_logistic` on windows and `block_tree` on blocks. Each number it judges is a
+mean over seeds, except the onset count, which every seed must meet on its own. It
+passes when all six checks hold: each baseline's hard-preset
 AUROC, the mean of the val and test scores over all seeds, lies in
 `eval.gates.AUROC_BAND`; the same means fall strictly from easy to medium to hard for
 both baselines, and the build-up strength falls with them; the `window_logistic`
 recall at 10% false-positive rate, per onset-position bucket and averaged over seeds
 on the val split, spreads by at most `eval.gates.FLATNESS_MAX_SPREAD` (the test
-split's spread is reported, never judged); and every seed's hard-preset test split
-holds at least `eval.gates.MIN_TEST_ONSETS` scorable onsets (`test_onsets`). The gate
+split's spread is reported, never judged); every seed's hard-preset test split
+holds at least `eval.gates.MIN_TEST_ONSETS` scorable onsets (`test_onsets`); and the
+forecast headroom check holds. That check fits the logistic probe
+`eval/baselines.py::window_logistic_forecast` on the hard preset's windows, built from
+the same `data.features` the model reads, and asks whether it forecasts anomalies
+better than the stronger of today's risk score and the oracle (the true risk label)
+at horizons 1, 5 and 10, whether it beats a random score at warning of onsets, whether
+its lift over chance is real among windows no earlier anomaly has touched, and whether
+the share of build-up windows that end in an onset sits inside a band; with no
+build-ups in the data (strength 0) it fails by
+design (`tests/test_gates.py::TestForecastHeadroom`). The gate
 is a tuning tool: `eval/gates.py::main` refuses a seed outside the tuning seeds, a
 repeated seed and a strength off `eval.gates.STRENGTH_GRID` with exit code 2, before
 it generates anything (`tests/test_gates.py::TestDataGate`). The values the shipped

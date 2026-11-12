@@ -3,18 +3,25 @@
 import argparse
 import hashlib
 import json
+import math
 from collections.abc import Sequence
-from dataclasses import asdict, replace
+from dataclasses import asdict, fields, replace
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
-from sklearn.metrics import roc_auc_score
+from sklearn.metrics import average_precision_score, roc_auc_score
 
 from core.config import TUNING_SEEDS, DignityConfig
-from data.pipeline import TransactionPipeline, WindowSet
+from data.pipeline import SplitData, TransactionPipeline, WindowSet
 from data.source.synthetic import RAW_COLUMNS, SyntheticGenerator
-from eval.baselines import block_tree, window_logistic
+from eval.baselines import (
+    block_tree,
+    risk_score_forecast,
+    window_logistic,
+    window_logistic_forecast,
+)
+from eval.metrics import detection_gain, threshold_at_fpr, warned_onsets
 
 _ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_PRESETS = {
@@ -70,6 +77,236 @@ def preset_config_hash(config_paths: dict[str, str]) -> str:
     return hashlib.sha256(json.dumps(blocks, sort_keys=True).encode()).hexdigest()[:16]
 
 
+def _stratum(ws: WindowSet) -> WindowSet:
+    """Windows the forecast mask keeps and no anomaly has touched (`y_risk == 0`)."""
+    keep = ws.forecast_mask & (ws.y_risk == 0)
+    return WindowSet(**{f.name: getattr(ws, f.name)[keep] for f in fields(ws)})
+
+
+def _build_up_position(build_up_block: np.ndarray) -> np.ndarray:
+    """Position fraction `(i + 1) / n` inside each maximal run of equal nonzero values."""
+    out = np.zeros(len(build_up_block))
+    start = 0
+    while start < len(build_up_block):
+        end = start
+        while (
+            end < len(build_up_block) and build_up_block[end] == build_up_block[start]
+        ):
+            end += 1
+        if build_up_block[start] != 0:
+            out[start:end] = np.arange(1, end - start + 1) / (end - start)
+        start = end
+    return out
+
+
+def _last_row_build_up(
+    df: pd.DataFrame, ws: WindowSet
+) -> tuple[np.ndarray, np.ndarray]:
+    """`build_up` and the shape-only score at each window's last row."""
+    build_up = df["build_up"].to_numpy()
+    shape = np.zeros(len(df))
+    for rows in df.groupby("block_id", sort=False).indices.values():
+        shape[rows] = _build_up_position(build_up[rows])
+    row_in_block = df.groupby("block_id", sort=False).cumcount().to_numpy()
+    where = pd.Series(
+        np.arange(len(df)),
+        index=pd.MultiIndex.from_arrays([df["block_id"].to_numpy(), row_in_block]),
+    )
+    rows = where.reindex(
+        pd.MultiIndex.from_arrays([ws.block_index, ws.end_row])
+    ).to_numpy()
+    return build_up[rows], shape[rows]
+
+
+def _masked_ap(y: np.ndarray, score: np.ndarray, mask: np.ndarray) -> float | None:
+    """Average precision on the masked rows; `None` when `y` holds one class there."""
+    if len(np.unique(y[mask])) < 2:
+        return None
+    return float(average_precision_score(y[mask], score[mask]))
+
+
+def _stratified_lift(d: SplitData, column: int) -> float | None:
+    """AP over prevalence at one horizon, probe fitted and scored inside the stratum."""
+    train, test = _stratum(d.train), _stratum(d.test)
+    y = test.y_forecast[:, column]
+    one_class = len(np.unique(y)) < 2 or any(
+        len(np.unique(train.y_forecast[:, h])) < 2
+        for h in range(train.y_forecast.shape[1])
+    )
+    if one_class:
+        return None
+    score = window_logistic_forecast(train, test)[:, column]
+    return float(average_precision_score(y, score) / y.mean())
+
+
+def forecast_headroom(df: pd.DataFrame, d: SplitData, horizon: int, seed: int) -> dict:
+    """Does a window probe forecast anomalies that today's risk score cannot?
+
+    All on the test split. `arrays` holds the onset-level data the pooled
+    bootstrap needs; `data_gate` pops it before anything is written.
+    """
+    val, test = d.val, d.test
+    cols = {f"h{h}": h - 1 for h in HEADROOM_HORIZONS}
+    probe = window_logistic_forecast(d.train, test)
+    scores = {
+        "probe": probe,
+        "stand_in": risk_score_forecast(window_logistic(d.train, test), horizon),
+        "oracle": risk_score_forecast(test.y_risk.astype(float), horizon),
+    }
+    pr_auc = {
+        name: {
+            key: _masked_ap(test.y_forecast[:, c], score[:, c], test.forecast_mask)
+            for key, c in cols.items()
+        }
+        for name, score in scores.items()
+    }
+
+    last_build_up, shape_test = _last_row_build_up(df, test)
+    _, shape_val = _last_row_build_up(df, val)
+    in_build_up = test.forecast_mask & (last_build_up != 0)
+    ppv = float(test.y_forecast[in_build_up, 9].mean()) if in_build_up.any() else None
+
+    def threshold(val_score: np.ndarray) -> float:
+        return threshold_at_fpr(
+            val.y_forecast[val.forecast_mask, 9], val_score[val.forecast_mask]
+        )
+
+    def warned(score: np.ndarray, val_score: np.ndarray):
+        return warned_onsets(
+            score,
+            threshold(val_score),
+            test.y_forecast,
+            test.forecast_mask,
+            test.block_index,
+            test.end_row,
+        )
+
+    rng = np.random.default_rng(seed)
+    random_val = rng.random(len(val.y_risk))
+    random_test = rng.random(len(test.y_risk))
+    probe_val = window_logistic_forecast(d.train, val)[:, 9]
+    onset_block, warned_probe = warned(probe[:, 9], probe_val)
+    _, warned_random = warned(random_test, random_val)
+    _, warned_shape = warned(shape_test, shape_val)
+    onsets = test.y_forecast[:, 0] == 1
+    return {
+        "lift_h10": _stratified_lift(d, 9),
+        "pr_auc": pr_auc,
+        "ppv_build_up": ppv,
+        "n_onsets": int(len(onset_block)),
+        "n_ramped": int((last_build_up[onsets] == 1).sum()),
+        "n_shape_warned": int(warned_shape.sum()),
+        "arrays": {
+            "onset_block": onset_block,
+            "warned_probe": warned_probe,
+            "warned_random": warned_random,
+            "block_index": test.block_index,
+        },
+    }
+
+
+def _mean_or_none(values: list) -> float | None:
+    return None if any(v is None for v in values) else float(np.mean(values))
+
+
+def headroom_summary(per_seed: list[dict], seeds: Sequence[int]) -> dict:
+    """Aggregate `forecast_headroom` results over seeds into the JSON block.
+
+    `check` is the conjunction of the headroom conditions; any missing component
+    (`None`) fails it. Onsets are pooled across seeds with blocks keyed by seed.
+    """
+    n = len(per_seed)
+    lifts = [r["lift_h10"] for r in per_seed]
+    lift_mean = _mean_or_none(lifts)
+    lift_ok = (
+        lift_mean is not None
+        and HEADROOM_LIFT_RANGE[0] <= lift_mean <= HEADROOM_LIFT_RANGE[1]
+        and min(lifts) >= HEADROOM_MIN_SEED_LIFT
+    )
+
+    probe: dict[str, list] = {}
+    rival: dict[str, list] = {}
+    for key in (f"h{h}" for h in HEADROOM_HORIZONS):
+        probe[key] = [r["pr_auc"]["probe"][key] for r in per_seed]
+        rival[key] = [
+            None
+            if r["pr_auc"]["stand_in"][key] is None
+            or r["pr_auc"]["oracle"][key] is None
+            else max(r["pr_auc"]["stand_in"][key], r["pr_auc"]["oracle"][key])
+            for r in per_seed
+        ]
+    ratio: dict[str, float | None] = {}
+    for key in ("h5", "h10"):
+        top, bar = _mean_or_none(probe[key]), _mean_or_none(rival[key])
+        ratio[key] = None if top is None or bar is None else top / bar
+    ratio_ok = all(v is not None and v >= HEADROOM_PR_AUC_RATIO for v in ratio.values())
+
+    needed = math.ceil(HEADROOM_MIN_WIN_SHARE * n)
+    wins = {
+        key: sum(
+            p is not None and r is not None and p > r
+            for p, r in zip(probe[key], rival[key], strict=True)
+        )
+        for key in probe
+    }
+    wins_ok = all(count >= needed for count in wins.values())
+
+    arrays = [r["arrays"] for r in per_seed]
+    keyed = [seed * 1_000_000 for seed in seeds]
+    gain = detection_gain(
+        [np.concatenate([a["warned_probe"] for a in arrays])],
+        np.concatenate([a["warned_random"] for a in arrays]),
+        np.concatenate(
+            [a["onset_block"] + k for a, k in zip(arrays, keyed, strict=True)]
+        ),
+        np.concatenate(
+            [a["block_index"] + k for a, k in zip(arrays, keyed, strict=True)]
+        ),
+        n_boot=GATE_N_BOOT,
+        seed=0,
+    )
+    gain_ok = gain["gain"]["ci_low"] is not None and gain["gain"]["ci_low"] > 0
+
+    ppv_mean = _mean_or_none([r["ppv_build_up"] for r in per_seed])
+    ppv_ok = (
+        ppv_mean is not None
+        and HEADROOM_PPV_RANGE[0] <= ppv_mean <= HEADROOM_PPV_RANGE[1]
+    )
+
+    onsets = sum(r["n_onsets"] for r in per_seed)
+    return {
+        "per_seed": [{k: v for k, v in r.items() if k != "arrays"} for r in per_seed],
+        "stratified_lift_h10_mean": lift_mean,
+        "pr_auc_ratio": ratio,
+        "wins": wins,
+        "detection_gain": gain,
+        "ppv_build_up_mean": ppv_mean,
+        "ramped_onset_share": sum(r["n_ramped"] for r in per_seed) / onsets
+        if onsets
+        else None,
+        "shape_only_detection_rate": sum(r["n_shape_warned"] for r in per_seed) / onsets
+        if onsets
+        else None,
+        "check": bool(lift_ok and ratio_ok and wins_ok and gain_ok and ppv_ok),
+    }
+
+
+def _feature_split(df: pd.DataFrame, cfg: DignityConfig, seed: int) -> SplitData:
+    """The frame's windows over the preset's own `data.features`, as the model sees.
+
+    Same blocks per split as the `RAW_COLUMNS` windows of the band baselines.
+    """
+    return TransactionPipeline(
+        seq_len=cfg.data.seq_len, features=list(cfg.data.features)
+    ).process_blocks(
+        df,
+        cfg.data.split,
+        cfg.model.horizon,
+        cfg.data.label_overlap,
+        np.random.default_rng(seed),
+    )
+
+
 def _score_preset(
     path: str | Path,
     seed: int,
@@ -79,8 +316,9 @@ def _score_preset(
     """One preset on one seed: val and test AUROCs of both baselines.
 
     The hard preset also returns the onset recalls per split and the number of
-    scorable test onsets. `n_blocks` and `strength` replace the preset's values in
-    memory. `headroom` is filled by the forecast-headroom check.
+    scorable test onsets and the forecast headroom (`forecast_headroom`, on windows
+    of the preset's own features; `None` for the other presets). `n_blocks` and
+    `strength` replace the preset's values in memory.
     """
     cfg = DignityConfig.from_yaml(path)
     changes: dict = {"seed": seed}
@@ -120,7 +358,11 @@ def _score_preset(
         if is_hard
         else None,
         "test_onsets": int((d.test.y_forecast[:, 0] == 1).sum()) if is_hard else None,
-        "headroom": None,
+        "headroom": forecast_headroom(
+            df, _feature_split(df, cfg, seed), cfg.model.horizon, seed
+        )
+        if is_hard
+        else None,
     }
 
 
@@ -200,6 +442,7 @@ def data_gate(
         onset_recall[split] = [float(x) for x in by_bucket]
         onset_recall[f"{split}_spread"] = float(by_bucket.max() - by_bucket.min())
     test_onsets = [r["test_onsets"] for r in hard]
+    headroom = headroom_summary([r["headroom"] for r in hard], seeds)
 
     lo, hi = AUROC_BAND
 
@@ -215,6 +458,7 @@ def data_gate(
         "monotone": all(monotone(name) for name in BASELINES)
         and strengths["easy"] > strengths["medium"] > strengths["hard"],
         "positional_flatness": onset_recall["val_spread"] <= FLATNESS_MAX_SPREAD,
+        "forecast_headroom": headroom.pop("check"),
         "test_onsets": all(n >= MIN_TEST_ONSETS for n in test_onsets),
     }
     checks = {name: bool(ok) for name, ok in checks.items()}
@@ -227,6 +471,7 @@ def data_gate(
         "auroc": auroc,
         "onset_recall": onset_recall,
         "test_onsets": test_onsets,
+        "headroom": headroom,
         "checks": checks,
         "passed": all(checks.values()),
     }
