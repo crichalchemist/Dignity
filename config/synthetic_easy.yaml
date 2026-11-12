@@ -29,7 +29,7 @@ data:
     - volume_volatility
     - regime
   synthetic:
-    n_blocks: 3000              # 45/15/40 split leaves over 200 test onsets
+    n_blocks: 3600              # 45/15/40 split: every tuning seed keeps over 200 test onsets
     block_len: 160              # >= seq_len + horizon + 1
     contamination: 0.5
     anomalies_per_block: [1, 1]

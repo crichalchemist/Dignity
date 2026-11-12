@@ -633,9 +633,11 @@ class TestShippedEvaluationSize:
             split = DignityConfig.from_yaml(path).data.split
             assert split == (0.45, 0.15, 0.40), path.name
 
-    def test_presets_hold_3000_blocks_so_the_test_split_has_over_200_onsets(self):
+    def test_presets_hold_3600_blocks_so_every_tuning_seed_has_over_200_test_onsets(
+        self,
+    ):
         for name in ("easy", "medium", "hard"):
             path = ROOT / "config" / f"synthetic_{name}.yaml"
             syn = DignityConfig.from_yaml(path).data.synthetic
-            assert (syn.n_blocks, syn.block_len) == (3000, 160), name
+            assert (syn.n_blocks, syn.block_len) == (3600, 160), name
             assert (syn.decoy_rate, syn.precursor_len_range) == (0.2, (10, 30)), name

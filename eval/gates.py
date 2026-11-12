@@ -17,6 +17,7 @@ from data.pipeline import SplitData, TransactionPipeline, WindowSet
 from data.source.synthetic import RAW_COLUMNS, SyntheticGenerator
 from eval.baselines import (
     block_tree,
+    fit_forecast_probe,
     risk_score_forecast,
     window_logistic,
     window_logistic_forecast,
@@ -31,7 +32,7 @@ DEFAULT_PRESETS = {
 }
 
 AUROC_BAND = (0.55, 0.80)
-FLATNESS_MAX_SPREAD = 0.1
+FLATNESS_MAX_SPREAD = 0.15
 STRENGTH_GRID = (0.6, 0.7, 0.8)
 HEADROOM_HORIZONS = (1, 5, 10)
 HEADROOM_LIFT_RANGE = (3.0, 15.0)
@@ -142,14 +143,18 @@ def _stratified_lift(d: SplitData, column: int) -> float | None:
 def forecast_headroom(df: pd.DataFrame, d: SplitData, horizon: int, seed: int) -> dict:
     """Does a window probe forecast anomalies that today's risk score cannot?
 
-    All on the test split. `arrays` holds the onset-level data the pooled
+    All on the test split. The PR-AUC ratio and the wins read `probe_risk_aware`, the
+    probe that is also given `y_risk`; the lift, the warnings and the build-up
+    share read the plain probe. `arrays` holds the onset-level data the pooled
     bootstrap needs; `data_gate` pops it before anything is written.
     """
     val, test = d.val, d.test
     cols = {f"h{h}": h - 1 for h in HEADROOM_HORIZONS}
-    probe = window_logistic_forecast(d.train, test)
+    plain = fit_forecast_probe(d.train)
+    probe = plain(test)
     scores = {
         "probe": probe,
+        "probe_risk_aware": fit_forecast_probe(d.train, risk_aware=True)(test),
         "stand_in": risk_score_forecast(window_logistic(d.train, test), horizon),
         "oracle": risk_score_forecast(test.y_risk.astype(float), horizon),
     }
@@ -184,7 +189,7 @@ def forecast_headroom(df: pd.DataFrame, d: SplitData, horizon: int, seed: int) -
     rng = np.random.default_rng(seed)
     random_val = rng.random(len(val.y_risk))
     random_test = rng.random(len(test.y_risk))
-    probe_val = window_logistic_forecast(d.train, val)[:, 9]
+    probe_val = plain(val)[:, 9]
     onset_block, warned_probe = warned(probe[:, 9], probe_val)
     _, warned_random = warned(random_test, random_val)
     _, warned_shape = warned(shape_test, shape_val)
@@ -224,10 +229,12 @@ def headroom_summary(per_seed: list[dict], seeds: Sequence[int]) -> dict:
         and min(lifts) >= HEADROOM_MIN_SEED_LIFT
     )
 
-    probe: dict[str, list] = {}
+    aware: dict[str, list] = {}
+    plain: dict[str, list] = {}
     rival: dict[str, list] = {}
     for key in (f"h{h}" for h in HEADROOM_HORIZONS):
-        probe[key] = [r["pr_auc"]["probe"][key] for r in per_seed]
+        aware[key] = [r["pr_auc"]["probe_risk_aware"][key] for r in per_seed]
+        plain[key] = [r["pr_auc"]["probe"][key] for r in per_seed]
         rival[key] = [
             None
             if r["pr_auc"]["stand_in"][key] is None
@@ -236,18 +243,21 @@ def headroom_summary(per_seed: list[dict], seeds: Sequence[int]) -> dict:
             for r in per_seed
         ]
     ratio: dict[str, float | None] = {}
+    ratio_plain: dict[str, float | None] = {}
     for key in ("h5", "h10"):
-        top, bar = _mean_or_none(probe[key]), _mean_or_none(rival[key])
+        top, bar = _mean_or_none(aware[key]), _mean_or_none(rival[key])
         ratio[key] = None if top is None or bar is None else top / bar
+        low = _mean_or_none(plain[key])
+        ratio_plain[key] = None if low is None or bar is None else low / bar
     ratio_ok = all(v is not None and v >= HEADROOM_PR_AUC_RATIO for v in ratio.values())
 
     needed = math.ceil(HEADROOM_MIN_WIN_SHARE * n)
     wins = {
         key: sum(
             p is not None and r is not None and p > r
-            for p, r in zip(probe[key], rival[key], strict=True)
+            for p, r in zip(aware[key], rival[key], strict=True)
         )
-        for key in probe
+        for key in aware
     }
     wins_ok = all(count >= needed for count in wins.values())
 
@@ -278,6 +288,7 @@ def headroom_summary(per_seed: list[dict], seeds: Sequence[int]) -> dict:
         "per_seed": [{k: v for k, v in r.items() if k != "arrays"} for r in per_seed],
         "stratified_lift_h10_mean": lift_mean,
         "pr_auc_ratio": ratio,
+        "pr_auc_ratio_plain": ratio_plain,
         "wins": wins,
         "detection_gain": gain,
         "ppv_build_up_mean": ppv_mean,

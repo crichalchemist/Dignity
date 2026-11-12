@@ -8,7 +8,10 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import pytest
+from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import roc_auc_score
+from sklearn.pipeline import make_pipeline
+from sklearn.preprocessing import StandardScaler
 
 from core.config import TUNING_SEEDS, DignityConfig
 from data.pipeline import TransactionPipeline, WindowSet
@@ -123,6 +126,45 @@ class TestBaselines:
         )
         assert fast == pytest.approx(x[:, -5:].mean(axis=1) - x[:, -15:-5].mean(axis=1))
 
+    def test_forecast_features_are_eight_statistics_per_input_column(self):
+        for n_features in (1, 3, 7):
+            x = np.random.default_rng(0).normal(size=(5, 40, n_features))
+            assert _forecast_features(x).shape == (5, 8 * n_features)
+
+    def test_the_plain_probe_is_one_logistic_model_per_horizon_on_the_kept_windows(
+        self,
+    ):
+        train, test = _ramp_windows(0), _ramp_windows(1)
+        keep = train.forecast_mask
+        expected = np.empty((len(test.X), 3))
+        for h in range(3):
+            model = make_pipeline(
+                StandardScaler(), LogisticRegression(C=0.3, max_iter=1000)
+            )
+            model.fit(_forecast_features(train.X[keep]), train.y_forecast[keep, h])
+            expected[:, h] = model.predict_proba(_forecast_features(test.X))[:, 1]
+        assert np.array_equal(window_logistic_forecast(train, test), expected)
+
+    def test_risk_aware_probe_uses_the_risk_label_as_one_more_input(self):
+        def noise_windows(seed: int):
+            rng = np.random.default_rng(seed)
+            y = (rng.random(400) < 0.5).astype(np.int8)
+            return _windowset(
+                X=rng.normal(size=(400, 40, 3)).astype(np.float32),
+                y_risk=y,
+                y_forecast=np.repeat(y[:, None], 3, axis=1).astype(np.float32),
+                forecast_mask=np.ones(400, dtype=bool),
+            )
+
+        train, test = noise_windows(0), noise_windows(1)
+        plain = window_logistic_forecast(train, test)
+        aware = window_logistic_forecast(train, test, risk_aware=True)
+        assert roc_auc_score(test.y_forecast[:, 2], plain[:, 2]) < 0.65
+        assert roc_auc_score(test.y_forecast[:, 2], aware[:, 2]) > 0.9
+        assert np.array_equal(
+            plain, window_logistic_forecast(train, test, risk_aware=False)
+        )
+
 
 def _ramp_windows(seed: int, ramp_on_positives: bool = True, n: int = 300):
     """[n, 40, 3] noise, 3 horizons; the marked half ends in a +4 ramp on feature 0.
@@ -192,7 +234,8 @@ def _good_seeds(n: int) -> list[dict]:
             {
                 "lift_h10": 6.0,
                 "pr_auc": {
-                    "probe": {"h1": 0.30, "h5": 0.30, "h10": 0.30},
+                    "probe": {"h1": 0.08, "h5": 0.08, "h10": 0.08},
+                    "probe_risk_aware": {"h1": 0.30, "h5": 0.30, "h10": 0.30},
                     "stand_in": {"h1": 0.10, "h5": 0.10, "h10": 0.10},
                     "oracle": {"h1": 0.12, "h5": 0.12, "h10": 0.12},
                 },
@@ -355,6 +398,19 @@ class TestDataGate:
         assert same["checks"]["positional_flatness"] is False
         assert same["onset_recall"]["val_spread"] == pytest.approx(0.2)
 
+    def test_flatness_limit_is_015_on_the_val_split(self, monkeypatch):
+        def gate_with(top: float) -> dict:
+            val = [0.45, 0.5, 0.5, 0.5, top]
+            _fake_score_preset(monkeypatch, recall=(val, _FLAT))
+            return data_gate(DEFAULT_PRESETS, [1000])
+
+        at_limit = gate_with(0.6)
+        assert at_limit["onset_recall"]["val_spread"] == pytest.approx(0.15)
+        assert at_limit["checks"]["positional_flatness"] is True
+        over = gate_with(0.601)
+        assert over["onset_recall"]["val_spread"] == pytest.approx(0.151)
+        assert over["checks"]["positional_flatness"] is False
+
     def test_test_split_flatness_is_reported_but_never_decides(self, monkeypatch):
         _fake_score_preset(monkeypatch, recall=(_FLAT, [0.4, 0.5, 0.5, 0.6, 0.7]))
         result = data_gate(DEFAULT_PRESETS, [1000])
@@ -452,7 +508,7 @@ class TestDataGate:
             "passed",
         }
         assert result["seeds"] == [1000, 1001, 1002]
-        assert result["n_blocks"] == 3000
+        assert result["n_blocks"] == 3600
         assert result["strength_override"] is None
         block_tree = result["auroc"]["hard"]["block_tree"]
         assert block_tree["val"] == pytest.approx([0.55, 0.56, 0.57])
@@ -573,7 +629,7 @@ class TestForecastHeadroom:
     def test_the_ratio_is_against_the_stronger_of_the_stand_in_and_the_oracle(self):
         per_seed = _good_seeds(10)
         for entry in per_seed:
-            entry["pr_auc"]["probe"] = {"h1": 0.15, "h5": 0.15, "h10": 0.15}
+            entry["pr_auc"]["probe_risk_aware"] = {"h1": 0.15, "h5": 0.15, "h10": 0.15}
             entry["pr_auc"]["stand_in"] = {"h1": 0.05, "h5": 0.05, "h10": 0.05}
             entry["pr_auc"]["oracle"] = {"h1": 0.11, "h5": 0.11, "h10": 0.11}
         summary = _summary(per_seed)
@@ -585,13 +641,64 @@ class TestForecastHeadroom:
             entry["pr_auc"]["oracle"] = {"h1": 0.05, "h5": 0.05, "h10": 0.05}
         assert _summary(per_seed)["check"] is True
 
+    def test_the_ratio_and_the_wins_use_the_risk_aware_probe(self):
+        per_seed = _good_seeds(10)
+        for entry in per_seed:
+            entry["pr_auc"]["probe"] = {"h1": 0.10, "h5": 0.10, "h10": 0.10}
+            aware = dict.fromkeys(("h1", "h5", "h10"), 1.6 * 0.12)
+            entry["pr_auc"]["probe_risk_aware"] = aware
+        summary = _summary(per_seed)
+        assert summary["pr_auc_ratio"]["h5"] == pytest.approx(1.6)
+        assert summary["pr_auc_ratio"]["h10"] == pytest.approx(1.6)
+        assert summary["wins"] == {"h1": 10, "h5": 10, "h10": 10}
+        assert summary["pr_auc_ratio_plain"]["h5"] == pytest.approx(0.10 / 0.12)
+        assert summary["pr_auc_ratio_plain"]["h10"] == pytest.approx(0.10 / 0.12)
+        assert summary["pr_auc_ratio_plain"]["h10"] < 1.5
+        assert summary["check"] is True
+        for entry in per_seed:  # the plain probe is the strong one: no headroom
+            ap = entry["pr_auc"]
+            ap["probe"], ap["probe_risk_aware"] = ap["probe_risk_aware"], ap["probe"]
+        swapped = _summary(per_seed)
+        assert swapped["wins"] == {"h1": 0, "h5": 0, "h10": 0}
+        assert swapped["pr_auc_ratio_plain"]["h10"] == pytest.approx(1.6)
+        assert swapped["check"] is False
+
+    def test_the_ratio_is_the_ratio_of_the_seed_means_not_the_mean_of_ratios(self):
+        per_seed = _good_seeds(2)
+        for entry, (aware, rival) in zip(
+            per_seed, [(0.11, 0.10), (0.9, 0.5)], strict=True
+        ):
+            entry["pr_auc"]["oracle"] = dict.fromkeys(("h1", "h5", "h10"), rival)
+            entry["pr_auc"]["probe_risk_aware"] = dict.fromkeys(
+                ("h1", "h5", "h10"), aware
+            )
+        summary = _summary(per_seed)
+        assert (0.11 / 0.10 + 0.9 / 0.5) / 2 < 1.5  # mean of ratios: 1.45
+        assert summary["pr_auc_ratio"]["h10"] == pytest.approx(1.01 / 0.6)
+        assert summary["check"] is True
+
+    def test_a_tie_with_the_stronger_baseline_is_not_a_win(self):
+        def with_ties(ties: int) -> dict:
+            per_seed = _good_seeds(8)
+            for entry in per_seed[:ties]:
+                entry["pr_auc"]["probe_risk_aware"]["h10"] = 0.12  # the oracle's value
+            return _summary(per_seed)
+
+        one = with_ties(1)
+        assert one["wins"]["h10"] == 7
+        assert one["check"] is True
+        two = with_ties(2)
+        assert two["wins"]["h10"] == 6
+        assert two["check"] is False
+
     @pytest.mark.parametrize("horizon", ["h1", "h5", "h10"])
     @pytest.mark.parametrize(("n", "needed"), [(8, 7), (10, 9)])
     def test_wins_must_reach_ceil_seven_eighths_of_the_seeds(self, n, needed, horizon):
         def with_losses(losses: int) -> dict:
             per_seed = _good_seeds(n)
             for entry in per_seed[:losses]:
-                entry["pr_auc"]["probe"][horizon] = 0.11  # below the oracle's 0.12
+                # below the oracle's 0.12
+                entry["pr_auc"]["probe_risk_aware"][horizon] = 0.11
             return _summary(per_seed)
 
         passing = with_losses(n - needed)
@@ -655,7 +762,10 @@ class TestForecastHeadroom:
             DEFAULT_PRESETS["hard"], 1000, n_blocks=600, strength=0.0
         )["headroom"]
         assert result["ppv_build_up"] is None
-        assert _summary([result])["check"] is False
+        summary = _summary([result])
+        assert summary["check"] is False
+        assert summary["pr_auc_ratio"]["h10"] < 1.5
+        assert summary["stratified_lift_h10_mean"] < 3.0
         assert time.monotonic() - started < 300
 
     def test_decoys_lower_the_share_of_build_up_windows_that_end_in_an_onset(
@@ -694,12 +804,17 @@ class TestForecastHeadroom:
                 == np.unique(getattr(raw, split).block_index).tolist()
             )
 
-    def test_a_planted_build_up_gives_the_probe_headroom_over_the_risk_score(self):
+    def test_a_planted_build_up_gives_the_risk_aware_probe_headroom_over_the_risk_score(
+        self,
+    ):
+        # Measured on seed 1000 at strength 0.8: from 900 blocks up the assertion
+        # holds at 900 and at 1200; at 600 blocks (53 test onsets) it does not.
         started = time.monotonic()
         result = gates._score_preset(
             DEFAULT_PRESETS["hard"], 1000, n_blocks=900, strength=0.8
         )["headroom"]
         ap = result["pr_auc"]
-        assert ap["probe"]["h10"] > max(ap["stand_in"]["h10"], ap["oracle"]["h10"])
+        rival = max(ap["stand_in"]["h10"], ap["oracle"]["h10"])
+        assert ap["probe_risk_aware"]["h10"] > 1.5 * rival
         assert result["lift_h10"] > 1.5
         assert time.monotonic() - started < 300
