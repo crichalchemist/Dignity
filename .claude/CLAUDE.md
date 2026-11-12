@@ -45,10 +45,10 @@ format that export no longer supports (DGNTY-3, DGNTY-35). No shipped config wri
 ## Commands
 
 ```bash
-# Tests (1342 collected: test_core 65, test_data 118, test_models 23, test_privacy 42,
+# Tests (1345 collected: test_core 65, test_data 118, test_models 23, test_privacy 42,
 # test_operator 4, test_docs 766, test_train 78, test_checkpoint 3, test_export 9,
 # test_calibration 3, test_labels 7, test_gates 11, test_ci 4, test_eval 75,
-# test_colab_eval 13, test_scripts 19, test_release 102 — one skips without CUDA)
+# test_colab_eval 13, test_scripts 19, test_release 105 — one skips without CUDA)
 # every test is limited to 300 s (pytest.ini; pytest-timeout), except the README quickstart
 # test, which carries its own 900 s limit (three subprocesses, each capped at 300 s)
 pytest tests/ -v
@@ -72,7 +72,7 @@ python scripts/verify_release.py   # v1.0 success criteria 2-5 on results/v1.0 (
 python -m eval.run --smoke --seed tuning  # CI-sized, all three tasks (--tasks defaults to risk,forecast,policy); outputs under runs/smoke/
 python -m eval.run --smoke --seed tuning --tasks risk,forecast  # --tasks forecast also fits risk (baseline) but writes only forecast.json; unknown names exit 2
 python -m eval.run --smoke --seed tuning --privacy-sweep  # also trains risk per epsilon on the config/train_risk.yaml privacy template (own models, so works without --tasks risk); writes privacy.json + privacy_curve.png
-python -m eval.run --config config/synthetic_hard.yaml --seed tuning --tasks risk,forecast,policy --privacy-sweep  # full run on a Colab GPU; see docs/RESULTS.md
+python -m eval.run --config config/synthetic_hard.yaml --seed eval --tasks risk,forecast,policy --privacy-sweep  # full run on a Colab GPU; see docs/RESULTS.md
 
 # Train
 # checkpoints land in ./runs/<task>/ (gitignored); never in checkpoints/

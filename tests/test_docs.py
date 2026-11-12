@@ -5784,7 +5784,9 @@ class TestHowItWasBuilt:
 
     DEFERRED = {7, 13, 14, 15, 35, 41, 42, 43, 44, 45}  # deferred to v1.1
     OPEN = {8, 27, 40}  # the maintainer's call, partly addressed
-    CLOSES_WITH_EVALUATION = {10}  # DGNTY-12 is fixed: its guides are gone or rewritten
+    CLOSES_WITH_EVALUATION = (
+        set()
+    )  # DGNTY-12 is fixed: its guides are gone or rewritten
 
     @pytest.fixture(scope="class")
     def text(self):
@@ -7284,11 +7286,6 @@ PRIVACY_QUALIFIERS = (
         "These intervals are replicate 0's: one noise draw and one training seed",
     ),
     (
-        "the grid values where utility returns are not offered as private settings",
-        "PRIVACY.md",
-        "they are not offered as a private setting",
-    ),
-    (
         "k-anonymity holds for the train release only",
         "PRIVACY.md",
         "k-anonymity holds for the train release only",
@@ -7382,7 +7379,7 @@ CURVE_SEED_WORDS = {
 # distinguishable from chance, grid values above chance). When the results have
 # another shape the test lists every sentence that depends on it; set this constant
 # to the new shape last, once they are rewritten.
-CURVE_SHAPE_WRITTEN_FOR = ((0.1, 0.3, 1.0, 3.0, 10.0), (30.0, 100.0))
+CURVE_SHAPE_WRITTEN_FOR = ((1.0,), (0.1, 0.3, 3.0, 10.0, 30.0, 100.0))
 # The sentences of the curve section name the outcome of the curve, so every one of
 # them is true only for the shape it was written for.
 CURVE_HEADLINE_STEM = "the shipped allocation leaves the risk model's PR-AUC"
@@ -7559,31 +7556,84 @@ def _auroc_up_to_10_not_all_at_chance(payload: dict, shape) -> bool:
     return bool(aurocs) and not all(a["ci_low"] <= 0.5 <= a["ci_high"] for a in aurocs)
 
 
+def _only_1_at_chance_and_below_the_reference(payload: dict, shape) -> bool:
+    # "at ε = 1 the interval contains the prevalence and lies wholly below the
+    # reference's": ε = 1 is at chance, and its interval is below the reference's
+    reference = payload["metrics"]["reference"]["risk"]["pr_auc"]["ci_low"]
+    point = _curve_points(payload)[1.0]["risk"]["pr_auc"]
+    return 1.0 in shape[0] and point["ci_high"] < reference
+
+
+def _every_other_value_above_chance(payload: dict, shape) -> bool:
+    # "at every other grid value": ε = 1 is the only value at chance
+    return shape[0] == (1.0,) and len(shape[1]) == len(_curve_points(payload)) - 1
+
+
+def _1_below_0_1(payload: dict, shape) -> bool:
+    return _value(payload, 1.0) < _value(payload, 0.1)
+
+
+def _100_above_30_above_every_smaller(payload: dict, shape) -> bool:
+    smaller = [_value(payload, e) for e in _curve_points(payload) if e < 30]
+    return _value(payload, 100) > _value(payload, 30) > max(smaller)
+
+
+def _100_below_the_reference_but_overlapping(payload: dict, shape) -> bool:
+    reference = payload["metrics"]["reference"]["risk"]["pr_auc"]
+    point = _curve_points(payload)[100.0]["risk"]["pr_auc"]
+    return (
+        100.0 in shape[1]
+        and point["value"] < reference["value"]
+        and point["ci_high"] >= reference["ci_low"]
+    )
+
+
+def _1_replicates_1_and_2_above_replicate_0(payload: dict, shape) -> bool:
+    first, second, third = _replicates(payload, 1.0)
+    return 1.0 in shape[0] and second > first and third > first
+
+
+def _30_lowest_replicate_below_the_highest_at_10(payload: dict, shape) -> bool:
+    return 30.0 in shape[1] and min(_replicates(payload, 30)) < max(
+        _replicates(payload, 10)
+    )
+
+
+def _30_and_100_above_every_smaller_value(payload: dict, shape) -> bool:
+    smaller = [_value(payload, e) for e in _curve_points(payload) if e < 30]
+    return min(_value(payload, 30), _value(payload, 100)) > max(smaller)
+
+
 # (doc, phrase, predicate over (payload, shape)). The phrase is found in the doc and
 # the predicate says what the sentence claims. docs/RESULTS.md and the DGNTY-8 row
 # copy the PRIVACY.md sentences whole (their own tests), so they follow these.
 CURVE_CLAIMS = (
     (
         "docs/PRIVACY.md",
-        "up to ε = 10 each point's 95% confidence interval for PR-AUC contains "
-        "the prevalence (the chance line) and lies wholly below the non-private "
-        "reference's interval",
-        _below_the_reference_up_to(10),
+        "at ε = 1 the 95% confidence interval for PR-AUC contains the prevalence "
+        "(the chance line) and lies wholly below the non-private reference's interval",
+        _only_1_at_chance_and_below_the_reference,
     ),
     (
         "docs/PRIVACY.md",
-        "At ε = 30 and ε = 100 the interval lies wholly above the prevalence",
-        _30_and_100_above_chance,
+        "At every other grid value the interval lies wholly above the prevalence",
+        _every_other_value_above_chance,
     ),
     (
         "docs/PRIVACY.md",
-        "PR-AUC is higher at 100 than at 30",
-        _higher_at_100_than_at_30,
+        "the point at ε = 1 is below the one at ε = 0.1",
+        _1_below_0_1,
     ),
     (
         "docs/PRIVACY.md",
-        "both point estimates are below the reference's",
-        _30_and_100_below_the_reference,
+        "PR-AUC is higher at 100 than at 30, and at 30 than at any smaller ε",
+        _100_above_30_above_every_smaller,
+    ),
+    (
+        "docs/PRIVACY.md",
+        "At ε = 100 the point estimate is below the reference's, but the two "
+        "intervals overlap",
+        _100_below_the_reference_but_overlapping,
     ),
     (
         "docs/PRIVACY.md",
@@ -7592,8 +7642,13 @@ CURVE_CLAIMS = (
     ),
     (
         "docs/PRIVACY.md",
-        "At ε = 30 the replicates spread more widely than the gap",
-        _30_spreads_wider_than_the_gap,
+        "At ε = 1 replicates 1 and 2 both score higher than replicate 0",
+        _1_replicates_1_and_2_above_replicate_0,
+    ),
+    (
+        "docs/PRIVACY.md",
+        "At ε = 30 the lowest replicate is below the highest replicate at ε = 10",
+        _30_lowest_replicate_below_the_highest_at_10,
     ),
     (
         "docs/PRIVACY.md",
@@ -7608,18 +7663,8 @@ CURVE_CLAIMS = (
     ),
     (
         "docs/PRIVACY.md",
-        "The two largest grid values are there to show where utility returns",
-        _two_largest_above,
-    ),
-    (
-        "docs/PRIVACY.md",
-        "The rise at the two largest ε therefore comes from less noise on `volume`",
-        _two_largest_above,
-    ),
-    (
-        "README.md",
-        "the grid values where utility returns are not offered as private settings",
-        _utility_returns_at_some_values_only,
+        "The rise at ε = 30 and ε = 100 therefore comes from less noise on `volume`",
+        _30_and_100_above_every_smaller_value,
     ),
     (
         "docs/HOW-IT-WAS-BUILT.md",
