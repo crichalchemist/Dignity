@@ -425,6 +425,14 @@ class TestCriterion4MeanWithinTolerance:
         assert c4.passed is passed
         assert f"mean cost {h:.4f} vs threshold baseline 0.2700" in c4.detail
 
+    @pytest.mark.parametrize("h", [0.28350000000000003, 0.2835000000000001])
+    def test_a_mean_on_or_one_float_step_over_the_limit_passes(self, tmp_path, h):
+        # the float limit is 1.05 * 0.27 = 0.28350000000000003: the first value
+        # lands exactly on it, the second is one step above and only the
+        # relative tie-break lets it pass
+        c4 = _run(tmp_path, 2, policy=_policy(h=[h] * 3, t=[0.27] * 3))
+        assert c4.passed
+
     def test_the_means_are_compared_not_the_per_seed_ratios(self, tmp_path):
         # per-seed ratios are 4.0, 0.67 and 0.5 (mean 1.72) but the means are
         # 0.2 against 0.25
