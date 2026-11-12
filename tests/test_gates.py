@@ -10,7 +10,12 @@ from sklearn.metrics import roc_auc_score
 from data.pipeline import WindowSet
 from data.source.synthetic import RAW_COLUMNS
 from eval import gates
-from eval.baselines import block_tree, majority, window_logistic
+from eval.baselines import (
+    block_tree,
+    majority,
+    window_logistic,
+    window_logistic_forecast,
+)
 from eval.gates import DEFAULT_PRESETS, TUNING_SEED, data_gate, onset_bucket_recall
 
 
@@ -71,6 +76,59 @@ class TestBaselines:
         y_flipped, _ = block_tree(df_tr, df_te)
         assert y_flipped.tolist() == y_clean.tolist()
         assert y_flipped.tolist() == [b % 2 for b in range(20)]
+
+    def test_forecast_probe_scores_every_test_window_at_every_horizon(self):
+        train, test = _ramp_windows(0), _ramp_windows(1)
+        scores = window_logistic_forecast(train, test)
+        assert scores.shape == (len(test.y_risk), 3)
+        assert ((scores > 0) & (scores < 1)).all()
+
+    def test_forecast_probe_ranks_windows_that_end_in_a_ramp_above_flat_ones(self):
+        train, test = _ramp_windows(0), _ramp_windows(1)
+        scores = window_logistic_forecast(train, test)
+        assert roc_auc_score(test.y_forecast[:, 2], scores[:, 2]) > 0.9
+
+    def test_forecast_probe_learns_only_from_windows_the_forecast_mask_keeps(self):
+        clean, poisoned = _ramp_windows(0), _ramp_windows(2, ramp_on_positives=False)
+        train = _windowset(
+            X=np.concatenate([clean.X, poisoned.X]),
+            y_risk=np.concatenate([clean.y_risk, poisoned.y_risk]),
+            y_forecast=np.concatenate([clean.y_forecast, poisoned.y_forecast]),
+            forecast_mask=np.concatenate(
+                [clean.forecast_mask, np.zeros(len(poisoned.y_risk), dtype=bool)]
+            ),
+        )
+        test = _ramp_windows(1)
+        scores = window_logistic_forecast(train, test)
+        assert roc_auc_score(test.y_forecast[:, 2], scores[:, 2]) > 0.9
+
+    def test_forecast_probe_refuses_a_horizon_with_one_class_in_its_masked_windows(
+        self,
+    ):
+        train = _ramp_windows(0)
+        train.y_forecast[:, 1] = 0.0
+        with pytest.raises(ValueError, match="horizon 1: one class"):
+            window_logistic_forecast(train, _ramp_windows(1))
+
+
+def _ramp_windows(seed: int, ramp_on_positives: bool = True, n: int = 300):
+    """[n, 40, 3] noise, 3 horizons; the marked half ends in a +4 ramp on feature 0.
+
+    The ramp spans the last 10 rows, so max, min and std alone do not give it away.
+    `ramp_on_positives=False` puts the ramp on the negatives (the inverted relation).
+    """
+    rng = np.random.default_rng(seed)
+    y = np.tile(np.array([0, 1], dtype=np.int8), n // 2)
+    X = rng.normal(size=(n, 40, 3)).astype(np.float32)
+    ramped = (y == 1) if ramp_on_positives else (y == 0)
+    X[ramped, -10:, 0] += 4 * np.linspace(0, 1, 10, dtype=np.float32)
+    y_forecast = np.repeat(y[:, None], 3, axis=1).astype(np.float32)
+    return _windowset(
+        X=X,
+        y_risk=y,
+        y_forecast=y_forecast,
+        forecast_mask=np.ones(n, dtype=bool),
+    )
 
 
 def _positional_windows(extra_onset_zero: int = 0):

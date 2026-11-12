@@ -78,6 +78,38 @@ def window_logistic(train: WindowSet, test: WindowSet) -> np.ndarray:
     return model.predict_proba(_window_features(test.X))[:, 1]
 
 
+def _forecast_features(X: np.ndarray) -> np.ndarray:
+    """`_window_features` plus last-10, last-30 and whole-window means and slopes."""
+    m10 = X[:, -10:].mean(axis=1)
+    m30 = X[:, -30:].mean(axis=1)
+    mall = X.mean(axis=1)
+    return np.concatenate(
+        [_window_features(X), m10, m30, mall, m10 - m30, m30 - mall], axis=1
+    )
+
+
+def window_logistic_forecast(train: WindowSet, test: WindowSet) -> np.ndarray:
+    """One logistic probe per horizon on the windows `forecast_mask` keeps.
+
+    Returns probabilities [N_test, H]; every test row is scored.
+    """
+    keep = train.forecast_mask
+    x_train = _forecast_features(train.X[keep])
+    x_test = _forecast_features(test.X)
+    horizons = train.y_forecast.shape[1]
+    scores = np.empty((len(test.X), horizons), dtype=np.float64)
+    for h in range(horizons):
+        y = train.y_forecast[keep, h]
+        if len(np.unique(y)) < 2:
+            raise ValueError(f"horizon {h}: one class in the masked train windows")
+        model = make_pipeline(
+            StandardScaler(), LogisticRegression(C=0.3, max_iter=1000)
+        )
+        model.fit(x_train, y)
+        scores[:, h] = model.predict_proba(x_test)[:, 1]
+    return scores
+
+
 def _block_features(df: pd.DataFrame) -> pd.DataFrame:
     return (
         df.groupby("block_id", sort=True)[list(RAW_COLUMNS)]
