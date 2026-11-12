@@ -262,6 +262,152 @@ def warned_onsets(
     return np.array(blocks, dtype=np.int64), np.array(warned, dtype=bool)
 
 
+_NO_GAIN = {"value": None, "ci_low": None, "ci_high": None}
+
+
+def _block_counts(block_index: np.ndarray, n_boot: int, seed: int):
+    """Per replicate, how many times each unique block is drawn (bootstrap_ci's draws)."""
+    n = len(np.unique(block_index))
+    rng = np.random.default_rng(seed)
+    for _ in range(n_boot):
+        yield np.bincount(rng.integers(0, n, size=n), minlength=n)
+
+
+def _gain_entry(value: float, stats: list[float]) -> dict:
+    """``{"value", "ci_low", "ci_high"}`` with ``None`` bounds when undefined."""
+    arr = np.array(stats, dtype=np.float64)
+    if len(arr) == 0 or np.isnan(arr).all():
+        return {"value": value, "ci_low": None, "ci_high": None}
+    return {
+        "value": value,
+        "ci_low": float(np.nanpercentile(arr, 2.5)),
+        "ci_high": float(np.nanpercentile(arr, 97.5)),
+    }
+
+
+def paired_forecast_gain(
+    y: np.ndarray,
+    mask: np.ndarray,
+    block_index: np.ndarray,
+    model_scores: list[np.ndarray],
+    base_scores: list[np.ndarray],
+    n_boot: int,
+    seed: int,
+) -> list[dict]:
+    """Per horizon, the seed-matched average-precision gain over the baseline.
+
+    ``model_scores[k]`` and ``base_scores[k]`` are ``[N, H]`` scores of training
+    seed ``k``. The value is ``mean_k(AP(model_k) - AP(base_k))`` on ``mask`` rows.
+    Model and baseline share every block draw, so the interval is a paired one;
+    blocks are drawn over all rows, before the mask (``_block_counts``), exactly
+    as ``bootstrap_ci`` would. A horizon with one class among masked rows reports
+    ``None``; the bounds are ``None`` when ``n_boot == 0`` or undefined.
+    """
+    y = np.asarray(y)
+    mask = np.asarray(mask, dtype=bool)
+    block_index = np.asarray(block_index)
+    ub = np.unique(block_index)
+    pos = np.searchsorted(ub, block_index[mask])
+    ym = y[mask]
+    model = [np.asarray(s)[mask] for s in model_scores]
+    base = [np.asarray(s)[mask] for s in base_scores]
+
+    def gain(yh, ms, bs, w=None):
+        if len(np.unique(yh)) < 2:
+            return float("nan")
+        return float(
+            np.mean(
+                [
+                    average_precision_score(yh, m, sample_weight=w)
+                    - average_precision_score(yh, b, sample_weight=w)
+                    for m, b in zip(ms, bs, strict=True)
+                ]
+            )
+        )
+
+    out = []
+    valid = [len(np.unique(ym[:, h])) == 2 for h in range(y.shape[1])]
+    values = [
+        gain(ym[:, h], [m[:, h] for m in model], [b[:, h] for b in base])
+        if valid[h]
+        else None
+        for h in range(y.shape[1])
+    ]
+    replicates: list[list[float]] = [[] for _ in values]
+    if n_boot > 0:
+        for counts in _block_counts(block_index, n_boot, seed):
+            w = counts[pos]
+            keep = w > 0
+            for h, ok in enumerate(valid):
+                if ok:
+                    replicates[h].append(
+                        gain(
+                            ym[keep, h],
+                            [m[keep, h] for m in model],
+                            [b[keep, h] for b in base],
+                            w[keep],
+                        )
+                    )
+    for h, value in enumerate(values):
+        out.append(
+            dict(_NO_GAIN) if value is None else _gain_entry(value, replicates[h])
+        )
+    return out
+
+
+def detection_gain(
+    warned: list[np.ndarray],
+    random_warned: np.ndarray,
+    onset_block: np.ndarray,
+    block_index: np.ndarray,
+    n_boot: int,
+    seed: int,
+) -> dict:
+    """Share of onsets the model warns about, against a random score's share.
+
+    ``warned[k]`` is ``warned_onsets``' flag per onset for training seed ``k``;
+    ``random_warned`` is the same for a random score at the same false-alarm
+    budget. The gain is the mean over seeds of the model's warned share minus the
+    random share, with a block bootstrap that weights each onset by how often its
+    block is drawn (the draws are the same as ``paired_forecast_gain``'s).
+    """
+    onset_block = np.asarray(onset_block)
+    n_onsets = len(onset_block)
+    if n_onsets == 0:
+        return {
+            "n_onsets": 0,
+            "detection_rate": None,
+            "detection_rate_by_seed": [None] * len(warned),
+            "random_rate": None,
+            "gain": dict(_NO_GAIN),
+        }
+    block_index = np.asarray(block_index)
+    ub = np.unique(block_index)
+    pos = np.searchsorted(ub, onset_block)
+    flags = [np.asarray(w, dtype=float) for w in warned]
+    rand = np.asarray(random_warned, dtype=float)
+    by_seed = [float(f.mean()) for f in flags]
+    rate, random_rate = float(np.mean(by_seed)), float(rand.mean())
+    stats: list[float] = []
+    if n_boot > 0:
+        for counts in _block_counts(block_index, n_boot, seed):
+            w = counts[pos]
+            total = w.sum()
+            if total == 0:
+                continue
+            stats.append(
+                float(np.mean([(w * f).sum() / total for f in flags]))
+                - float((w * rand).sum() / total)
+            )
+    return {
+        "n_onsets": n_onsets,
+        "detection_rate": rate,
+        "detection_rate_by_seed": by_seed,
+        "random_rate": random_rate,
+        "gain": _gain_entry(rate - random_rate, stats),
+    }
+
+
 def policy_metrics(
     actions: np.ndarray,
     y: np.ndarray,

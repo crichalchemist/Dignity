@@ -291,7 +291,7 @@ one block overlap (`eval/metrics.py::bootstrap_ci`, DGNTY-21).
 | Task | Metrics (`eval/metrics.py`) | Baselines (`eval/baselines.py`) |
 | --- | --- | --- |
 | Risk | `risk_metrics`: AUROC, PR-AUC, recall at 1% false-positive rate, Brier score, prevalence, recall per anomaly type at the test split's 1%-false-positive point; also scored per block, a block's score being its highest window score | `majority`; `window_logistic` on the raw columns' window statistics; `block_tree` on per-block statistics, trained on the noisy `block_label` |
-| Forecast | `forecast_metrics`: PR-AUC per horizon on unmasked windows; `lead_times`: rows between the first alarm and each onset | `risk_score_forecast`: today's risk score used at every horizon |
+| Forecast | `forecast_metrics`: PR-AUC per horizon on unmasked windows; `lead_times`: rows between the first alarm and each onset; `paired_forecast_gain`: seed-matched average-precision gain over the risk-score baseline, block bootstrap; `detection_gain`: share of onsets warned versus a random score, block bootstrap | `risk_score_forecast`: today's risk score used at every horizon |
 | Policy | `policy_metrics`: expected cost, review rate, block rate, anomaly recall, false-block rate | `threshold_policy`: two thresholds on the risk score, tuned on validation under the review budget |
 
 `metrics.model_gate` in the risk file (`eval/metrics.py::model_gate`) holds a window gate,

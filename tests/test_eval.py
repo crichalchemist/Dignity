@@ -12,9 +12,11 @@ from core.config import DignityConfig, PolicyConfig, PrivacyConfig
 from eval.baselines import block_tree, risk_score_forecast, threshold_policy
 from eval.metrics import (
     bootstrap_ci,
+    detection_gain,
     forecast_metrics,
     lead_times,
     model_gate,
+    paired_forecast_gain,
     policy_metrics,
     risk_metrics,
     threshold_at_fpr,
@@ -414,6 +416,113 @@ class TestForecastCriterionStats:
         alarm, y, mask, block, end_row = TestLeadTimes()._fixture()
         onset_block, warned = warned_onsets(alarm, 0.5, y, mask, block, end_row)
         assert onset_block.tolist() == [0, 1] and warned.tolist() == [True, False]
+
+    def _gain_data(self, n_blocks=150):
+        rng = np.random.default_rng(1)
+        block = np.repeat(np.arange(n_blocks), 4)
+        y = (rng.random((len(block), 2)) < 0.3).astype(np.float32)
+        return rng, block, y, np.ones(len(block), bool)
+
+    def test_paired_gain_excludes_zero_only_for_a_real_gap(self):
+        rng, block, y, mask = self._gain_data()
+        noise = lambda: [rng.random(y.shape) for _ in range(2)]  # noqa: E731
+        real = [y * 0.6 + n for n in noise()]
+        gap = paired_forecast_gain(y, mask, block, real, noise(), 200, 7)
+        assert all(g["ci_low"] > 0 for g in gap)
+        none = paired_forecast_gain(y, mask, block, noise(), noise(), 200, 7)
+        assert all(g["ci_low"] < 0 < g["ci_high"] for g in none)
+
+    def test_a_worse_model_has_a_negative_gain_not_a_flipped_sign(self):
+        rng, block, y, mask = self._gain_data()
+        good = [y * 0.6 + rng.random(y.shape) for _ in range(2)]
+        bad = [rng.random(y.shape) for _ in range(2)]
+        worse = paired_forecast_gain(y, mask, block, bad, good, 200, 7)
+        assert all(g["value"] < 0 and g["ci_high"] < 0 for g in worse)
+
+    def test_a_model_that_is_its_own_baseline_has_a_zero_width_interval(self):
+        # one block draw serves model and baseline; independent draws would widen it
+        rng, block, y, mask = self._gain_data()
+        s = [rng.random(y.shape) for _ in range(2)]
+        for g in paired_forecast_gain(y, mask, block, s, s, 50, 7):
+            assert g == {"value": 0.0, "ci_low": 0.0, "ci_high": 0.0}
+
+    def test_gain_without_bootstrap_has_a_value_and_no_interval(self):
+        rng, block, y, mask = self._gain_data()
+        good = [y * 0.6 + rng.random(y.shape)]
+        out = paired_forecast_gain(y, mask, block, good, [rng.random(y.shape)], 0, 7)
+        assert all(g["value"] > 0 for g in out)
+        assert all(g["ci_low"] is None and g["ci_high"] is None for g in out)
+
+    def test_a_horizon_with_one_class_has_no_gain_not_a_fake_zero(self):
+        rng, block, y, mask = self._gain_data()
+        y[:, 1] = 0
+        s = [rng.random(y.shape)]
+        out = paired_forecast_gain(y, mask, block, s, s, 20, 7)
+        assert out[1] == {"value": None, "ci_low": None, "ci_high": None}
+
+    def test_a_random_score_warns_about_the_share_its_false_alarms_allow(self):
+        # H = 10; per block windows end at rows 0..14, onset at row 15; the 10 windows
+        # ending in rows 5..14 can warn, so P(warn) = 1 - 0.99**10 = 0.096
+        n, H = 3000, 10
+        block, end_row = np.repeat(np.arange(n), 15), np.tile(np.arange(15), n)
+        y = np.zeros((n * 15, H), np.float32)
+        y[end_row == 14, 0] = 1
+        alarm = np.random.default_rng(3).random(n * 15)
+        thr = float(np.quantile(alarm, 0.99))
+        _, warned = warned_onsets(alarm, thr, y, np.ones(len(y), bool), block, end_row)
+        assert 0.07 < warned.mean() < 0.12
+
+    def test_detection_gain_is_clear_when_the_model_warns_and_empty_without_onsets(
+        self,
+    ):
+        ob = np.arange(100)
+        out = detection_gain(
+            [np.ones(100, bool)] * 2, np.arange(100) % 10 == 0, ob, ob, 200, 7
+        )
+        assert out["detection_rate"] == 1.0 and out["random_rate"] == 0.1
+        assert out["detection_rate_by_seed"] == [1.0, 1.0]
+        assert out["gain"]["value"] == pytest.approx(0.9) and out["gain"]["ci_low"] > 0
+        e = detection_gain([np.zeros(0, bool)], np.zeros(0, bool), ob[:0], ob, 20, 7)
+        assert e["n_onsets"] == 0 and e["detection_rate"] is None
+        assert e["gain"] == {"value": None, "ci_low": None, "ci_high": None}
+
+    def test_detection_gain_is_zero_on_a_tie_and_negative_when_the_model_warns_less(
+        self,
+    ):
+        # the model and the random score warn on the same onsets: gain is exactly 0
+        # in every replicate, and a model that warns less has a negative gain
+        ob = np.arange(100)
+        same = np.arange(100) % 2 == 0
+        tie = detection_gain([same], same, ob, ob, 100, 7)
+        assert tie["gain"] == {"value": 0.0, "ci_low": 0.0, "ci_high": 0.0}
+        less = detection_gain([np.zeros(100, bool)], same, ob, ob, 100, 7)
+        assert less["gain"]["value"] < 0 and less["gain"]["ci_high"] < 0
+
+    def test_both_gains_draw_identical_blocks_when_a_block_has_no_masked_row_or_no_onset(
+        self, monkeypatch
+    ):
+        # block 2 has no masked row, blocks 2-5 have no onset: the unique-block set
+        # must still be all six
+        block, mask = np.repeat(np.arange(6), 4), np.repeat(np.arange(6) != 2, 4)
+        y = (np.random.default_rng(2).random((24, 2)) < 0.5).astype(np.float32)
+        s, seen, real = (
+            [np.random.default_rng(3).random(y.shape)],
+            [],
+            metrics_module._block_counts,
+        )
+
+        def spy(*args):
+            draws = list(real(*args))
+            seen.append(draws)
+            return iter(draws)
+
+        monkeypatch.setattr(metrics_module, "_block_counts", spy)
+        paired_forecast_gain(y, mask, block, s, s, 5, 7)
+        detection_gain(
+            [np.ones(2, bool)], np.ones(2, bool), np.array([0, 1]), block, 5, 7
+        )
+        assert len(seen) == 2 and all(len(d[0]) == 6 for d in seen)
+        assert all((a == b).all() for a, b in zip(*seen, strict=True))
 
 
 def _windows(y, mask, block, end_row):
