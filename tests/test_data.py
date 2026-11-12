@@ -1437,7 +1437,9 @@ class TestPrecursors:
         # is the same on every row of a ramp and equals 4 * strength * severity.
         types = {"wash_trading": 1.0}
         off = _precursor_frame(0.0, type_weights=types)
-        on = _precursor_frame(0.8, type_weights=types)
+        # severity is fixed at 0.5 so the slope pins the severity factor exactly
+        on = _precursor_frame(0.8, type_weights=types, severity_range=(0.5, 0.5))
+        off = _precursor_frame(0.0, type_weights=types, severity_range=(0.5, 0.5))
         ratio = on["volume"].to_numpy() / off["volume"].to_numpy()
         runs = _ramps(on)
         assert runs
@@ -1445,8 +1447,7 @@ class TestPrecursors:
             assert value == 1
             rows = block_id * 160 + np.arange(lo, hi)
             slope = (ratio[rows] - 1.0) * (hi - lo) / (np.arange(hi - lo) + 1)
-            np.testing.assert_allclose(slope, slope[0], rtol=1e-9)
-            assert 4 * 0.8 * 0.3 - 1e-9 <= slope[0] <= 4 * 0.8 + 1e-9
+            np.testing.assert_allclose(slope, 4 * 0.8 * 0.5, rtol=1e-6)
 
     def test_build_up_rows_are_labelled_normal(self):
         frame = _precursor_frame(0.8, decoy=0.2)
@@ -1477,7 +1478,10 @@ class TestPrecursors:
     def test_precursor_length_is_inside_the_configured_range(self):
         runs = _ramps(_precursor_frame(0.8, precursor_len_range=(10, 30)))
         assert runs
-        assert all(10 <= hi - lo <= 30 for _, lo, hi, _ in runs)
+        lengths = [hi - lo for _, lo, hi, _ in runs]
+        # both ends of the range are reachable: neither bound is off by one
+        assert min(lengths) == 10
+        assert max(lengths) == 30
 
     def test_no_build_up_is_shorter_than_the_configured_minimum(self):
         # a true ramp clipped by the block start or the previous anomaly below the
@@ -1492,7 +1496,17 @@ class TestPrecursors:
         )
         runs = _ramps(frame)
         assert runs
-        assert all(12 <= hi - lo <= 20 for _, lo, hi, _ in runs)
+        lengths = [hi - lo for _, lo, hi, _ in runs]
+        assert min(lengths) == 12
+        assert max(lengths) == 20
+        # a ramp may begin on the very row after the previous anomaly ended, and a
+        # ramp of exactly the minimum length that fits there is kept
+        flagged = frame["is_anomalous"].to_numpy()
+        touching = [
+            (b, lo, hi) for b, lo, hi, _ in runs if lo > 0 and flagged[b * 160 + lo - 1]
+        ]
+        assert touching
+        assert any(hi - lo == 12 for _, lo, hi in touching)
 
     def test_strength_above_one_is_refused_at_config_load(self):
         with pytest.raises(ValueError, match="precursor_strength"):
