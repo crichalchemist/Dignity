@@ -276,6 +276,7 @@ forecast alarm threshold and the baseline policy's thresholds all use validation
 | --- | --- |
 | `--config PATH` or `--smoke` | A full run of a config, or the CI-sized `config/smoke.yaml`. Exactly one is required. |
 | `--seed tuning` or `--seed eval` | Which `eval` seed drives the generator. `--smoke` never runs on the evaluation seed. |
+| `--data-seed N` | Needs `--seed tuning`; N is any tuning seed (1000 to 1009) and replaces the generator seed, so a rehearsal can run on a seed other than the config's. The three tasks train under their own run directory `eval_tuning_<N>`; the privacy sweep directories are not seed-qualified, so give each data seed its own `train.checkpoint_dir` when sweeping. |
 | `--tasks risk,forecast,policy` | The default. Unknown names exit 2. Forecast and policy also fit risk, because their baseline is today's risk score and each policy seed warm-starts from the same seed's risk model, but the risk result file is written only when `risk` is in `--tasks`. |
 | `--privacy-sweep` | Also trains risk with this run's config at each `eval.epsilons` value, taking the privacy block and the features of `config/train_risk.yaml`, with its Laplace epsilons rescaled to that total, public bounds and seeded noise (`privacy.deterministic_rng`, not DP-grade). Trains a non-private reference per replicate, then writes the privacy results and the curve (`docs/img/privacy_curve.png` by default). |
 

@@ -400,6 +400,27 @@ class TestCriterion3SeedMatchedGain:
         c3 = _run(tmp_path, 1, forecast={"metrics": {"lead_time": {"median": None}}})
         assert c3.passed and "median lead time n/a" in c3.detail
 
+    def test_a_run_with_no_scored_onset_fails_the_warning_clause_and_is_still_usable(
+        self, tmp_path
+    ):
+        # nothing to warn about is no evidence of warning: FAIL with n/a, never exit 2
+        nothing = {"value": None, "ci_low": None, "ci_high": None}
+        metrics = {
+            "warning": {
+                "n_onsets": 0,
+                "detection_rate": None,
+                "detection_rate_by_seed": [None] * 3,
+                "random_rate": None,
+                "gain": nothing,
+            },
+            "lead_time": {"median": None},
+        }
+        c3 = _run(tmp_path, 1, forecast={"metrics": metrics})
+        assert not c3.passed
+        assert "detection n/a vs random n/a" in c3.detail
+        assert "median lead time n/a" in c3.detail
+        assert main(["--results", str(tmp_path)]) == 1
+
     @pytest.mark.parametrize(
         ("metrics", "needle"),
         [
@@ -448,6 +469,35 @@ class TestCriterion4MeanWithinTolerance:
     def test_a_share_exactly_at_the_collapse_limit_passes(self, tmp_path):
         share = [0.06, 0.08, 10.0 * BUDGET]
         assert _run(tmp_path, 2, policy=_policy(share=share)).passed
+
+    def test_the_default_collapse_limit_is_ten_times_the_budget(self, tmp_path):
+        # verify() and the command line pass no limit: the shipped factor applies
+        share = [0.06, 0.08, 10.0 * BUDGET + 0.001]
+        c4 = _run(tmp_path, 2, policy=_policy(share=share))
+        assert not c4.passed and "limit 0.5000" in c4.detail
+
+    def test_a_seed_whose_baseline_cost_is_zero_has_no_ratio_and_does_not_raise(
+        self, tmp_path
+    ):
+        # the mean is positive, so the run is usable; only that seed's ratio is n/a
+        v = _pv(tmp_path, h=[0.1, 0.2, 0.3], t=[0.0, 0.4, 0.4])
+        assert v.per_seed_ratio == [None, 0.5, pytest.approx(0.75)]
+
+    @pytest.mark.parametrize(
+        ("field", "cost_passed"),
+        [
+            ("rate", True),
+            ("share", True),
+            ("h", False),
+        ],
+    )
+    def test_a_null_per_seed_value_fails_the_criterion_and_cost_is_judged_on_what_exists(
+        self, tmp_path, field, cost_passed
+    ):
+        # contract 3.7: a null value fails; cost_passed stays the mean-cost rule and is
+        # False only when a cost itself is missing
+        v = _pv(tmp_path, **{"h": [0.2] * 3, field: [None, 0.03, 0.03]})
+        assert not v.passed and v.cost_passed is cost_passed
 
     def test_a_seed_over_the_review_budget_fails_even_when_cheaper(self, tmp_path):
         v = _pv(tmp_path, rate=[0.03, 0.04, BUDGET + 0.0001])
@@ -596,6 +646,16 @@ class TestRaisedTraining:
         assert not (
             p.passed or p.cost_passed or p.ratio or p.collapsed or p.over_budget
         )
+
+    @pytest.mark.parametrize(
+        "raised", [{"error": "PolicyCollapseError"}, "PolicyCollapseError", ["x"]]
+    )
+    def test_a_raised_payload_without_its_seed_or_not_a_record_is_unusable(
+        self, tmp_path, raised
+    ):
+        _edit(tmp_path, "policy", lambda d: d.update(metrics={"raised": raised}))
+        with pytest.raises(ResultsError, match="raised"):
+            verify(tmp_path, SEED, EPS)
 
     def test_a_raised_payload_without_its_error_name_is_unusable(self, tmp_path):
         _edit(

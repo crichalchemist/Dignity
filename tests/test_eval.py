@@ -475,6 +475,21 @@ class TestForecastCriterionStats:
         onset_block, warned = warned_onsets(alarm, 0.5, y, mask, block, end_row)
         assert onset_block.tolist() == [0, 1] and warned.tolist() == [True, False]
 
+    def test_the_window_a_full_horizon_before_an_onset_can_still_warn(self):
+        # H = 3, block 0 onset at row 8: windows ending at rows 5-7 may warn, row 4 may not
+        _, y, mask, block, end_row = TestLeadTimes()._fixture()
+        edge, outside = np.zeros(len(y)), np.zeros(len(y))
+        edge[1], outside[0] = 1.0, 1.0  # end rows 5 and 4 of block 0
+        _, warned = warned_onsets(edge, 0.5, y, mask, block, end_row)
+        assert warned.tolist() == [True, False]
+        _, warned = warned_onsets(outside, 0.5, y, mask, block, end_row)
+        assert warned.tolist() == [False, False]
+
+    def test_the_gain_interval_is_the_95_percent_percentile_interval(self):
+        # criterion 3 judges the 2.5th percentile: a 5th would admit more wins
+        entry = metrics_module._gain_entry(0.3, [float(i) for i in range(101)])
+        assert entry == {"value": 0.3, "ci_low": 2.5, "ci_high": 97.5}
+
     def _gain_data(self, n_blocks=150):
         rng = np.random.default_rng(1)
         block = np.repeat(np.arange(n_blocks), 4)
@@ -980,7 +995,7 @@ class TestPolicyPlots:
         drawn, real = [], matplotlib.axes.Axes.scatter
 
         def spy(self, x, y, *args, **kwargs):
-            drawn.append(list(y))
+            drawn.append((list(x), list(y)))
             return real(self, x, y, *args, **kwargs)
 
         monkeypatch.setattr(matplotlib.axes.Axes, "scatter", spy)
@@ -998,7 +1013,11 @@ class TestPolicyPlots:
             "baselines": {"threshold_policy": side},
         }
         plot_policy_cost(result, str(tmp_path / "cost.png"))
-        assert sorted(drawn) == [[0.6, 0.65, 0.7], [0.7, 0.8, 0.9]]
+        # the head's seeds sit over the head's bar (x 0), the baseline's over its own
+        assert drawn == [
+            ([0, 0, 0], [0.7, 0.8, 0.9]),
+            ([1, 1, 1], [0.6, 0.65, 0.7]),
+        ]
 
 
 class TestEvalRunPolicy:
@@ -1106,6 +1125,212 @@ class TestEvalRunPolicy:
         assert loaded == risk_paths
         # the shared run config is never edited by the per-seed warm start
         assert config.train.init_backbone_from is None
+
+
+class TestEvalRunSeedPairing:
+    """Three stubbed training seeds, built to differ, so a seed mix-up shows.
+
+    ``config/smoke.yaml`` trains one seed, where index k and index 0 coincide.
+    """
+
+    K = 3
+    H = 3
+    ONSET = 10
+
+    def _config(self, tmp_path):
+        config = DignityConfig.from_yaml(str(ROOT / "config/smoke.yaml"))
+        config.eval.n_train_seeds = self.K
+        config.eval.n_bootstrap = 5
+        config.model.horizon = self.H
+        config.eval.out_dir = str(tmp_path / "results")
+        config.eval.img_dir = str(tmp_path / "img")
+        return config
+
+    def _windows(self, n_blocks):
+        # windows end at rows 4..15 of every block; the anomaly starts at row 10
+        end_row = np.tile(np.arange(4, 16), n_blocks)
+        y = np.stack(
+            [
+                (end_row < self.ONSET) & (end_row + 1 + h >= self.ONSET)
+                for h in range(self.H)
+            ],
+            axis=1,
+        ).astype(np.float32)
+        return SimpleNamespace(
+            X=np.zeros((len(end_row), 1), np.float32),
+            y_forecast=y,
+            forecast_mask=end_row < self.ONSET,
+            block_index=np.repeat(np.arange(n_blocks), 12),
+            end_row=end_row,
+        )
+
+    def _scores(self, split, positive, negative, quiet_block_from=None):
+        """[N, H] early-warning score: the last column carries the alarm level, the
+        others a quieter copy (same order, so the same PR-AUC)."""
+        y = split.y_forecast[:, -1] == 1
+        last = np.where(y, positive, negative)
+        if quiet_block_from is not None:
+            late = split.block_index >= quiet_block_from
+            last = np.where(y & late, 0.5, last)
+        out = np.repeat((last * 0.5)[:, None], self.H, axis=1)
+        out[:, -1] = last
+        return out.astype(np.float32)
+
+    def test_each_forecast_seed_is_judged_against_its_own_risk_score_and_threshold(
+        self, monkeypatch, tmp_path
+    ):
+        from sklearn.metrics import average_precision_score
+
+        import eval.run as run_module
+
+        config = self._config(tmp_path)
+        val, test = self._windows(8), self._windows(6)
+        data = SimpleNamespace(val=val, test=test)
+        # seed 0 warns about every onset, seed 1 about the first three blocks' at a
+        # lower alarm level, seed 2 about none (it is the wrong way round)
+        scores = {
+            (0, "val"): self._scores(val, 0.9, 0.1),
+            (0, "test"): self._scores(test, 0.9, 0.1),
+            (1, "val"): self._scores(val, 0.7, 0.1),
+            (1, "test"): self._scores(test, 0.7, 0.1, quiet_block_from=3),
+            (2, "val"): self._scores(val, 0.1, 0.9),
+            (2, "test"): self._scores(test, 0.1, 0.9),
+        }
+
+        def risk(split, good_k):
+            # seed 0's risk score is the wrong way round, seeds 1 and 2 are right
+            right = 0.1 + 0.8 * split.y_forecast[:, 2]
+            return (1.0 - right) if good_k == 0 else right
+
+        risk_val = [risk(val, k) for k in range(self.K)]
+        risk_test = [risk(test, k) for k in range(self.K)]
+        runs = [(42 + k, SimpleNamespace(tag=k)) for k in range(self.K)]
+        monkeypatch.setattr(run_module, "_train_seeds", lambda *a, **kw: runs)
+        monkeypatch.setattr(
+            run_module,
+            "_predict",
+            lambda cfg, res, X: {
+                "score": scores[(res.tag, "val" if X is val.X else "test")]
+            },
+        )
+        calls, real_warned = [], run_module.warned_onsets
+
+        def warned_spy(alarm, threshold, *rest):
+            out = real_warned(alarm, threshold, *rest)
+            calls.append((alarm, threshold, out))
+            return out
+
+        detection_args, real_detection = [], run_module.detection_gain
+
+        def detection_spy(*args):
+            detection_args.append(args)
+            return real_detection(*args)
+
+        monkeypatch.setattr(run_module, "warned_onsets", warned_spy)
+        monkeypatch.setattr(run_module, "detection_gain", detection_spy)
+
+        result = run_module.run_forecast(
+            config, "tuning", data, (runs, risk_val, risk_test)
+        )
+        metrics, last = result["metrics"], self.H - 1
+        m, y = val.forecast_mask, val.y_forecast[:, -1]
+
+        # gain: mean over seeds of AP(seed k's forecast) - AP(seed k's risk score)
+        mt, yt = test.forecast_mask, test.y_forecast
+        for h, entry in enumerate(metrics["gain_by_horizon"]):
+            expected = np.mean(
+                [
+                    average_precision_score(yt[mt, h], scores[(k, "test")][mt, h])
+                    - average_precision_score(yt[mt, h], risk_test[k][mt])
+                    for k in range(self.K)
+                ]
+            )
+            assert entry["value"] == pytest.approx(expected)
+
+        # alarm: seed k's last test column against seed k's own val 1% FPR point
+        model_calls = calls[: self.K]
+        for k, (alarm, threshold, _) in enumerate(model_calls):
+            assert np.array_equal(alarm, scores[(k, "test")][:, last])
+            expected = threshold_at_fpr(y[m], scores[(k, "val")][m, last])
+            assert threshold == expected
+        assert model_calls[2][1] == float("inf")
+        warning = metrics["warning"]
+        assert warning["detection_rate_by_seed"] == [1.0, 0.5, 0.0]
+        warned_args = detection_args[0][0]
+        assert [w.tolist() for w in warned_args] == [
+            [True] * 6,
+            [True] * 3 + [False] * 3,
+            [False] * 6,
+        ]
+        assert detection_args[0][2].tolist() == list(range(6))  # onset blocks
+
+        # random reference: the run's data seed draws val then test, threshold on val
+        rng = np.random.default_rng(config.data.synthetic.seed)
+        random_val = rng.random(len(val.y_forecast))
+        random_test = rng.random(len(test.y_forecast))
+        alarm, threshold, _ = calls[self.K]
+        assert np.array_equal(alarm, random_test)
+        assert threshold == threshold_at_fpr(y[m], random_val[m])
+
+    def test_each_policy_seed_is_judged_against_its_own_threshold_policy(
+        self, monkeypatch, tmp_path
+    ):
+        import eval.run as run_module
+
+        config = self._config(tmp_path)
+        n_val, n_test = 80, 100
+        y_val = (np.arange(n_val) % 4 == 0).astype(np.int64)
+        y_test = (np.arange(n_test) % 4 == 0).astype(np.int64)
+        data = SimpleNamespace(
+            val=SimpleNamespace(X=np.zeros((n_val, 1)), y_risk=y_val),
+            test=SimpleNamespace(
+                X=np.zeros((n_test, 1)),
+                y_risk=y_test,
+                block_index=np.arange(n_test) // 5,
+            ),
+        )
+        # model seeds: 0 triages perfectly, 1 sends everything to review, 2 allows all
+        perfect = np.where(y_test[:, None] == 1, [0.0, 0.0, 1.0], [1.0, 0.0, 0.0])
+        probs = [
+            perfect,
+            np.tile([0.0, 1.0, 0.0], (n_test, 1)),
+            np.tile([1.0, 0.0, 0.0], (n_test, 1)),
+        ]
+        # risk seeds: 0 and 2 carry no information, 1 is exact
+        flat = lambda n: np.full(n, 0.5)  # noqa: E731
+        risk_val = [flat(n_val), y_val.astype(float), flat(n_val)]
+        risk_test = [flat(n_test), y_test.astype(float), flat(n_test)]
+        risk_runs = [
+            (42 + k, SimpleNamespace(best_path=f"risk{k}.pt")) for k in range(self.K)
+        ]
+        runs = [(42 + k, SimpleNamespace(tag=k)) for k in range(self.K)]
+        monkeypatch.setattr(run_module, "_train_seeds", lambda *a, **kw: runs)
+        monkeypatch.setattr(
+            run_module, "_predict", lambda cfg, res, X: {"probs": probs[res.tag]}
+        )
+        seen, real = [], run_module.threshold_policy
+
+        def spy(val_scores, val_y, test_scores, *rest):
+            seen.append((val_scores, val_y, test_scores))
+            return real(val_scores, val_y, test_scores, *rest)
+
+        monkeypatch.setattr(run_module, "threshold_policy", spy)
+
+        result = run_module.run_policy(
+            config, "tuning", data, (risk_runs, risk_val, risk_test)
+        )
+        spread = result["metrics"]["seed_spread"]
+
+        for k, (val_scores, val_y, test_scores) in enumerate(seen):
+            assert val_scores is risk_val[k] and test_scores is risk_test[k]
+            assert val_y is data.val.y_risk
+        cost = spread["expected_cost"]["values"]
+        base = spread["baseline_expected_cost"]["values"]
+        assert cost[0] < cost[1] and cost[0] < cost[2]  # the perfect head is cheapest
+        assert base[1] < base[0] and base[1] < base[2]  # so is the exact risk score
+        # the share before the cap: seed 1 asks to review everything, then is capped
+        assert spread["uncapped_review_share"]["values"] == [0.0, 1.0, 0.0]
+        assert spread["review_rate"]["values"] == [0.0, 0.05, 0.0]
 
 
 def _template() -> PrivacyConfig:
