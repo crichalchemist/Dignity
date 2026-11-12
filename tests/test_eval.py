@@ -875,6 +875,26 @@ class TestEvalRunForecast:
         assert len(spread["mean_pr_auc"]["values"]) == 1
         assert len(spread["lead_time_median"]["values"]) == 1
 
+    def test_forecast_results_carry_the_seed_matched_gain_and_the_warning_share(
+        self, run
+    ):
+        r = json.loads((run.root / "runs/smoke/results/forecast.json").read_text())
+        gain = r["metrics"]["gain_by_horizon"]
+        horizon = DignityConfig.from_yaml(str(ROOT / "config/smoke.yaml")).model.horizon
+        assert len(gain) == horizon
+        assert all(set(g) == {"value", "ci_low", "ci_high"} for g in gain)
+        w = r["metrics"]["warning"]
+        assert set(w) == {
+            "n_onsets",
+            "detection_rate",
+            "detection_rate_by_seed",
+            "random_rate",
+            "gain",
+        }
+        assert len(w["detection_rate_by_seed"]) == 1  # one smoke training seed
+        # the same scored onsets as the headline lead time: none counted twice or lost
+        assert w["n_onsets"] == r["metrics"]["lead_time"]["n_onsets"]
+
     def test_risk_is_fitted_not_reported_when_only_forecast_is_asked_for(self, run):
         # the first run asked for forecast only; risk.json belongs to the second
         assert run.forecast_only == ["risk", "forecast"]

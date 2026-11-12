@@ -28,12 +28,15 @@ from eval.baselines import (
 )
 from eval.metrics import (
     FPR_BUDGET,
+    detection_gain,
     forecast_metrics,
     lead_times,
     model_gate,
+    paired_forecast_gain,
     policy_metrics,
     risk_metrics,
     threshold_at_fpr,
+    warned_onsets,
 )
 from eval.plots import (
     plot_forecast_pr_auc,
@@ -311,6 +314,19 @@ def run_risk(
     return _payload(metrics, baselines, run_ctx)
 
 
+def _alarm_threshold(val, last_column: np.ndarray) -> float:
+    """The 1% FPR point of a last-horizon val score column over unmasked windows.
+
+    ``inf`` (never alarms) when the unmasked val windows hold one class.
+    """
+    last = val.y_forecast.shape[1] - 1
+    m = val.forecast_mask
+    y_val, s_val = val.y_forecast[m, last], last_column[m]
+    if len(np.unique(y_val)) < 2:
+        return float("inf")
+    return threshold_at_fpr(y_val, s_val, FPR_BUDGET)
+
+
 def _early_warning(val, test, val_score, test_score, n_boot: int, seed: int) -> dict:
     """Per-horizon PR-AUC and lead time of ``[N, H]`` scores on the test split.
 
@@ -318,11 +334,7 @@ def _early_warning(val, test, val_score, test_score, n_boot: int, seed: int) -> 
     unmasked windows; ``None`` in the result when no finite threshold fits.
     """
     last = test_score.shape[1] - 1
-    m = val.forecast_mask
-    y_val, s_val = val.y_forecast[m, last], val_score[m, last]
-    threshold = float("inf")
-    if len(np.unique(y_val)) == 2:
-        threshold = threshold_at_fpr(y_val, s_val, FPR_BUDGET)
+    threshold = _alarm_threshold(val, val_score[:, last])
     metrics = forecast_metrics(
         test.y_forecast,
         test_score,
@@ -364,11 +376,13 @@ def run_forecast(
     runs = _train_seeds(forecast_config, data, seed_name)
     _, risk_val, risk_test = risk
 
-    model_sides = []
+    model_sides, val_scores, test_scores = [], [], []
     for k, (_, result) in enumerate(runs):
         boot = n_boot if k == 0 else 0  # CIs only for the headline seed
         val_score = _predict(forecast_config, result, data.val.X)["score"]
         test_score = _predict(forecast_config, result, data.test.X)["score"]
+        val_scores.append(val_score)
+        test_scores.append(test_score)
         model_sides.append(
             _early_warning(data.val, data.test, val_score, test_score, boot, seed)
         )
@@ -388,6 +402,44 @@ def run_forecast(
         "mean_pr_auc": _spread([_mean_pr_auc(m) for m in model_sides]),
         "lead_time_median": _spread([m["lead_time"]["median"] for m in model_sides]),
     }
+    # seed-matched gain: training seed k's forecast against seed k's risk score
+    metrics["gain_by_horizon"] = paired_forecast_gain(
+        data.test.y_forecast,
+        data.test.forecast_mask,
+        data.test.block_index,
+        test_scores,
+        [risk_score_forecast(r, horizon) for r in risk_test],
+        n_boot,
+        seed,
+    )
+    # warning share: onsets warned at the 1% false-alarm threshold, against a
+    # random score held to the same threshold rule
+    test, val, last = data.test, data.val, horizon - 1
+    warned = []
+    for val_score, test_score in zip(val_scores, test_scores, strict=True):
+        onset_block, w = warned_onsets(
+            test_score[:, last],
+            _alarm_threshold(val, val_score[:, last]),
+            test.y_forecast,
+            test.forecast_mask,
+            test.block_index,
+            test.end_row,
+        )
+        warned.append(w)
+    rng = np.random.default_rng(seed)
+    random_val = rng.random(len(val.y_forecast))
+    random_test = rng.random(len(test.y_forecast))
+    _, random_warned = warned_onsets(
+        random_test,
+        _alarm_threshold(val, random_val),
+        test.y_forecast,
+        test.forecast_mask,
+        test.block_index,
+        test.end_row,
+    )
+    metrics["warning"] = detection_gain(
+        warned, random_warned, onset_block, test.block_index, n_boot, seed
+    )
     baselines = {"risk_score_forecast": baseline_side}
 
     img_dir = Path(config.eval.img_dir)
@@ -405,6 +457,11 @@ def run_forecast(
     print(
         f"lead time median: model {metrics['lead_time']['median']} "
         f"| risk_score_forecast {base['lead_time']['median']}"
+    )
+    warning = metrics["warning"]
+    print(
+        f"warning: detection {warning['detection_rate']} "
+        f"vs random {warning['random_rate']}"
     )
     print(f"wrote {path}")
     return result

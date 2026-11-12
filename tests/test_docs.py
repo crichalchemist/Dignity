@@ -4115,8 +4115,11 @@ def typed_fact_problems(text: str, results_dir: Path = RESULTS_DIR) -> list[str]
         "eval.run._early_warning and eval.metrics.lead_times",
     )
     early = inspect.getsource(eval_run._early_warning)
-    if "threshold_at_fpr(y_val, s_val, FPR_BUDGET)" not in early or (
-        "val_score[m, last]" not in early
+    alarm = inspect.getsource(eval_run._alarm_threshold)
+    if (
+        "threshold_at_fpr(y_val, s_val, FPR_BUDGET)" not in alarm
+        or "y_val, s_val = val.y_forecast[m, last], last_column[m]" not in alarm
+        or "_alarm_threshold(val, val_score[:, last])" not in early
     ):
         problems.append(
             "eval.run._early_warning no longer sets the alarm threshold at the "
