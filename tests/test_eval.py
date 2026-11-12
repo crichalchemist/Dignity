@@ -319,6 +319,64 @@ class TestEvalRunSmoke:
         assert len(config_hash(a)) == 16
 
 
+def _boom(*args, **kwargs):
+    raise AssertionError("prepare_data reached")
+
+
+class TestEvalRunDataSeed:
+    @pytest.mark.parametrize(
+        "argv",
+        [
+            *(
+                ["--smoke", "--seed", "tuning", "--data-seed", s]
+                for s in ("2026", "2027", "999", "1010")
+            ),
+            [
+                "--config",
+                "config/synthetic_hard.yaml",
+                "--seed",
+                "eval",
+                "--data-seed",
+                "1003",
+            ],
+        ],
+    )
+    def test_a_data_seed_outside_the_tuning_range_or_without_the_tuning_name_is_refused_early(
+        self, argv, monkeypatch, tmp_path
+    ):
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr("eval.run.prepare_data", _boom)
+        with pytest.raises(SystemExit) as exc:
+            main(argv)
+        assert exc.value.code == 2 and not (tmp_path / "runs").exists()
+
+    def test_a_data_seed_reaches_the_generator_and_its_own_run_directory(
+        self, monkeypatch, tmp_path
+    ):
+        monkeypatch.chdir(tmp_path)
+        assert (
+            main(
+                [
+                    "--smoke",
+                    "--seed",
+                    "tuning",
+                    "--data-seed",
+                    "1003",
+                    "--tasks",
+                    "risk",
+                ]
+            )
+            == 0
+        )
+        out = json.loads((tmp_path / "runs/smoke/results/risk.json").read_text())
+        assert out["seed"] == 1003
+        train = tmp_path / "runs/smoke/train"
+        assert (train / "eval_tuning_1003/risk/train_seed_42/best.pt").exists()
+        assert not (
+            train / "eval_tuning"
+        ).exists()  # never shares the default run's dir
+
+
 class TestForecastMetrics:
     def test_active_anomaly_windows_are_excluded_from_forecast_scoring(self):
         y = np.array([[0, 1], [1, 1], [0, 0], [0, 1], [1, 1], [0, 0]], np.float32)
