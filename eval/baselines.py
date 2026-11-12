@@ -79,13 +79,17 @@ def window_logistic(train: WindowSet, test: WindowSet) -> np.ndarray:
 
 
 def _forecast_features(X: np.ndarray) -> np.ndarray:
-    """`_window_features` plus last-10, last-30 and whole-window means and slopes."""
+    """`_window_features`, last-10, last-30 and whole-window means, two slopes.
+
+    The slopes are the mean of the last 10 rows minus the mean of rows -30 to -10,
+    and the mean of the last 5 rows minus the mean of rows -15 to -5.
+    """
     m10 = X[:, -10:].mean(axis=1)
     m30 = X[:, -30:].mean(axis=1)
     mall = X.mean(axis=1)
-    return np.concatenate(
-        [_window_features(X), m10, m30, mall, m10 - m30, m30 - mall], axis=1
-    )
+    slow = m10 - X[:, -30:-10].mean(axis=1)
+    fast = X[:, -5:].mean(axis=1) - X[:, -15:-5].mean(axis=1)
+    return np.concatenate([_window_features(X), m10, m30, mall, slow, fast], axis=1)
 
 
 def window_logistic_forecast(train: WindowSet, test: WindowSet) -> np.ndarray:

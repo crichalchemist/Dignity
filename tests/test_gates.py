@@ -14,6 +14,7 @@ from data.pipeline import WindowSet
 from data.source.synthetic import RAW_COLUMNS
 from eval import gates
 from eval.baselines import (
+    _forecast_features,
     block_tree,
     majority,
     window_logistic,
@@ -112,6 +113,14 @@ class TestBaselines:
         train.y_forecast[:, 1] = 0.0
         with pytest.raises(ValueError, match="horizon 1: one class"):
             window_logistic_forecast(train, _ramp_windows(1))
+
+    def test_forecast_probe_reads_the_slow_and_fast_slopes_the_design_measured(self):
+        x = np.random.default_rng(0).normal(size=(4, 40, 2))
+        slow, fast = np.split(_forecast_features(x)[:, -4:], 2, axis=1)
+        assert slow == pytest.approx(
+            x[:, -10:].mean(axis=1) - x[:, -30:-10].mean(axis=1)
+        )
+        assert fast == pytest.approx(x[:, -5:].mean(axis=1) - x[:, -15:-5].mean(axis=1))
 
 
 def _ramp_windows(seed: int, ramp_on_positives: bool = True, n: int = 300):
