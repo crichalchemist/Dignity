@@ -20,7 +20,7 @@ main = release.main
 ResultsError = release.ResultsError
 
 EPS = EvalConfig().epsilons
-SEED = 2026
+SEED = EvalConfig().eval_seed
 BUDGET = PolicyConfig().review_budget
 NAMES = ("risk", "forecast", "policy", "privacy")
 ROOT = Path(__file__).resolve().parent.parent

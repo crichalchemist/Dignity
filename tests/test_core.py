@@ -9,6 +9,9 @@ import pytest
 import yaml
 
 from core.config import (
+    CONFIRMATION_SEEDS,
+    SELECTION_SEEDS,
+    TUNING_SEEDS,
     DataConfig,
     DignityConfig,
     EvalConfig,
@@ -423,6 +426,13 @@ class TestSyntheticConfig:
 
 
 class TestEvalConfig:
+    def test_tuning_seeds_split_into_eight_selection_and_two_confirmation_seeds(self):
+        assert tuple(range(1000, 1010)) == TUNING_SEEDS
+        assert SELECTION_SEEDS + CONFIRMATION_SEEDS == TUNING_SEEDS
+        assert (len(SELECTION_SEEDS), CONFIRMATION_SEEDS) == (8, (1008, 1009))
+        c = EvalConfig()  # the held-out seed can never be tuned on
+        assert c.tuning_seed in TUNING_SEEDS and c.eval_seed not in TUNING_SEEDS
+
     def test_eval_seeds_default_to_frozen_tuning_and_evaluation_values(self):
         # The tuning and evaluation seeds must differ, or the generator gets tuned
         # against the numbers it is graded on (spec §2 anti-goal).
@@ -527,21 +537,34 @@ class TestPolicyConfig:
     def test_policy_block_round_trips_through_yaml(self, tmp_path):
         # Mutate first: the default reloads equal even if to_yaml drops policy.
         cfg = DignityConfig()
-        cfg.policy.review_budget = 0.1
+        cfg.policy.review_budget = 0.09
         cfg.policy.costs["block"]["normal"] = 2.0
         path = str(tmp_path / "c.yaml")
         cfg.to_yaml(path)
         assert "policy" in yaml.safe_load(Path(path).read_text())
         back = DignityConfig.from_yaml(path)
         assert back.policy == cfg.policy
-        assert back.policy.review_budget == 0.1
+        assert back.policy.review_budget == 0.09
         assert back.policy.costs["block"]["normal"] == 2.0
+
+    @pytest.mark.parametrize(
+        ("factor", "budget"), [(20.0, 0.05), (0.0, 0.05), (10.0, 0.2)]
+    )
+    def test_the_collapse_threshold_must_leave_room_below_one(self, factor, budget):
+        # a threshold of 1.0 or more can never be exceeded: the guard would be dead
+        with pytest.raises(ValueError, match="collapse_review_factor"):
+            PolicyConfig(review_budget=budget, collapse_review_factor=factor)
+        assert PolicyConfig(collapse_review_factor=19.9).collapse_review_factor == 19.9
 
     def test_base_yaml_spells_out_policy_block_and_n_actions_raw(self):
         # The dataclass fills defaults, so a key missing from base.yaml would
         # still load; read the raw file.
         raw = yaml.safe_load(Path("config/base.yaml").read_text())
-        assert set(raw["policy"]) == {"costs", "review_budget"}
+        assert set(raw["policy"]) == {
+            "costs",
+            "review_budget",
+            "collapse_review_factor",
+        }
         assert "n_actions" in raw["model"]
         assert DignityConfig.from_yaml("config/base.yaml").policy == PolicyConfig()
 

@@ -95,6 +95,7 @@ policy:
     review: {anomaly: 1.0, normal: 1.0}  # send to an analyst: cheap either way, but capacity-limited
     block: {anomaly: 0.5, normal: 3.0}  # stop it: cheap when right, costly on a normal window
   review_budget: 0.05  # share of windows that may be reviewed, 0 < x < 1; the rest go to their next-best action
+  collapse_review_factor: 10.0  # a head whose share of windows it would review, before the cap, exceeds this many times review_budget counts as collapsed; 0 < factor * review_budget < 1
 # Privacy stage — commented out by default. No block => no privacy stage runs.
 # This is the block config/train_risk.yaml ships; docs/PRIVACY.md says what each
 # mechanism guarantees. Keys, in order: epsilon_total is the epsilon ledger of EACH
