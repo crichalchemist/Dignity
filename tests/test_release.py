@@ -1,11 +1,13 @@
 """The release verifier reads the four results files and judges success criteria 2-5.
 
-These tests use synthetic files under tmp_path; the committed results are never read.
+These tests use synthetic files under tmp_path; only TestFinalResults reads the
+committed results.
 """
 
 import copy
 import json
 import re
+from pathlib import Path
 
 import pytest
 
@@ -21,6 +23,17 @@ EPS = EvalConfig().epsilons
 SEED = 2026
 BUDGET = PolicyConfig().review_budget
 NAMES = ("risk", "forecast", "policy", "privacy")
+ROOT = Path(__file__).resolve().parent.parent
+# The commit tagged v1.0-freeze: the final evaluation was run from it and from nothing later.
+FREEZE_SHA = "46f7ba04b7cc584fab98f0bacd66dbec5a2c11fb"
+CHARTS = [
+    "forecast_lead_time.png",
+    "forecast_pr_auc_by_horizon.png",
+    "policy_cost.png",
+    "privacy_curve.png",
+    "risk_per_type_recall.png",
+    "risk_pr_curve.png",
+]
 
 
 def _h(values):
@@ -639,3 +652,27 @@ class TestUnusableResults:
         with pytest.raises(ResultsError, match="no horizons"):
             verify(tmp_path, SEED, EPS)
         assert main(["--results", str(tmp_path)]) == 2
+
+
+class TestFinalResults:
+    """The committed results are the one final run: evaluation seed, frozen commit."""
+
+    def _committed(self):
+        return {
+            name: json.loads((ROOT / f"results/v1.0/{name}.json").read_text())
+            for name in NAMES
+        }
+
+    def test_all_committed_results_come_from_the_evaluation_seed(self):
+        for name, data in self._committed().items():
+            assert data["seed"] == EvalConfig().eval_seed, name
+
+    def test_all_committed_results_were_made_from_the_frozen_commit(self):
+        docs = self._committed()
+        for name, data in docs.items():
+            assert data["git_sha"] == FREEZE_SHA, name
+        assert len({data["config_hash"] for data in docs.values()}) == 1
+
+    def test_every_chart_the_results_produce_is_committed(self):
+        charts = sorted(p.name for p in (ROOT / "docs/img").glob("*.png"))
+        assert charts == CHARTS

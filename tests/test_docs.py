@@ -5145,8 +5145,9 @@ class TestResultsDoc:
             ", with unrounded public bounds and in seeded mode",
             ", and the floor test above runs on the easy preset",
             "The statement is about PR-AUC. ",
-            " The file also carries AUROC, and up to ε = 10 its intervals do not "
-            "all contain 0.5.",
+            " The file also carries AUROC: its 95% interval contains 0.5 at ε 0.1, "
+            "0.3, 1 and 3, and lies wholly above 0.5 only at ε 10, 30 and 100, so at "
+            "ε 0.1, 0.3 and 3 AUROC does not confirm the PR-AUC result.",
         ):
             assert tail in text, (
                 f"the reused privacy sentence is not in docs/RESULTS.md as {tail!r}: "
@@ -5784,7 +5785,9 @@ class TestHowItWasBuilt:
 
     DEFERRED = {7, 13, 14, 15, 35, 41, 42, 43, 44, 45}  # deferred to v1.1
     OPEN = {8, 27, 40}  # the maintainer's call, partly addressed
-    CLOSES_WITH_EVALUATION = {10}  # DGNTY-12 is fixed: its guides are gone or rewritten
+    CLOSES_WITH_EVALUATION = (
+        set()
+    )  # DGNTY-12 is fixed: its guides are gone or rewritten
 
     @pytest.fixture(scope="class")
     def text(self):
@@ -7284,14 +7287,14 @@ PRIVACY_QUALIFIERS = (
         "These intervals are replicate 0's: one noise draw and one training seed",
     ),
     (
-        "the grid values where utility returns are not offered as private settings",
+        "k-anonymity holds for the train release only",
         "PRIVACY.md",
-        "they are not offered as a private setting",
+        "k-anonymity holds for the train release only",
     ),
     (
-        "k-anonymity holds for the train release only",
+        "ε 30 and ε 100 are not offered as private settings",
         "PRIVACY.md",
-        "k-anonymity holds for the train release only",
+        "they are not offered as private settings",
     ),
     (
         "k-anonymity holds for the train release only",
@@ -7382,7 +7385,7 @@ CURVE_SEED_WORDS = {
 # distinguishable from chance, grid values above chance). When the results have
 # another shape the test lists every sentence that depends on it; set this constant
 # to the new shape last, once they are rewritten.
-CURVE_SHAPE_WRITTEN_FOR = ((0.1, 0.3, 1.0, 3.0, 10.0), (30.0, 100.0))
+CURVE_SHAPE_WRITTEN_FOR = ((1.0,), (0.1, 0.3, 3.0, 10.0, 30.0, 100.0))
 # The sentences of the curve section name the outcome of the curve, so every one of
 # them is true only for the shape it was written for.
 CURVE_HEADLINE_STEM = "the shipped allocation leaves the risk model's PR-AUC"
@@ -7552,11 +7555,106 @@ def _shipped_epsilon_at_chance(payload: dict, shape) -> bool:
     return 1.0 in shape[0]
 
 
-def _auroc_up_to_10_not_all_at_chance(payload: dict, shape) -> bool:
-    aurocs = [
-        p["risk"]["auroc"] for p in payload["metrics"]["points"] if p["epsilon"] <= 10
-    ]
-    return bool(aurocs) and not all(a["ci_low"] <= 0.5 <= a["ci_high"] for a in aurocs)
+def _only_1_at_chance_and_below_the_reference(payload: dict, shape) -> bool:
+    # "at ε = 1 the interval contains the prevalence and lies wholly below the
+    # reference's": ε = 1 is at chance, and its interval is below the reference's
+    reference = payload["metrics"]["reference"]["risk"]["pr_auc"]["ci_low"]
+    point = _curve_points(payload)[1.0]["risk"]["pr_auc"]
+    return 1.0 in shape[0] and point["ci_high"] < reference
+
+
+def _every_other_value_above_chance(payload: dict, shape) -> bool:
+    # "at every other grid value": ε = 1 is the only value at chance
+    return shape[0] == (1.0,) and len(shape[1]) == len(_curve_points(payload)) - 1
+
+
+def _1_below_0_1(payload: dict, shape) -> bool:
+    return _value(payload, 1.0) < _value(payload, 0.1)
+
+
+def _100_above_30_above_every_smaller(payload: dict, shape) -> bool:
+    smaller = [_value(payload, e) for e in _curve_points(payload) if e < 30]
+    return _value(payload, 100) > _value(payload, 30) > max(smaller)
+
+
+def _100_below_the_reference_but_overlapping(payload: dict, shape) -> bool:
+    reference = payload["metrics"]["reference"]["risk"]["pr_auc"]
+    point = _curve_points(payload)[100.0]["risk"]["pr_auc"]
+    return (
+        100.0 in shape[1]
+        and point["value"] < reference["value"]
+        and point["ci_high"] >= reference["ci_low"]
+    )
+
+
+def _1_replicates_1_and_2_above_replicate_0(payload: dict, shape) -> bool:
+    first, second, third = _replicates(payload, 1.0)
+    return 1.0 in shape[0] and second > first and third > first
+
+
+def _30_lowest_replicate_below_the_highest_at_10(payload: dict, shape) -> bool:
+    return 30.0 in shape[1] and min(_replicates(payload, 30)) < max(
+        _replicates(payload, 10)
+    )
+
+
+def _30_and_100_above_every_smaller_value(payload: dict, shape) -> bool:
+    smaller = [_value(payload, e) for e in _curve_points(payload) if e < 30]
+    return min(_value(payload, 30), _value(payload, 100)) > max(smaller)
+
+
+def _auroc_at_chance_at_exactly_0_1_0_3_1_and_3(payload: dict, shape) -> bool:
+    # "contains 0.5 at ε 0.1, 0.3, 1 and 3, and lies wholly above 0.5 only at ε 10,
+    # 30 and 100, so at ε 0.1, 0.3 and 3 AUROC does not confirm the PR-AUC result":
+    # the exact set of ε whose AUROC interval contains 0.5, and that set meeting the
+    # values above chance on PR-AUC in exactly 0.1, 0.3 and 3
+    contains = {
+        p["epsilon"]
+        for p in payload["metrics"]["points"]
+        if p["risk"]["auroc"]["ci_low"] <= 0.5 <= p["risk"]["auroc"]["ci_high"]
+    }
+    above = {
+        p["epsilon"]
+        for p in payload["metrics"]["points"]
+        if p["risk"]["auroc"]["ci_low"] > 0.5
+    }
+    return (
+        contains == {0.1, 0.3, 1.0, 3.0}
+        and above == {10.0, 30.0, 100.0}
+        and contains & set(shape[1]) == {0.1, 0.3, 3.0}
+    )
+
+
+def _baseline_points(payload: dict) -> dict:
+    return {p["epsilon"]: p for p in payload["baselines"]["window_logistic"]["points"]}
+
+
+def _1_below_the_baseline_every_other_value_above(payload: dict, shape) -> bool:
+    baseline = _baseline_points(payload)
+    return all(
+        (_value(payload, e) < baseline[e]["pr_auc"]["value"]) == (e == 1.0)
+        for e in _curve_points(payload)
+    )
+
+
+def _clears_the_baseline_only_at_100(payload: dict, shape) -> bool:
+    # "the lower bound of the model's interval is below the baseline's point estimate
+    # at every value below 100" and not at 100, and "the baseline's interval lies
+    # wholly above the prevalence at every grid value"
+    baseline = _baseline_points(payload)
+    chance = payload["metrics"]["reference"]["risk"]["prevalence"]["value"]
+    points = _curve_points(payload)
+    return all(
+        (points[e]["risk"]["pr_auc"]["ci_low"] < baseline[e]["pr_auc"]["value"])
+        == (e < 100)
+        for e in points
+    ) and all(baseline[e]["pr_auc"]["ci_low"] > chance for e in points)
+
+
+def _30_and_100_are_above_chance_to_show_where_utility_returns(
+    payload: dict, shape
+) -> bool:
+    return {30.0, 100.0} <= set(shape[1])
 
 
 # (doc, phrase, predicate over (payload, shape)). The phrase is found in the doc and
@@ -7565,25 +7663,30 @@ def _auroc_up_to_10_not_all_at_chance(payload: dict, shape) -> bool:
 CURVE_CLAIMS = (
     (
         "docs/PRIVACY.md",
-        "up to ε = 10 each point's 95% confidence interval for PR-AUC contains "
-        "the prevalence (the chance line) and lies wholly below the non-private "
-        "reference's interval",
-        _below_the_reference_up_to(10),
+        "at ε = 1 the 95% confidence interval for PR-AUC contains the prevalence "
+        "(the chance line) and lies wholly below the non-private reference's interval",
+        _only_1_at_chance_and_below_the_reference,
     ),
     (
         "docs/PRIVACY.md",
-        "At ε = 30 and ε = 100 the interval lies wholly above the prevalence",
-        _30_and_100_above_chance,
+        "At every other grid value the interval lies wholly above the prevalence",
+        _every_other_value_above_chance,
     ),
     (
         "docs/PRIVACY.md",
-        "PR-AUC is higher at 100 than at 30",
-        _higher_at_100_than_at_30,
+        "the point at ε = 1 is below the one at ε = 0.1",
+        _1_below_0_1,
     ),
     (
         "docs/PRIVACY.md",
-        "both point estimates are below the reference's",
-        _30_and_100_below_the_reference,
+        "PR-AUC is higher at 100 than at 30, and at 30 than at any smaller ε",
+        _100_above_30_above_every_smaller,
+    ),
+    (
+        "docs/PRIVACY.md",
+        "At ε = 100 the point estimate is below the reference's, but the two "
+        "intervals overlap",
+        _100_below_the_reference_but_overlapping,
     ),
     (
         "docs/PRIVACY.md",
@@ -7592,8 +7695,13 @@ CURVE_CLAIMS = (
     ),
     (
         "docs/PRIVACY.md",
-        "At ε = 30 the replicates spread more widely than the gap",
-        _30_spreads_wider_than_the_gap,
+        "At ε = 1 replicates 1 and 2 both score higher than replicate 0",
+        _1_replicates_1_and_2_above_replicate_0,
+    ),
+    (
+        "docs/PRIVACY.md",
+        "At ε = 30 the lowest replicate is below the highest replicate at ε = 10",
+        _30_lowest_replicate_below_the_highest_at_10,
     ),
     (
         "docs/PRIVACY.md",
@@ -7603,23 +7711,45 @@ CURVE_CLAIMS = (
     ),
     (
         "docs/PRIVACY.md",
-        "up to ε = 10 its intervals do not all contain 0.5",
-        _auroc_up_to_10_not_all_at_chance,
+        "its 95% interval contains 0.5 at ε 0.1, 0.3, 1 and 3, and lies wholly above "
+        "0.5 only at ε 10, 30 and 100, so at ε 0.1, 0.3 and 3 AUROC does not confirm "
+        "the PR-AUC result",
+        _auroc_at_chance_at_exactly_0_1_0_3_1_and_3,
     ),
     (
         "docs/PRIVACY.md",
-        "The two largest grid values are there to show where utility returns",
-        _two_largest_above,
+        "At ε = 1 the model's point estimate is below that of the `window_logistic` "
+        "baseline fit on the released windows; at every other grid value it is above",
+        _1_below_the_baseline_every_other_value_above,
     ),
     (
         "docs/PRIVACY.md",
-        "The rise at the two largest ε therefore comes from less noise on `volume`",
-        _two_largest_above,
+        "At every grid value below ε 100 the lower bound of the model's PR-AUC "
+        "interval is below that baseline's PR-AUC point estimate, so the private "
+        "model clears the baseline only at ε 100, and the baseline's interval lies "
+        "wholly above the prevalence at every grid value",
+        _clears_the_baseline_only_at_100,
     ),
     (
         "README.md",
-        "the grid values where utility returns are not offered as private settings",
-        _utility_returns_at_some_values_only,
+        "AUROC does not confirm the PR-AUC result at ε 0.1, 0.3 and 3",
+        _auroc_at_chance_at_exactly_0_1_0_3_1_and_3,
+    ),
+    (
+        "README.md",
+        "the private model clears `window_logistic` only at ε 100",
+        _clears_the_baseline_only_at_100,
+    ),
+    (
+        "docs/PRIVACY.md",
+        "ε 30 and ε 100 are on the grid to show where utility returns; they are "
+        "not offered as private settings",
+        _30_and_100_are_above_chance_to_show_where_utility_returns,
+    ),
+    (
+        "docs/PRIVACY.md",
+        "The rise at ε = 30 and ε = 100 therefore comes from less noise on `volume`",
+        _30_and_100_above_every_smaller_value,
     ),
     (
         "docs/HOW-IT-WAS-BUILT.md",
@@ -9657,3 +9787,90 @@ class TestDgnty8RowMessageNamesTheLeadConstant:
         assert len(problems) == 1, problems
         assert "PRIVACY_ROW_LEAD" in problems[0]
         assert "change the constant and the row together" in problems[0]
+
+
+# Sentences that name the block baseline's standing, each with the condition on
+# results/v1.0/risk.json that makes it true: (doc, phrase, predicate over risk.json).
+def _block_tree_auroc(risk: dict) -> dict:
+    return risk["baselines"]["block_tree"]["auroc"]
+
+
+def _block_tree_below_the_band(risk: dict) -> bool:
+    from eval.gates import AUROC_BAND
+
+    return _block_tree_auroc(risk)["value"] < AUROC_BAND[0]
+
+
+def _block_tree_interval_contains_chance(risk: dict) -> bool:
+    auroc = _block_tree_auroc(risk)
+    return auroc["ci_low"] <= 0.5 <= auroc["ci_high"]
+
+
+BLOCK_BASELINE_CLAIMS = (
+    (
+        "docs/RESULTS.md",
+        "which is below the lower edge of the band that the data gate checks",
+        _block_tree_below_the_band,
+    ),
+    (
+        "docs/RESULTS.md",
+        "The block gate is therefore passed against a baseline that is close to chance",
+        _block_tree_interval_contains_chance,
+    ),
+    (
+        "docs/RESULTS.md",
+        "close to chance and below the band the data gate checks",
+        lambda risk: (
+            _block_tree_interval_contains_chance(risk)
+            and _block_tree_below_the_band(risk)
+        ),
+    ),
+    (
+        "README.md",
+        "`block_tree` is close to chance on the evaluation seed",
+        _block_tree_interval_contains_chance,
+    ),
+)
+
+
+def block_baseline_problems(risk: dict, docs: dict[str, str]) -> list[str]:
+    problems = []
+    for name, phrase, holds in BLOCK_BASELINE_CLAIMS:
+        if phrase not in _flat(strip_markers(docs[name])):
+            problems.append(f"{name} no longer holds {phrase!r}")
+        elif not holds(risk):
+            problems.append(f"{name}: {phrase!r} is not supported by risk.json")
+    return problems
+
+
+class TestBlockBaselineSentencesFollowTheResults:
+    """The docs call the block baseline close to chance and below the data-gate
+    band; a reader must not be told so when the results say otherwise."""
+
+    @staticmethod
+    def risk_with(value, ci_low, ci_high):
+        risk = json.loads((RESULTS_DIR / "risk.json").read_text())
+        risk["baselines"]["block_tree"]["auroc"] = {
+            "value": value,
+            "ci_low": ci_low,
+            "ci_high": ci_high,
+        }
+        return risk
+
+    def test_the_block_baseline_sentences_match_the_committed_results(self):
+        risk = json.loads((RESULTS_DIR / "risk.json").read_text())
+        docs = {n: (ROOT / n).read_text() for n in ("docs/RESULTS.md", "README.md")}
+        assert block_baseline_problems(risk, docs) == []
+
+    def test_a_baseline_back_inside_the_band_is_reported_as_stale_wording(self):
+        risk = self.risk_with(0.65, 0.58, 0.72)
+        docs = {n: (ROOT / n).read_text() for n in ("docs/RESULTS.md", "README.md")}
+        text = "\n".join(block_baseline_problems(risk, docs))
+        assert "lower edge of the band" in text and "close to chance" in text
+
+    def test_a_baseline_below_the_band_but_clear_of_chance_is_not_close_to_chance(
+        self,
+    ):
+        risk = self.risk_with(0.52, 0.51, 0.60)
+        assert _block_tree_below_the_band(risk)
+        assert not _block_tree_interval_contains_chance(risk)

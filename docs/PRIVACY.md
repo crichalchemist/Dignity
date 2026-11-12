@@ -186,7 +186,7 @@ asserts validation AUROC >= 0.70 (chance is 0.5). It is a "still learns" guard o
 data at the shipped epsilon, not a point on the privacy curve. It does not test
 sensitivity to epsilon, and it says nothing about harder data: on the hard preset the
 same allocation at ε = 1.0 leaves the model's PR-AUC not distinguishable from chance on
-the tuning seed (see *Privacy-versus-utility curve* below).
+the evaluation seed (see *Privacy-versus-utility curve* below).
 The floor was declared from tuning-seed validation
 evidence before the evaluation seed was touched. The path a user runs is pinned
 separately: `tests/test_train.py::TestPrivacyUtility::test_shipped_privacy_config_trains_through_the_cli_in_system_mode`
@@ -228,32 +228,20 @@ by k-anonymous generalization, which ε does not govern, and `price` is not cons
 
 ![privacy curve](img/privacy_curve.png)
 
-**On the tuning seed, the shipped allocation leaves the risk model's PR-AUC not
-distinguishable from chance on the hard preset at every ε on the grid up to 10, and
-above chance at the two largest grid values, 30 and 100:** up to ε = 10 each point's
-95% confidence interval for PR-AUC contains the prevalence (the chance line) and lies
-wholly below the non-private reference's interval. At ε = 30 and ε = 100 the interval
-lies wholly above the prevalence, PR-AUC is higher at 100 than at 30, and both point
-estimates are below the reference's. These intervals are replicate 0's: one noise draw
-and one training seed. Across all three replicates, every PR-AUC at ε = 100 is above
-every PR-AUC at a smaller ε. At ε = 30 the replicates spread more widely than the gap
-between them and the points below, so the result there rests mainly on replicate 0's
-interval. Test:
+**On the evaluation seed, the shipped allocation leaves the risk model's PR-AUC not distinguishable from chance on the hard preset at ε 1, and above chance at ε 0.1, 0.3, 3, 10, 30 and 100:** at ε = 1 the 95% confidence interval for PR-AUC contains the prevalence (the chance line) and lies wholly below the non-private reference's interval. At every other grid value the interval lies wholly above the prevalence. The point estimates are not ordered by ε: the point at ε = 1 is below the one at ε = 0.1. PR-AUC is higher at 100 than at 30, and at 30 than at any smaller ε. At ε = 100 the point estimate is below the reference's, but the two intervals overlap. At ε = 1 the model's point estimate is below that of the `window_logistic` baseline fit on the released windows; at every other grid value it is above. At every grid value below ε 100 the lower bound of the model's PR-AUC interval is below that baseline's PR-AUC point estimate, so the private model clears the baseline only at ε 100, and the baseline's interval lies wholly above the prevalence at every grid value. These intervals are replicate 0's: one noise draw and one training seed. At ε = 1 replicates 1 and 2 both score higher than replicate 0, so the dip at ε = 1 is partly replicate 0's draw (its training seed and noise draw together). Across all three replicates, every PR-AUC at ε = 100 is above every PR-AUC at a smaller ε. At ε = 30 the lowest replicate is below the highest replicate at ε = 10, so the result there rests mainly on replicate 0's interval. ε 30 and ε 100 are on the grid to show where utility returns; they are not offered as private settings. Test:
 `tests/test_docs.py::TestDocs::test_privacy_curve_statement_matches_the_committed_results`.
 ε is per released value, and ε-differential privacy bounds the likelihood ratio between
-neighbouring inputs by e^ε. The two largest grid values are there to show where utility
-returns; they are not offered as a private setting.
+neighbouring inputs by e^ε.
 
-The statement is about PR-AUC. The file also carries AUROC, and up to ε = 10 its
-intervals do not all contain 0.5.
+The statement is about PR-AUC. The file also carries AUROC: its 95% interval contains 0.5 at ε 0.1, 0.3, 1 and 3, and lies wholly above 0.5 only at ε 10, 30 and 100, so at ε 0.1, 0.3 and 3 AUROC does not confirm the PR-AUC result.
 
 Only the noise on `volume` changes along the curve; `fee_rate` and `tx_count` are
-generalized the same way at every point. The rise at the two largest ε therefore comes
+generalized the same way at every point. The rise at ε = 30 and ε = 100 therefore comes
 from less noise on `volume`. How much of the remaining gap to the reference comes from
 the generalization, from the `log1p` transform and clipping, or from the noise left at
 ε = 100 has not been measured. The numbers are in
-`results/v1.0/privacy.json`; no metric value is quoted here, because the release
-regenerates them on the evaluation seed.
+`results/v1.0/privacy.json`; no metric value is quoted here, because the file and the chart are
+the final evaluation-seed results.
 
 How the curve is produced (`python -m eval.run ... --privacy-sweep`; the Colab runbook
 in [RESULTS.md](RESULTS.md) runs it after the three tasks):
@@ -286,8 +274,7 @@ in [RESULTS.md](RESULTS.md) runs it after the three tasks):
   public bounds and in seeded mode, and the floor test above runs on the easy preset.
   `metrics.template` in the file is the block before that rescaling.
 
-These are tuning-seed results. The release regenerates the file and the chart on the
-evaluation seed.
+These are evaluation-seed results from the final run.
 
 ## What is not here
 
