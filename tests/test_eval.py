@@ -18,6 +18,7 @@ from eval.metrics import (
     policy_metrics,
     risk_metrics,
     threshold_at_fpr,
+    warned_onsets,
 )
 from eval.plots import (
     plot_forecast_pr_auc,
@@ -396,6 +397,23 @@ class TestLeadTimes:
         alarm, y, mask, block, end_row = self._fixture()
         r = lead_times(alarm, float("inf"), y, mask, block, end_row)
         assert r == {"median": None, "values": [], "n_onsets": 2, "n_missed": 2}
+
+
+class TestForecastCriterionStats:
+    @pytest.mark.parametrize("threshold", [0.5, float("inf")])
+    def test_warned_onsets_agree_with_lead_times(self, threshold):
+        alarm, y, mask, block, end_row = TestLeadTimes()._fixture()
+        lead = lead_times(alarm, threshold, y, mask, block, end_row)
+        onset_block, warned = warned_onsets(alarm, threshold, y, mask, block, end_row)
+        assert onset_block.dtype == np.int64 and warned.dtype == bool
+        assert len(onset_block) == lead["n_onsets"]
+        assert (~warned).sum() == lead["n_missed"]
+
+    def test_each_onset_is_attributed_to_its_own_block(self):
+        # block 0 is warned; block 1 is missed (its only loud alarm is masked)
+        alarm, y, mask, block, end_row = TestLeadTimes()._fixture()
+        onset_block, warned = warned_onsets(alarm, 0.5, y, mask, block, end_row)
+        assert onset_block.tolist() == [0, 1] and warned.tolist() == [True, False]
 
 
 def _windows(y, mask, block, end_row):

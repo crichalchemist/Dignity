@@ -234,6 +234,34 @@ def lead_times(
     }
 
 
+def warned_onsets(
+    alarm: np.ndarray,
+    threshold: float,
+    y: np.ndarray,
+    mask: np.ndarray,
+    block_index: np.ndarray,
+    end_row: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Per scored onset, its block and whether any eligible window alarmed.
+
+    The same onsets, eligibility and ``>=`` rule as ``lead_times``, in the order
+    it visits them, so ``(~warned).sum()`` is its ``n_missed``. The per-onset
+    form lets a bootstrap redraw blocks and recount the warned share.
+    """
+    horizon = y.shape[1]
+    blocks: list[int] = []
+    warned: list[bool] = []
+    for i in np.flatnonzero(y[:, 0] == 1):
+        b, onset = block_index[i], int(end_row[i]) + 1
+        same = block_index == b
+        if not (same & (end_row == onset - 1)).any():
+            continue
+        eligible = same & mask & (end_row >= onset - horizon) & (end_row <= onset - 1)
+        blocks.append(int(block_index[i]))
+        warned.append(bool((eligible & (alarm >= threshold)).any()))
+    return np.array(blocks, dtype=np.int64), np.array(warned, dtype=bool)
+
+
 def policy_metrics(
     actions: np.ndarray,
     y: np.ndarray,
