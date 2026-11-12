@@ -138,15 +138,21 @@ All labels come from the per-row event record, never from a single row
 ### Presets, gate and calibration
 
 `config/synthetic_{easy,medium,hard}.yaml` are the three difficulty presets.
-`eval/gates.py::data_gate` generates each, splits it by block and scores two
-baselines: `window_logistic` on val windows and `block_tree` on val blocks. It passes
-when all four checks hold: each baseline's hard-preset AUROC lies in
-`eval.gates.AUROC_BAND`; AUROC falls strictly from easy to medium to hard for both
-baselines; and the `window_logistic` recall at 10% false-positive rate, per
-onset-position bucket, spreads by at most `eval.gates.FLATNESS_MAX_SPREAD`. The gate
-is a tuning tool: it defaults to the tuning seed, and `eval/gates.py::main` refuses
-the evaluation seed with exit code 2
-(`tests/test_gates.py::TestDataGate`). The values the shipped presets reach are in
+`eval/gates.py::data_gate` generates each preset once per seed on the ten tuning
+seeds, splits it by block and scores two baselines on the val and the test split:
+`window_logistic` on windows and `block_tree` on blocks. Every number it judges is a
+mean over seeds. It passes when all five checks hold: each baseline's hard-preset
+AUROC, the mean of the val and test scores over all seeds, lies in
+`eval.gates.AUROC_BAND`; the same means fall strictly from easy to medium to hard for
+both baselines, and the build-up strength falls with them; the `window_logistic`
+recall at 10% false-positive rate, per onset-position bucket and averaged over seeds
+on the val split, spreads by at most `eval.gates.FLATNESS_MAX_SPREAD` (the test
+split's spread is reported, never judged); and every seed's hard-preset test split
+holds at least `eval.gates.MIN_TEST_ONSETS` scorable onsets (`test_onsets`). The gate
+is a tuning tool: `eval/gates.py::main` refuses a seed outside the tuning seeds, a
+repeated seed and a strength off `eval.gates.STRENGTH_GRID` with exit code 2, before
+it generates anything (`tests/test_gates.py::TestDataGate`). The values the shipped
+presets reach are in
 [results/v1.0/data_gate_tuning.json](../results/v1.0/data_gate_tuning.json).
 
 `data/calibration/reference_stats.json` holds a band for each statistic in

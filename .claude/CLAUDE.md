@@ -45,9 +45,9 @@ format that export no longer supports (DGNTY-3, DGNTY-35). No shipped config wri
 ## Commands
 
 ```bash
-# Tests (1470 collected: test_core 80, test_data 169, test_models 23, test_privacy 42,
+# Tests (1484 collected: test_core 80, test_data 169, test_models 23, test_privacy 42,
 # test_operator 4, test_docs 769, test_train 78, test_checkpoint 3, test_export 9,
-# test_calibration 3, test_labels 7, test_gates 15, test_ci 4, test_eval 103,
+# test_calibration 3, test_labels 7, test_gates 29, test_ci 4, test_eval 103,
 # test_colab_eval 13, test_scripts 19, test_release 129 — one skips without CUDA)
 # every test is limited to 300 s (pytest.ini; pytest-timeout), except the README quickstart
 # test, which carries its own 900 s limit (three subprocesses, each capped at 300 s)
@@ -66,7 +66,7 @@ pre-commit run --all-files
 # The CI coverage gate — measures only core/privacy.py (pyproject [tool.coverage.run] include)
 pytest tests/ --cov --cov-fail-under=100
 
-python -m eval.gates --seed 1000   # data gate; tuning seed only, refuses 2026
+python -m eval.gates --seeds 1000,1001 --n-blocks 400   # data gate; tuning seeds 1000-1009 only, refuses everything else
 python scripts/refresh_doc_numbers.py README.md docs/RESULTS.md   # after any results change
 python scripts/verify_release.py   # v1.0 success criteria 2-5 on results/v1.0 (exit 1 = a criterion failed or a training raise was recorded, 2 = unusable results, including results not on the evaluation seed); results/v1.0 holds the first evaluation, which the restated criteria call unusable until it is replaced
 python scripts/verify_release.py --results DIR --seed tuning   # rehearsal on one tuning-seed run (seed read from DIR/risk.json, 1000-1009); prints a banner, not the evaluation

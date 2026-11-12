@@ -83,7 +83,7 @@ train:
 
 # Evaluation run (python -m eval.run). Read by eval.run and the privacy sweep, not by training.
 eval:
-  tuning_seed: 1000  # data seed of `--seed tuning`; the only seed to tune on (eval.gates reads the EvalConfig default, not this file)
+  tuning_seed: 1000  # data seed of `--seed tuning`; the only seed to tune on (eval.gates takes its seeds from core.config.TUNING_SEEDS, not this file)
   eval_seed: 2026  # data seed of `--seed eval`; frozen, the final reported run only, never tune on it
   n_train_seeds: 3  # models trained per task; training seed k is the top-level seed + k
   n_bootstrap: 1000  # bootstrap resamples (of blocks, not windows) for every confidence interval

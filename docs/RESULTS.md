@@ -199,7 +199,7 @@ python scripts/refresh_doc_numbers.py README.md docs/RESULTS.md
 The data-gate numbers are validation scores that `eval.gates` writes on the tuning seed. It prints the result as JSON and, with `--out`, also writes it to that file:
 
 ```bash
-python -m eval.gates --seed 1000 --out results/v1.0/data_gate_tuning.json
+python -m eval.gates --out results/v1.0/data_gate.json
 ```
 
 The numbers of the four `eval.run` results above come from the full run on a GPU, which the runbook below drives. The runbook ends by copying the archive's `results/v1.0` and `docs/img` into the tree; the refresh and the doc tests follow.

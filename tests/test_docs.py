@@ -20,6 +20,7 @@ import pytest
 import yaml
 
 from core.config import (
+    TUNING_SEEDS,
     DataConfig,
     DignityConfig,
     EvalConfig,
@@ -3718,9 +3719,9 @@ def eval_gates_command_problems(text: str) -> list[str]:
     except SystemExit:
         return [f"{commands[0]}: eval.gates rejects it"]
     problems = []
-    if args.seed != EvalConfig().tuning_seed:
-        problems.append(f"{commands[0]}: --seed is not the tuning seed")
-    if args.out != Path("results/v1.0/data_gate_tuning.json"):
+    if args.seeds != list(TUNING_SEEDS):
+        problems.append(f"{commands[0]}: --seeds is not the ten tuning seeds")
+    if args.out != Path("results/v1.0/data_gate.json"):
         problems.append(f"{commands[0]}: --out is not the gate file")
     return problems
 
@@ -4969,15 +4970,14 @@ class TestResultsDoc:
     def test_a_gate_command_eval_gates_rejects_or_that_writes_elsewhere_is_reported(
         self,
     ):
-        command = (
-            "python -m eval.gates --seed 1000 --out results/v1.0/data_gate_tuning.json"
-        )
+        command = "python -m eval.gates --out results/v1.0/data_gate.json"
         assert eval_gates_command_problems(f"## Reproduce\n\n{command}\n") == []
         for bad in (
             command.replace("--out", "--output"),
-            command.replace("1000", "7"),
-            command.replace("data_gate_tuning", "other"),
-            command.replace(" --out results/v1.0/data_gate_tuning.json", ""),
+            command.replace("--out", "--seeds x,y --out"),
+            command.replace("--out", "--seeds 1000,1001 --out"),
+            command.replace("data_gate", "other"),
+            command.replace(" --out results/v1.0/data_gate.json", ""),
             "",
         ):
             assert eval_gates_command_problems(f"## Reproduce\n\n{bad}\n"), bad

@@ -1,12 +1,15 @@
 """Tests for the difficulty gate and its baselines."""
 
 import json
+import time
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
 import pytest
 from sklearn.metrics import roc_auc_score
 
+from core.config import TUNING_SEEDS
 from data.pipeline import WindowSet
 from data.source.synthetic import RAW_COLUMNS
 from eval import gates
@@ -16,7 +19,7 @@ from eval.baselines import (
     window_logistic,
     window_logistic_forecast,
 )
-from eval.gates import DEFAULT_PRESETS, TUNING_SEED, data_gate, onset_bucket_recall
+from eval.gates import DEFAULT_PRESETS, data_gate, onset_bucket_recall
 
 
 def _windowset(**fields) -> WindowSet:
@@ -149,6 +152,66 @@ def _positional_windows(extra_onset_zero: int = 0):
     return ws, offsets
 
 
+ROOT = Path(__file__).resolve().parents[1]
+_FLAT = [0.46, 0.47, 0.50, 0.52, 0.55]
+# (val, test) AUROC per preset: easy > medium > hard, hard inside AUROC_BAND
+_WL = {"easy": (0.81, 0.81), "medium": (0.76, 0.76), "hard": (0.73, 0.73)}
+_BT = {"easy": (0.74, 0.74), "medium": (0.65, 0.65), "hard": (0.60, 0.60)}
+
+
+def _forbid_generation(monkeypatch) -> list:
+    """Any scoring or generation fails the test; the spy records generator calls."""
+    calls: list = []
+
+    def spy(config, rng=None):
+        calls.append(config.seed)
+        pytest.fail("data was generated for a refused request")
+
+    monkeypatch.setattr(gates, "SyntheticGenerator", spy)
+    monkeypatch.setattr(
+        gates, "_score_preset", lambda *a, **k: pytest.fail("a preset was scored")
+    )
+    return calls
+
+
+def _fake_score_preset(
+    monkeypatch, *, wl=None, bt=None, recall=None, onsets=250, seen=None, extra=None
+):
+    """Replace gates._score_preset (the boundary) with fixed numbers.
+
+    Each value is either a constant (val, test) pair or a function of the seed.
+    """
+    wl, bt = wl or _WL, bt or _BT
+    recall = recall or (_FLAT, _FLAT)
+    by_path = {path: name for name, path in DEFAULT_PRESETS.items()}
+    by_path.update(extra or {})  # preset files copied by a test
+
+    def pick(value, seed):
+        return value(seed) if callable(value) else value
+
+    def score(path, seed, n_blocks=None, strength=None):
+        preset = by_path[path]
+        if seen is not None:
+            seen.append((preset, seed, n_blocks, strength))
+        hard = preset == "hard"
+        wl_val, wl_test = pick(wl[preset], seed)
+        bt_val, bt_test = pick(bt[preset], seed)
+        recall_val, recall_test = pick(recall, seed)
+        return {
+            "auroc": {
+                "window_logistic": {"val": wl_val, "test": wl_test},
+                "block_tree": {"val": bt_val, "test": bt_test},
+            },
+            "onset_recall": (
+                {"val": list(recall_val), "test": list(recall_test)} if hard else None
+            ),
+            "test_onsets": int(pick(onsets, seed)) if hard else None,
+            "headroom": None,
+        }
+
+    monkeypatch.setattr(gates, "_score_preset", score)
+
+
 class TestDataGate:
     def test_flatness_check_catches_a_positional_shortcut(self):
         ws, offsets = _positional_windows()
@@ -172,9 +235,42 @@ class TestDataGate:
         with pytest.raises(ValueError, match="onset bucket 4 has no positive windows"):
             onset_bucket_recall(np.zeros(len(ws.y_risk)), ws)
 
-    def test_gate_cli_refuses_the_evaluation_seed(self, capsys):
-        assert gates.main(["--seed", "2026"]) == 2
-        assert "evaluation seed" in capsys.readouterr().out
+    def test_gate_refuses_every_seed_outside_the_tuning_range(
+        self, monkeypatch, capsys
+    ):
+        _forbid_generation(monkeypatch)
+        for s in (999, 1010, 2026, 2027):
+            with pytest.raises(ValueError):
+                data_gate(DEFAULT_PRESETS, [s])
+            assert gates.main(["--seeds", str(s)]) == 2, s
+        assert "2027" in capsys.readouterr().out
+
+    def test_gate_refuses_an_empty_seed_list_before_any_generation(self, monkeypatch):
+        _forbid_generation(monkeypatch)
+        with pytest.raises(ValueError):
+            data_gate(DEFAULT_PRESETS, [])
+        assert gates.main(["--seeds", ""]) == 2
+
+    def test_gate_refuses_duplicate_seeds_before_any_generation(self, monkeypatch):
+        # One seed counted twice would inflate the seed means and the win counts.
+        calls = _forbid_generation(monkeypatch)
+        with pytest.raises(ValueError, match="duplicate seed 1000"):
+            data_gate(DEFAULT_PRESETS, [1000, 1000, 1001])
+        assert gates.main(["--seeds", "1000,1000,1001"]) == 2
+        assert calls == []
+
+    def test_gate_accepts_a_permutation_of_distinct_seeds(self, monkeypatch):
+        seen: list = []
+        _fake_score_preset(monkeypatch, seen=seen)
+        data_gate(DEFAULT_PRESETS, [1003, 1001])
+        assert sorted({s for _, s, _, _ in seen}) == [1001, 1003]
+
+    def test_gate_refuses_a_strength_outside_the_grid(self, monkeypatch):
+        calls = _forbid_generation(monkeypatch)
+        with pytest.raises(ValueError, match="strength"):
+            data_gate(DEFAULT_PRESETS, [1000], strength=0.5)
+        assert gates.main(["--strength", "0.5"]) == 2
+        assert calls == []
 
     def test_gate_seed_reaches_the_generator(self, monkeypatch):
         seen = []
@@ -187,62 +283,181 @@ class TestDataGate:
 
         monkeypatch.setattr(gates, "SyntheticGenerator", spy)
         with pytest.raises(_StopError):
-            gates.data_gate(gates.DEFAULT_PRESETS, 7)
-        assert seen == [7]  # preset files say 42; the gate seed must win
+            data_gate(DEFAULT_PRESETS, [1003], n_blocks=10)
+        assert seen == [1003]  # preset files say 42; the gate seed must win
 
-    def test_gate_fails_when_any_check_fails_and_passes_only_when_all_hold(
-        self, monkeypatch, tmp_path, capsys
+    def test_gate_means_not_single_seeds_decide_the_band(self, monkeypatch):
+        def hard_wl(seed):
+            return (0.40, 0.70) if seed == 1000 else (0.70, 0.70)
+
+        _fake_score_preset(monkeypatch, wl={**_WL, "hard": hard_wl})
+        result = data_gate(DEFAULT_PRESETS, [1000, 1001, 1002, 1003])
+        assert result["auroc"]["hard"]["window_logistic"]["pooled_mean"] == (
+            pytest.approx((7 * 0.70 + 0.40) / 8)
+        )
+        assert result["checks"]["window_logistic_in_band"] is True
+
+        _fake_score_preset(monkeypatch, wl={**_WL, "hard": (0.50, 0.50)})
+        low = data_gate(DEFAULT_PRESETS, [1000, 1001, 1002, 1003])
+        assert low["checks"]["window_logistic_in_band"] is False
+
+    def test_flatness_is_the_spread_of_seed_means_not_the_mean_of_spreads(
+        self, monkeypatch
     ):
-        """Aggregation only: the per-preset scoring is replaced by fixed numbers."""
-        by_path = {path: name for name, path in DEFAULT_PRESETS.items()}
-        state: dict = {}
+        rising = [0.4, 0.45, 0.5, 0.55, 0.6]
+        _fake_score_preset(
+            monkeypatch,
+            recall=lambda seed: (rising if seed == 1000 else rising[::-1], _FLAT),
+        )
+        mixed = data_gate(DEFAULT_PRESETS, [1000, 1001])
+        assert mixed["checks"]["positional_flatness"] is True
+        assert mixed["onset_recall"]["val_spread"] == pytest.approx(0.0)
 
-        def fake_score_preset(path, seed):
-            preset = by_path[path]
-            wl, bt = state["auroc"][preset]
-            recall = state["recall"] if preset == "hard" else None
-            return {"window_logistic": wl, "block_tree": bt}, recall
+        _fake_score_preset(monkeypatch, recall=(rising, _FLAT))
+        same = data_gate(DEFAULT_PRESETS, [1000, 1001])
+        assert same["checks"]["positional_flatness"] is False
+        assert same["onset_recall"]["val_spread"] == pytest.approx(0.2)
 
-        monkeypatch.setattr(gates, "_score_preset", fake_score_preset)
+    def test_test_split_flatness_is_reported_but_never_decides(self, monkeypatch):
+        _fake_score_preset(monkeypatch, recall=(_FLAT, [0.4, 0.5, 0.5, 0.6, 0.7]))
+        result = data_gate(DEFAULT_PRESETS, [1000])
+        assert result["onset_recall"]["test_spread"] == pytest.approx(0.3)
+        assert result["checks"]["positional_flatness"] is True
 
-        def run(easy, medium, hard, onset):
-            state["auroc"] = {"easy": easy, "medium": medium, "hard": hard}
-            state["recall"] = onset
-            return data_gate(DEFAULT_PRESETS, TUNING_SEED)
+    def test_gate_fails_when_a_seed_has_too_few_scorable_test_onsets(self, monkeypatch):
+        _fake_score_preset(
+            monkeypatch, onsets=lambda seed: 250 if seed == 1000 else 199
+        )
+        result = data_gate(DEFAULT_PRESETS, [1000, 1001])
+        failing = [k for k, v in result["checks"].items() if not v]
+        assert failing == ["test_onsets"]
+        assert result["passed"] is False
+        assert result["test_onsets"] == [250, 199]
 
-        ok = ((0.81, 0.74), (0.76, 0.65), (0.73, 0.60))
-        flat = [0.46, 0.47, 0.50, 0.52, 0.55]
-        skewed = [0.30, 0.47, 0.50, 0.52, 0.55]
-
-        result = run(*ok, flat)
+    def test_gate_passes_only_when_every_check_holds(self, monkeypatch):
+        _fake_score_preset(monkeypatch)
+        result = data_gate(DEFAULT_PRESETS, [1000, 1001])
         assert result["passed"] is True
+        assert set(result["checks"]) == {
+            "window_logistic_in_band",
+            "block_tree_in_band",
+            "monotone",
+            "positional_flatness",
+            "test_onsets",
+        }
         assert all(result["checks"].values())
 
-        # Each case breaks exactly one check; the other three must still hold.
-        cases = {
-            "window_logistic_in_band": run(ok[0], ok[1], (0.50, 0.60), flat),
-            "block_tree_in_band": run(ok[0], ok[1], (0.73, 0.50), flat),
-            "monotone": run(ok[0], (0.82, 0.65), ok[2], flat),
-            "positional_flatness": run(*ok, skewed),
+    def test_block_tree_band_failure_fails_exactly_that_check(self, monkeypatch):
+        _fake_score_preset(monkeypatch, bt={**_BT, "hard": (0.50, 0.50)})
+        result = data_gate(DEFAULT_PRESETS, [1000])
+        failing = [k for k, v in result["checks"].items() if not v]
+        assert failing == ["block_tree_in_band"]
+
+    def test_monotone_needs_pooled_means_and_the_strength_order(self, monkeypatch):
+        _fake_score_preset(monkeypatch, wl={**_WL, "medium": (0.82, 0.82)})
+        result = data_gate(DEFAULT_PRESETS, [1000, 1001])
+        failing = [k for k, v in result["checks"].items() if not v]
+        assert failing == ["monotone"]
+
+        seen: list = []
+        _fake_score_preset(monkeypatch, seen=seen)
+        data_gate(DEFAULT_PRESETS, [1000], strength=0.6)
+        strengths = {preset: s for preset, _, _, s in seen}
+        assert (strengths["easy"], strengths["medium"], strengths["hard"]) == (
+            0.8,
+            0.7,
+            0.6,
+        )
+
+    def test_monotone_fails_when_the_presets_do_not_order_their_strengths(
+        self, monkeypatch, tmp_path
+    ):
+        flat = tmp_path / "medium.yaml"
+        text = (ROOT / "config" / "synthetic_medium.yaml").read_text()
+        assert "precursor_strength: 0.7" in text
+        flat.write_text(
+            text.replace("precursor_strength: 0.7", "precursor_strength: 0.5")
+        )
+        _fake_score_preset(monkeypatch, extra={str(flat): "medium"})
+        result = data_gate({**DEFAULT_PRESETS, "medium": str(flat)}, [1000])
+        failing = [k for k, v in result["checks"].items() if not v]
+        assert failing == ["monotone"]
+
+    def test_gate_json_has_the_documented_keys_and_pooled_means(self, monkeypatch):
+        _fake_score_preset(
+            monkeypatch,
+            bt={**_BT, "hard": lambda seed: (0.55 + (seed - 1000) / 100, 0.62)},
+        )
+        result = data_gate(DEFAULT_PRESETS, [1000, 1001, 1002])
+        assert set(result) == {
+            "seeds",
+            "n_blocks",
+            "strength_override",
+            "preset_config_hash",
+            "auroc",
+            "onset_recall",
+            "test_onsets",
+            "checks",
+            "passed",
         }
-        for flag, outcome in cases.items():
-            assert outcome["passed"] is False, flag
-            failing = [k for k, v in outcome["checks"].items() if not v]
-            assert failing == [flag], flag
+        assert result["seeds"] == [1000, 1001, 1002]
+        assert result["n_blocks"] == 3000
+        assert result["strength_override"] is None
+        block_tree = result["auroc"]["hard"]["block_tree"]
+        assert block_tree["val"] == pytest.approx([0.55, 0.56, 0.57])
+        assert block_tree["test"] == pytest.approx([0.62] * 3)
+        assert block_tree["pooled_mean"] == pytest.approx(
+            np.mean([0.55, 0.56, 0.57, 0.62, 0.62, 0.62])
+        )
+        assert json.loads(json.dumps(result, allow_nan=False)) == result
 
+    def test_preset_hash_follows_the_data_block_only(self, tmp_path):
+        text = (ROOT / "config" / "synthetic_hard.yaml").read_text()
+
+        def hashed(old: str, new: str) -> str:
+            assert old in text
+            path = tmp_path / f"hard_{abs(hash((old, new)))}.yaml"
+            path.write_text(text.replace(old, new))
+            return gates.preset_config_hash({**DEFAULT_PRESETS, "hard": str(path)})
+
+        base = gates.preset_config_hash(DEFAULT_PRESETS)
+        assert len(base) == 16
+        assert hashed("decoy_rate: 0.2", "decoy_rate: 0.3") != base
+        assert hashed("lr: 0.0003", "lr: 0.0005") == base
+
+    def test_small_structural_run_scores_all_three_presets(self):
+        started = time.monotonic()
+        result = data_gate(DEFAULT_PRESETS, [1000], n_blocks=300)
+        for preset in ("easy", "medium", "hard"):
+            for baseline in ("window_logistic", "block_tree"):
+                scores = result["auroc"][preset][baseline]
+                for value in (*scores["val"], *scores["test"], scores["pooled_mean"]):
+                    assert np.isfinite(value) and 0.0 <= value <= 1.0
+        assert result["n_blocks"] == 300
+        assert len(result["onset_recall"]["val"]) == 5
+        assert len(result["onset_recall"]["test"]) == 5
+        assert isinstance(result["test_onsets"][0], int)
+        assert time.monotonic() - started < 300
+
+    def test_gate_cli_writes_the_json_and_exits_by_passed(self, monkeypatch, tmp_path):
+        calls: list = []
+        outcome = {"seeds": [1000], "checks": {"x": True}, "passed": True}
+
+        def fake_gate(config_paths, seeds, n_blocks=None, strength=None):
+            calls.append((config_paths, seeds, n_blocks, strength))
+            return dict(outcome)
+
+        monkeypatch.setattr(gates, "data_gate", fake_gate)
         out = tmp_path / "gate.json"
-        run(*ok, flat)
-        assert gates.main(["--seed", "1000", "--out", str(out)]) == 0
+        assert gates.main(["--out", str(out)]) == 0
         assert json.loads(out.read_text())["passed"] is True
+        assert calls == [(DEFAULT_PRESETS, list(TUNING_SEEDS), None, None)]
 
-        run(*ok, skewed)
-        assert gates.main(["--seed", "1000"]) == 1
-
-        capsys.readouterr()
-        assert gates.main(["--seed", "2026"]) == 2
-        assert "evaluation seed" in capsys.readouterr().out
-
-    @pytest.mark.slow  # runs in every CI job; M2.16 measured the PR run at 3 min
-    def test_shipped_presets_pass_the_data_gate_on_the_tuning_seed(self):
-        result = data_gate(DEFAULT_PRESETS, TUNING_SEED)
-        assert result["passed"], json.dumps(result, indent=2)
+        outcome["passed"] = False
+        assert (
+            gates.main(
+                ["--seeds", "1001,1000", "--n-blocks", "50", "--strength", "0.7"]
+            )
+            == 1
+        )
+        assert calls[-1] == (DEFAULT_PRESETS, [1001, 1000], 50, 0.7)
