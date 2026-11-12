@@ -45,7 +45,7 @@ format that export no longer supports (DGNTY-3, DGNTY-35). No shipped config wri
 ## Commands
 
 ```bash
-# Tests (1404 collected: test_core 69, test_data 118, test_models 23, test_privacy 42,
+# Tests (1464 collected: test_core 78, test_data 169, test_models 23, test_privacy 42,
 # test_operator 4, test_docs 769, test_train 78, test_checkpoint 3, test_export 9,
 # test_calibration 3, test_labels 7, test_gates 11, test_ci 4, test_eval 103,
 # test_colab_eval 13, test_scripts 19, test_release 129 — one skips without CUDA)
@@ -100,7 +100,7 @@ One data path, one backbone, three interchangeable heads. The pieces only make s
 
 ```
 data/source/synthetic.py            →  event-record frame: raw columns + block_id, is_anomalous,
-                                       anomaly_type, anomaly_id, block_label
+                                       anomaly_type, anomaly_id, block_label, build_up
 data/source/crypto.py               →  raw DataFrame (volume, price[, fee_rate, tx_count]), no labels
 core/privacy.py                     →  privacy stage: one release per block split (train/val/test), BEFORE signals
 data/pipeline.py TransactionPipeline→  compute_signals → RobustScaler → sliding windows
@@ -148,11 +148,16 @@ a mechanism, it needs a test in `tests/test_privacy.py` or CI's 100% gate on tha
   If a model's input width is unexpected, check `available_features` first.
   The checkpoint stores `available_features` in order (`meta.feature_names`).
 - **Synthetic data is an event record of blocks, interleaved.** `SyntheticGenerator` writes one
-  row per step with `block_id`, `is_anomalous`, `anomaly_type`, `anomaly_id` and `block_label`;
+  row per step with `block_id`, `is_anomalous`, `anomaly_type`, `anomaly_id`, `block_label` and `build_up`;
   normal and anomalous blocks are drawn independently, so they interleave. Labels come from the
   per-row event record, never from a single row. Risk = overlap rule: a window is positive when its
   anomalous fraction exceeds `data.label_overlap`, never "label of the last row". `create_sequences`
   rejects 2-D targets; forecast targets come from `data.labels.forecast_labels`.
+  `precursor_strength > 0` overlays build-ups on four anomaly types, from a child random
+  stream; `decoy_rate > 0` adds decoys (build-ups nothing follows) from a second one, so it
+  never moves a true build-up; strength 0 reproduces the old frame. `build_up` is for tests
+  and analysis: `data.pipeline.EVENT_LABEL_COLUMNS` refuses it and the other label columns
+  as features.
   `train/loop.py::prepare_data` uses `TransactionPipeline.process_blocks`: shuffle and split blocks 70/15/15,
   fit the scaler on train blocks only, and compute signals and windows inside each block.
   `prepare_data(config, privacy_seed=None)` seeds only the privacy noise (default: `synthetic.seed`);

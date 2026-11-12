@@ -22,6 +22,20 @@ ANOMALY_TYPES = (
     "fee_evasion",
 )
 
+# Anomaly types that have a build-up before their onset (apply_build_up).
+BUILD_UP_TYPES = ("wash_trading", "pump_and_dump", "fee_spike", "fee_evasion")
+# Leading coefficients of each type's injector, scaled by the ramp weight in
+# apply_build_up: a column is multiplied by 1 + c * w, "drift" is added to the
+# log-return. At peak <= severity every ramp row's volume, fee and count effect stays
+# below the anomaly's own; the pump_and_dump drift is the exception, a ramp of L rows
+# adds 0.01 * peak * (L + 1) to the log-price against the pump's 0.15 * severity.
+PRECURSOR_EFFECT: dict[str, dict[str, float]] = {
+    "wash_trading": {"volume": 4.0, "tx_count": 3.0},
+    "pump_and_dump": {"volume": 3.0, "drift": 0.02},
+    "fee_spike": {"fee_rate": 9.0, "tx_count": 1.0},
+    "fee_evasion": {"fee_rate": -0.9, "volume": 1.0},
+}
+
 # Largest volume multiplier at severity 1 across the injectors above (flash_crash at
 # its first row, 1 + 5s). Update it with the effect table (M2.14).
 MAX_VOLUME_MULTIPLIER = 6.0
@@ -118,6 +132,28 @@ def _fee_evasion(frame, start, duration, severity, rng):
     a["fee_rate"][span] *= 1 - 0.9 * severity
     a["volume"][span] *= 1 + severity
     return _build(frame, a, _returns(a))
+
+
+def apply_build_up(
+    frame: pd.DataFrame, lo: int, n: int, kind: str, peak: float
+) -> pd.DataFrame:
+    """Ramp the type's own effect over rows ``lo .. lo + n - 1``.
+
+    Row ``i`` of the ramp carries weight ``w_i = peak * (i + 1) / n``. Returns a
+    modified copy that touches only ``volume, price, fee_rate, tx_count``.
+    """
+    if kind not in BUILD_UP_TYPES:
+        raise ValueError(f"{kind!r} has no build-up; expected one of {BUILD_UP_TYPES}")
+    a = _arrays(frame)
+    r = _returns(a)
+    w = peak * (np.arange(n) + 1) / n
+    span = slice(lo, lo + n)
+    for column, c in PRECURSOR_EFFECT[kind].items():
+        if column == "drift":
+            _add_returns(r, lo, c * w)
+        else:
+            a[column][span] *= 1 + c * w
+    return _build(frame, a, r)
 
 
 ANOMALY_INJECTORS: dict[

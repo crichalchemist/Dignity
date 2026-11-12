@@ -368,6 +368,14 @@ def _write(tmp_path, **sections):
 
 
 class TestSyntheticConfig:
+    def test_smoke_preset_keeps_build_ups_off_until_the_strength_is_committed(self):
+        cfg = DignityConfig.from_yaml(str(ROOT / "config/smoke.yaml"))
+        synthetic = cfg.data.synthetic
+        assert synthetic.precursor_strength == 0.0
+        assert synthetic.decoy_rate == 0.0
+        frame = SyntheticGenerator(synthetic).generate()
+        assert set(frame["build_up"]) == {0}
+
     def test_smoke_preset_val_and_test_each_hold_both_classes(self):
         # risk_metrics raises on a single-class split (M3.2); CI must never hit that.
         cfg = DignityConfig.from_yaml(str(ROOT / "config/smoke.yaml"))
@@ -398,6 +406,34 @@ class TestSyntheticConfig:
     def test_unknown_synthetic_key_is_rejected(self, tmp_path):
         with pytest.raises(TypeError, match="nope"):
             DignityConfig.from_yaml(_write(tmp_path, data={"synthetic": {"nope": 1}}))
+
+    def test_precursor_fields_default_to_off_and_the_design_length_range(self):
+        cfg = SyntheticConfig()
+        assert cfg.precursor_strength == 0.0
+        assert cfg.precursor_len_range == (10, 30)
+        assert cfg.decoy_rate == 0.0
+
+    @pytest.mark.parametrize("field_name", ["precursor_strength", "decoy_rate"])
+    def test_precursor_strength_and_decoy_rate_must_lie_in_the_unit_interval(
+        self, field_name
+    ):
+        for bad in (-0.1, 1.01):
+            with pytest.raises(ValueError, match=field_name):
+                SyntheticConfig(**{field_name: bad})
+        for ok in (0.0, 1.0):
+            assert getattr(SyntheticConfig(**{field_name: ok}), field_name) == ok
+
+    @pytest.mark.parametrize("bad", [(3, 10), (30, 10), (10,), (10, 20, 30)])
+    def test_precursor_length_range_must_be_two_ints_from_four_up_in_order(self, bad):
+        with pytest.raises(ValueError, match="precursor_len_range"):
+            SyntheticConfig(precursor_len_range=bad)
+        assert SyntheticConfig(precursor_len_range=(4, 4)).precursor_len_range == (4, 4)
+
+    def test_precursor_length_range_loads_from_yaml_as_a_tuple(self, tmp_path):
+        cfg = DignityConfig.from_yaml(
+            _write(tmp_path, data={"synthetic": {"precursor_len_range": [12, 20]}})
+        )
+        assert cfg.data.synthetic.precursor_len_range == (12, 20)
 
     def test_block_must_hold_a_window_plus_the_horizon(self):
         with pytest.raises(ValueError, match="block_len"):

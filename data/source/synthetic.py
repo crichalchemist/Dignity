@@ -4,7 +4,11 @@ Every block is an independent normal process (``data.source.dynamics``). With
 probability ``contamination`` a block gets typed anomalies at random onsets
 (``data.source.anomalies``); the generator writes the label columns. One
 ``np.random.Generator`` drives everything and the global numpy RNG is never
-touched (DGNTY-19).
+touched (DGNTY-19). The build-up overlay draws from child streams, so the main
+stream, and with it every anomaly, is the same at any ``precursor_strength``. So is
+every log-return and every volume, fee and count outside a build-up; only a
+pump-and-dump ramp's drift moves the price level for the rest of its block. True
+ramps and decoys have a stream each, so ``decoy_rate`` never moves a true ramp.
 """
 
 import math
@@ -18,7 +22,9 @@ from data.source.anomalies import (
     ANOMALY_INJECTORS,
     ANOMALY_TYPES,
     BENIGN_SPIKE_MAX_M,
+    BUILD_UP_TYPES,
     MAX_VOLUME_MULTIPLIER,
+    apply_build_up,
     inject_benign_spike,
 )
 from data.source.dynamics import (
@@ -90,13 +96,27 @@ class SyntheticGenerator:
         n = cfg.block_len
         raw = {column: [] for column in RAW_COLUMNS}
         is_anomalous, anomaly_type, anomaly_id, block_label = [], [], [], []
+        build_up = []
         next_id = 0
+        # child stream for the build-up overlay: no draw from the main stream
+        crng = np.random.default_rng(
+            [int(self.rng.bit_generator.state["state"]["state"]), 1]
+        )
+        # a second child stream for decoys: the decoy gate runs in every block, so
+        # on the true-ramp stream it would shift every later true-ramp length
+        drng = np.random.default_rng(
+            [int(self.rng.bit_generator.state["state"]["state"]), 2]
+        )
+        lo_len, hi_len = cfg.precursor_len_range
+        capable = [t for t in BUILD_UP_TYPES if cfg.type_weights.get(t, 0) > 0]
 
         for block_id in range(cfg.n_blocks):
             block = self._normal_block(block_id)
             mask = np.zeros(n, dtype=bool)
             types = np.full(n, "none", dtype=object)
             ids = np.full(n, -1, dtype=np.int64)
+            phase = np.zeros(n, dtype=np.int8)
+            spans = []
 
             if self.rng.random() < cfg.contamination:
                 for start, duration in self._spans():
@@ -110,6 +130,7 @@ class SyntheticGenerator:
                     types[span] = kind
                     ids[span] = next_id
                     next_id += 1
+                    spans.append((start, duration, kind, severity))
             elif self.rng.random() < cfg.benign_spike_rate:
                 block = inject_benign_spike(block, self.rng)
 
@@ -117,12 +138,48 @@ class SyntheticGenerator:
             if self.rng.random() < cfg.label_noise:
                 label = 1 - label
 
+            if cfg.precursor_strength > 0:
+                prev_end = 0
+                for start, duration, kind, severity in spans:  # in row order
+                    if kind in BUILD_UP_TYPES:
+                        length = int(crng.integers(lo_len, hi_len + 1))  # always drawn
+                        lo = max(prev_end, start - length)
+                        if start - lo >= lo_len:  # a clipped short ramp is skipped
+                            block = apply_build_up(
+                                block,
+                                lo,
+                                start - lo,
+                                kind,
+                                cfg.precursor_strength * severity,
+                            )
+                            phase[lo:start] = 1
+                    prev_end = start + duration
+
+                # a decoy: a ramp no anomaly follows. It may not overlap or touch an
+                # anomaly or a true ramp, so it never ends where an anomaly begins.
+                if cfg.decoy_rate > 0 and capable and drng.random() < cfg.decoy_rate:
+                    kind = str(drng.choice(capable))
+                    severity = float(drng.uniform(*cfg.severity_range))
+                    length = int(drng.integers(lo_len, hi_len + 1))
+                    for _ in range(10):
+                        lo = int(drng.integers(0, n - length + 1))
+                        hi = lo + length
+                        near = slice(max(lo - 1, 0), min(hi + 1, n))
+                        if mask[near].any() or phase[near].any():
+                            continue
+                        block = apply_build_up(
+                            block, lo, length, kind, cfg.precursor_strength * severity
+                        )
+                        phase[lo:hi] = 2
+                        break
+
             for column in RAW_COLUMNS:
                 raw[column].append(block[column].to_numpy(copy=True))
             is_anomalous.append(mask)
             anomaly_type.append(types)
             anomaly_id.append(ids)
             block_label.append(np.full(n, label, dtype=np.int8))
+            build_up.append(phase)
 
         rows = np.arange(cfg.n_blocks * n, dtype=np.int64)
         return pd.DataFrame(
@@ -137,6 +194,7 @@ class SyntheticGenerator:
                 "anomaly_type": np.concatenate(anomaly_type),
                 "anomaly_id": np.concatenate(anomaly_id),
                 "block_label": np.concatenate(block_label),
+                "build_up": np.concatenate(build_up),
             }
         )
 
