@@ -15,7 +15,7 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from core.config import DignityConfig
+from core.config import TUNING_SEEDS, DignityConfig
 from data.loader import create_dataloader
 from data.pipeline import TransactionPipeline
 from data.source.synthetic import RAW_COLUMNS
@@ -28,12 +28,15 @@ from eval.baselines import (
 )
 from eval.metrics import (
     FPR_BUDGET,
+    detection_gain,
     forecast_metrics,
     lead_times,
     model_gate,
+    paired_forecast_gain,
     policy_metrics,
     risk_metrics,
     threshold_at_fpr,
+    warned_onsets,
 )
 from eval.plots import (
     plot_forecast_pr_auc,
@@ -42,7 +45,7 @@ from eval.plots import (
     plot_policy_cost,
     plot_pr_curves,
 )
-from models.head.policy import cost_matrix, decide_actions
+from models.head.policy import ACTIONS, cost_matrix, decide_actions
 from train.checkpoint import build_model_from_meta, load_checkpoint
 from train.engine import predict
 from train.loop import FitResult, fit, prepare_data
@@ -311,6 +314,19 @@ def run_risk(
     return _payload(metrics, baselines, run_ctx)
 
 
+def _alarm_threshold(val, last_column: np.ndarray) -> float:
+    """The 1% FPR point of a last-horizon val score column over unmasked windows.
+
+    ``inf`` (never alarms) when the unmasked val windows hold one class.
+    """
+    last = val.y_forecast.shape[1] - 1
+    m = val.forecast_mask
+    y_val, s_val = val.y_forecast[m, last], last_column[m]
+    if len(np.unique(y_val)) < 2:
+        return float("inf")
+    return threshold_at_fpr(y_val, s_val, FPR_BUDGET)
+
+
 def _early_warning(val, test, val_score, test_score, n_boot: int, seed: int) -> dict:
     """Per-horizon PR-AUC and lead time of ``[N, H]`` scores on the test split.
 
@@ -318,11 +334,7 @@ def _early_warning(val, test, val_score, test_score, n_boot: int, seed: int) -> 
     unmasked windows; ``None`` in the result when no finite threshold fits.
     """
     last = test_score.shape[1] - 1
-    m = val.forecast_mask
-    y_val, s_val = val.y_forecast[m, last], val_score[m, last]
-    threshold = float("inf")
-    if len(np.unique(y_val)) == 2:
-        threshold = threshold_at_fpr(y_val, s_val, FPR_BUDGET)
+    threshold = _alarm_threshold(val, val_score[:, last])
     metrics = forecast_metrics(
         test.y_forecast,
         test_score,
@@ -364,11 +376,13 @@ def run_forecast(
     runs = _train_seeds(forecast_config, data, seed_name)
     _, risk_val, risk_test = risk
 
-    model_sides = []
+    model_sides, val_scores, test_scores = [], [], []
     for k, (_, result) in enumerate(runs):
         boot = n_boot if k == 0 else 0  # CIs only for the headline seed
         val_score = _predict(forecast_config, result, data.val.X)["score"]
         test_score = _predict(forecast_config, result, data.test.X)["score"]
+        val_scores.append(val_score)
+        test_scores.append(test_score)
         model_sides.append(
             _early_warning(data.val, data.test, val_score, test_score, boot, seed)
         )
@@ -388,6 +402,44 @@ def run_forecast(
         "mean_pr_auc": _spread([_mean_pr_auc(m) for m in model_sides]),
         "lead_time_median": _spread([m["lead_time"]["median"] for m in model_sides]),
     }
+    # seed-matched gain: training seed k's forecast against seed k's risk score
+    metrics["gain_by_horizon"] = paired_forecast_gain(
+        data.test.y_forecast,
+        data.test.forecast_mask,
+        data.test.block_index,
+        test_scores,
+        [risk_score_forecast(r, horizon) for r in risk_test],
+        n_boot,
+        seed,
+    )
+    # warning share: onsets warned at the 1% false-alarm threshold, against a
+    # random score held to the same threshold rule
+    test, val, last = data.test, data.val, horizon - 1
+    warned = []
+    for val_score, test_score in zip(val_scores, test_scores, strict=True):
+        onset_block, w = warned_onsets(
+            test_score[:, last],
+            _alarm_threshold(val, val_score[:, last]),
+            test.y_forecast,
+            test.forecast_mask,
+            test.block_index,
+            test.end_row,
+        )
+        warned.append(w)
+    rng = np.random.default_rng(seed)
+    random_val = rng.random(len(val.y_forecast))
+    random_test = rng.random(len(test.y_forecast))
+    _, random_warned = warned_onsets(
+        random_test,
+        _alarm_threshold(val, random_val),
+        test.y_forecast,
+        test.forecast_mask,
+        test.block_index,
+        test.end_row,
+    )
+    metrics["warning"] = detection_gain(
+        warned, random_warned, onset_block, test.block_index, n_boot, seed
+    )
     baselines = {"risk_score_forecast": baseline_side}
 
     img_dir = Path(config.eval.img_dir)
@@ -405,6 +457,11 @@ def run_forecast(
     print(
         f"lead time median: model {metrics['lead_time']['median']} "
         f"| risk_score_forecast {base['lead_time']['median']}"
+    )
+    warning = metrics["warning"]
+    print(
+        f"warning: detection {warning['detection_rate']} "
+        f"vs random {warning['random_rate']}"
     )
     print(f"wrote {path}")
     return result
@@ -434,10 +491,12 @@ def run_policy(
         policy_config, data, seed_name, [r.best_path for _, r in risk_runs]
     )
 
-    model_sides, baseline_sides = [], []
+    model_sides, baseline_sides, uncapped = [], [], []
     for k, (_, result) in enumerate(runs):
         boot = n_boot if k == 0 else 0  # CIs only for the headline seed
         probs = _predict(policy_config, result, test.X)["probs"]
+        # the share of windows whose argmax is review, before the cap
+        uncapped.append(float((probs.argmax(1) == ACTIONS.index("review")).mean()))
         actions = decide_actions(probs, budget)
         model_sides.append(
             policy_metrics(actions, test.y_risk, C, test.block_index, boot, seed)
@@ -458,6 +517,11 @@ def run_policy(
         "baseline_expected_cost": _spread(
             [m["expected_cost"]["value"] for m in baseline_sides]
         ),
+        "review_rate": _spread([m["review_rate"]["value"] for m in model_sides]),
+        "baseline_review_rate": _spread(
+            [m["review_rate"]["value"] for m in baseline_sides]
+        ),
+        "uncapped_review_share": _spread(uncapped),
     }
     baselines = {"threshold_policy": baseline_sides[0]}
 
@@ -520,6 +584,15 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="also write privacy.json and the privacy-versus-utility curve",
     )
+    parser.add_argument(
+        "--data-seed",
+        type=int,
+        default=None,
+        help=(
+            "run on one tuning seed of TUNING_SEEDS (1000-1009) under its own "
+            "run directory; needs --seed tuning"
+        ),
+    )
     args = parser.parse_args(argv)
 
     tasks = {t.strip() for t in args.tasks.split(",")}
@@ -527,23 +600,34 @@ def main(argv: list[str] | None = None) -> int:
         parser.error(f"unknown task {task!r}; choose from risk, forecast, policy")
     if args.smoke and args.seed == "eval":
         parser.error("--smoke never runs on the evaluation seed")
+    if args.data_seed is not None and args.seed != "tuning":
+        parser.error("--data-seed needs --seed tuning")
+    if args.data_seed is not None and args.data_seed not in TUNING_SEEDS:
+        parser.error(
+            f"--data-seed must be a tuning seed ({TUNING_SEEDS[0]}-{TUNING_SEEDS[-1]})"
+        )
 
     config = DignityConfig.from_yaml(
         str(_ROOT / "config" / "smoke.yaml") if args.smoke else args.config
     )
-    config.data.synthetic.seed = getattr(config.eval, f"{args.seed}_seed")
+    config.data.synthetic.seed = (
+        args.data_seed
+        if args.data_seed is not None
+        else getattr(config.eval, f"{args.seed}_seed")
+    )
+    seed_name = args.seed if args.data_seed is None else f"tuning_{args.data_seed}"
     run_ctx = _run_ctx(config)  # once, after the seed override
 
     # forecast and policy baselines score with the risk models (and policy warm
     # starts from them), so risk is always fitted
     df, data = prepare_data(config)
-    risk = _fit_risk(config, data, args.seed)
+    risk = _fit_risk(config, data, seed_name)
     if "risk" in tasks:
-        run_risk(config, args.seed, run_ctx, df, data, risk)
+        run_risk(config, seed_name, run_ctx, df, data, risk)
     if "forecast" in tasks:
-        run_forecast(config, args.seed, data, risk, run_ctx)
+        run_forecast(config, seed_name, data, risk, run_ctx)
     if "policy" in tasks:
-        run_policy(config, args.seed, data, risk, run_ctx)
+        run_policy(config, seed_name, data, risk, run_ctx)
     if args.privacy_sweep:
         run_privacy_sweep(config, run_ctx)
     return 0

@@ -132,6 +132,11 @@ class TrainConfig:
             )
 
 
+TUNING_SEEDS: tuple[int, ...] = tuple(range(1000, 1010))
+SELECTION_SEEDS: tuple[int, ...] = tuple(range(1000, 1008))
+CONFIRMATION_SEEDS: tuple[int, ...] = (1008, 1009)
+
+
 @dataclass
 class EvalConfig:
     """The `eval:` block: seeds and output locations for the evaluation run."""
@@ -259,6 +264,9 @@ class PolicyConfig:
 
     costs: dict = field(default_factory=_default_costs)
     review_budget: float = 0.05  # share of windows sent to analysts (blocks excluded)
+    collapse_review_factor: float = (
+        10.0  # review-share multiple of the budget that counts as collapse
+    )
 
     def __post_init__(self):
         if set(self.costs) != _ACTION_NAMES:
@@ -279,6 +287,12 @@ class PolicyConfig:
             raise ValueError(
                 f"review_budget must satisfy 0 < review_budget < 1, "
                 f"got {self.review_budget}"
+            )
+        if not 0 < self.collapse_review_factor * self.review_budget < 1:
+            raise ValueError(
+                f"collapse_review_factor must satisfy 0 < collapse_review_factor "
+                f"* review_budget < 1, got {self.collapse_review_factor} "
+                f"* {self.review_budget}"
             )
 
 

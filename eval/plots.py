@@ -110,7 +110,9 @@ def plot_policy_cost(result: dict, path: str) -> None:
     """Expected cost per window for the model and the threshold baseline.
 
     ``result`` is a policy.json payload; whiskers are the block-bootstrap CIs and
-    the subtitle gives each side's review and block rates.
+    the subtitle gives each side's review and block rates. When the result
+    carries ``seed_spread``, each training seed's expected cost is a point over
+    its bar.
     """
     plt = _pyplot()
     sides = {
@@ -126,6 +128,11 @@ def plot_policy_cost(result: dict, path: str) -> None:
         if low is not None and high is not None:
             err = [[max(v - low, 0.0)], [max(high - v, 0.0)]]
             ax.errorbar([i], [v], yerr=err, color="black", capsize=4)
+    if "seed_spread" in result["metrics"]:
+        spread = result["metrics"]["seed_spread"]
+        for i, key in enumerate(("expected_cost", "baseline_expected_cost")):
+            values = spread[key]["values"]
+            ax.scatter([i] * len(values), values, color="black", s=12, zorder=3)
     ax.set_xticks(range(len(sides)))
     ax.set_xticklabels(list(sides))
     ax.set_ylabel("expected cost per window")

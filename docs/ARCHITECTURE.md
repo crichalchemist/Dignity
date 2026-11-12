@@ -276,6 +276,7 @@ forecast alarm threshold and the baseline policy's thresholds all use validation
 | --- | --- |
 | `--config PATH` or `--smoke` | A full run of a config, or the CI-sized `config/smoke.yaml`. Exactly one is required. |
 | `--seed tuning` or `--seed eval` | Which `eval` seed drives the generator. `--smoke` never runs on the evaluation seed. |
+| `--data-seed N` | Needs `--seed tuning`; N is any tuning seed (1000 to 1009) and replaces the generator seed, so a rehearsal can run on a seed other than the config's. The three tasks train under their own run directory `eval_tuning_<N>`; the privacy sweep directories are not seed-qualified, so give each data seed its own `train.checkpoint_dir` when sweeping. |
 | `--tasks risk,forecast,policy` | The default. Unknown names exit 2. Forecast and policy also fit risk, because their baseline is today's risk score and each policy seed warm-starts from the same seed's risk model, but the risk result file is written only when `risk` is in `--tasks`. |
 | `--privacy-sweep` | Also trains risk with this run's config at each `eval.epsilons` value, taking the privacy block and the features of `config/train_risk.yaml`, with its Laplace epsilons rescaled to that total, public bounds and seeded noise (`privacy.deterministic_rng`, not DP-grade). Trains a non-private reference per replicate, then writes the privacy results and the curve (`docs/img/privacy_curve.png` by default). |
 
@@ -291,7 +292,7 @@ one block overlap (`eval/metrics.py::bootstrap_ci`, DGNTY-21).
 | Task | Metrics (`eval/metrics.py`) | Baselines (`eval/baselines.py`) |
 | --- | --- | --- |
 | Risk | `risk_metrics`: AUROC, PR-AUC, recall at 1% false-positive rate, Brier score, prevalence, recall per anomaly type at the test split's 1%-false-positive point; also scored per block, a block's score being its highest window score | `majority`; `window_logistic` on the raw columns' window statistics; `block_tree` on per-block statistics, trained on the noisy `block_label` |
-| Forecast | `forecast_metrics`: PR-AUC per horizon on unmasked windows; `lead_times`: rows between the first alarm and each onset | `risk_score_forecast`: today's risk score used at every horizon |
+| Forecast | `forecast_metrics`: PR-AUC per horizon on unmasked windows; `lead_times`: rows between the first alarm and each onset; `paired_forecast_gain`: seed-matched average-precision gain over the risk-score baseline, block bootstrap; `detection_gain`: share of onsets warned versus a random score, block bootstrap | `risk_score_forecast`: today's risk score used at every horizon |
 | Policy | `policy_metrics`: expected cost, review rate, block rate, anomaly recall, false-block rate | `threshold_policy`: two thresholds on the risk score, tuned on validation under the review budget |
 
 `metrics.model_gate` in the risk file (`eval/metrics.py::model_gate`) holds a window gate,
