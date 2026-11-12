@@ -47,6 +47,7 @@ receives typed anomalies at random onsets.
 | `anomaly_type` | str (object under pandas 2) | The anomaly's type on anomalous rows, `none` elsewhere. |
 | `anomaly_id` | int64 | Counter of injected anomalies, `-1` on normal rows. Every anomaly gets its own id, so back-to-back anomalies stay distinct (`tests/test_labels.py::TestWindowLabels::test_back_to_back_anomalies_count_as_a_new_onset`). |
 | `block_label` | int8 | 1 when the block holds an anomaly, flipped with probability `data.synthetic.label_noise`. Only the block-level baseline trains on it. |
+| `build_up` | int8 | 0 on ordinary rows, 1 on the rows of a build-up that precedes an anomaly, 2 on a decoy. For tests and analysis only: no shipped config lists it as a feature. |
 
 `fee_rate` and `tx_count` are not calibrated against public data. They are only kept
 plausible: `fee_rate` has a spread, and `tx_count` tracks volume within a block and is
@@ -73,6 +74,28 @@ which checks this table against them.
 (`data/source/anomalies.py::inject_benign_spike`). `anomalies_per_block`,
 `duration_range`, `severity_range` and `type_weights` shape the draw; see the comments
 in [config/base.yaml](../config/base.yaml).
+
+### Build-ups and decoys
+
+With `data.synthetic.precursor_strength` above 0 the generator adds a build-up on rows
+that stay labelled normal.
+
+- `wash_trading`, `pump_and_dump`, `fee_spike` and `fee_evasion` get a linear build-up over
+  the rows before the onset. Its length is drawn from `data.synthetic.precursor_len_range`
+  and its intensity at row i of an n-row ramp is `data.synthetic.precursor_strength` times
+  the anomaly's severity times (i+1)/n: `data.source.anomalies.apply_build_up` scales the
+  type's own effect down by that weight.
+  Accumulation lifts volume and the quoted level drifts up; a backlog lifts counts and fee
+  rates; structuring probes the fee level.
+- `flash_crash` and `layering` have no build-up, so about a third of first onsets stay
+  unpredictable by construction.
+- Build-up rows stay labelled normal: `is_anomalous` is false, `anomaly_type` is `none`,
+  and `block_label` is unchanged.
+- A true build-up that the block start or the previous anomaly clips to fewer rows than the
+  range minimum is skipped, so a short ramp cannot give the outcome away. A ramp can still
+  start right where the previous anomaly ended (recurrence context).
+- Strength 0 reproduces the earlier frame exactly, because the ramps use their own random
+  stream, and no label moves at any strength.
 
 ### Labels
 

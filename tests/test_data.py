@@ -1,6 +1,7 @@
 """Test data pipeline."""
 
 import dataclasses
+import hashlib
 import random
 import secrets
 from pathlib import Path
@@ -12,7 +13,7 @@ import scipy.stats
 import torch
 from numpy.lib.stride_tricks import sliding_window_view
 
-from core.config import DignityConfig, PrivacyConfig, SyntheticConfig
+from core.config import DataConfig, DignityConfig, PrivacyConfig, SyntheticConfig
 from core.privacy import BudgetExhausted, PrivacyManager
 from core.signals import SignalProcessor
 from data.labels import window_starts
@@ -72,6 +73,7 @@ class TestSyntheticGenerator:
             "anomaly_type",
             "anomaly_id",
             "block_label",
+            "build_up",
         ]
         assert tuple(easy_frame.columns[1:5]) == RAW_COLUMNS
         assert len(easy_frame) == 100 * 160
@@ -85,6 +87,7 @@ class TestSyntheticGenerator:
             "is_anomalous": np.bool_,
             "anomaly_id": np.int64,
             "block_label": np.int8,
+            "build_up": np.int8,
         }
         for column, dtype in dtypes.items():
             assert easy_frame[column].dtype == dtype, column
@@ -1268,6 +1271,55 @@ def _flat(rows: int = 60) -> pd.DataFrame:
     )
 
 
+# pre-R2 generator, captured before DGNTY-50 changed generate()
+PRE_OVERLAY_DIGEST = "c60a3cc6d8e3c0448f2615308d1a532697cdba4447db4676f340a615acc11ce2"
+
+
+def _frame_digest(frame: pd.DataFrame) -> str:
+    """sha256 over column names, dtypes and values (floats rounded to 8 places)."""
+    h = hashlib.sha256()
+    h.update("\0".join(frame.columns).encode())
+    for column in frame.columns:
+        values = frame[column].to_numpy()
+        h.update(str(values.dtype).encode())
+        if values.dtype == object:
+            h.update("\0".join(values).encode())
+        else:
+            h.update(np.round(values.astype(float), 8).tobytes())
+    return h.hexdigest()
+
+
+def _precursor_frame(
+    strength=0.8, decoy=0.0, seed=1000, n_blocks=80, **overrides
+) -> pd.DataFrame:
+    config = SyntheticConfig(
+        n_blocks=n_blocks,
+        block_len=160,
+        contamination=0.6,
+        seed=seed,
+        precursor_strength=strength,
+        decoy_rate=decoy,
+    )
+    return SyntheticGenerator(dataclasses.replace(config, **overrides)).generate()
+
+
+def _ramps(frame: pd.DataFrame) -> list[tuple[int, int, int, int]]:
+    """(block_id, lo, hi, value) per maximal run of one nonzero build_up value.
+
+    ``hi`` is exclusive and rows are local to the block.
+    """
+    runs = []
+    for block_id, rows in frame.groupby("block_id", sort=True):
+        phase = rows["build_up"].to_numpy()
+        lo = 0
+        for i in range(1, len(phase) + 1):
+            if i == len(phase) or phase[i] != phase[lo]:
+                if phase[lo] != 0:
+                    runs.append((int(block_id), lo, i, int(phase[lo])))
+                lo = i
+    return runs
+
+
 class TestPrecursors:
     """Build-ups: the early, weaker form of an anomaly's own effect (DGNTY-50)."""
 
@@ -1331,6 +1383,120 @@ class TestPrecursors:
         assert kind not in BUILD_UP_TYPES
         with pytest.raises(ValueError, match=kind):
             apply_build_up(_flat(), 10, 20, kind, 0.5)
+
+    def test_strength_zero_frame_is_bit_identical_to_the_pre_overlay_generator(self):
+        config = SyntheticConfig(
+            n_blocks=6, block_len=160, contamination=0.6, seed=1000
+        )
+        frame = SyntheticGenerator(config).generate()
+        frame = frame.drop(columns=["build_up"], errors="ignore")
+        assert _frame_digest(frame) == PRE_OVERLAY_DIGEST
+
+    def test_zero_strength_ignores_every_other_precursor_setting(self):
+        plain = _precursor_frame(0.0)
+        other = _precursor_frame(0.0, decoy=0.9, precursor_len_range=(5, 9))
+        pd.testing.assert_frame_equal(plain, other)
+        assert (plain["build_up"] == 0).all()
+
+    def test_precursors_change_no_label_column(self):
+        off = _precursor_frame(0.0)
+        on = _precursor_frame(0.8, decoy=0.2)
+        for column in (
+            "is_anomalous",
+            "anomaly_type",
+            "anomaly_id",
+            "block_label",
+            "block_id",
+        ):
+            pd.testing.assert_series_equal(off[column], on[column])
+        outside = (on["build_up"] == 0).to_numpy()
+        assert (~outside).any()
+        for column in ("volume", "fee_rate", "tx_count"):
+            np.testing.assert_array_equal(
+                off[column].to_numpy()[outside], on[column].to_numpy()[outside]
+            )
+
+    def test_strength_moves_only_the_ramps_never_positions_or_severities(self):
+        # The ramps draw from their own stream, so a stronger overlay leaves every
+        # anomaly (position, type, severity: its volume, fee and counts) and every
+        # row outside a build-up exactly as at strength 0.
+        off = _precursor_frame(0.0)
+        weak = _precursor_frame(0.4)
+        strong = _precursor_frame(0.8)
+        assert _ramps(weak) == _ramps(strong) != []
+        outside = (strong["build_up"] == 0).to_numpy()
+        assert strong.loc[strong["is_anomalous"], "build_up"].eq(0).all()
+        for frame in (weak, strong):
+            for column in ("volume", "fee_rate", "tx_count"):
+                np.testing.assert_array_equal(
+                    off[column].to_numpy()[outside], frame[column].to_numpy()[outside]
+                )
+
+    def test_build_up_intensity_at_row_i_is_strength_times_severity_times_ramp(self):
+        # wash_trading scales volume by 1 + 4 * w_i, so (ratio - 1) * n / (i + 1)
+        # is the same on every row of a ramp and equals 4 * strength * severity.
+        types = {"wash_trading": 1.0}
+        off = _precursor_frame(0.0, type_weights=types)
+        on = _precursor_frame(0.8, type_weights=types)
+        ratio = on["volume"].to_numpy() / off["volume"].to_numpy()
+        runs = _ramps(on)
+        assert runs
+        for block_id, lo, hi, value in runs:
+            assert value == 1
+            rows = block_id * 160 + np.arange(lo, hi)
+            slope = (ratio[rows] - 1.0) * (hi - lo) / (np.arange(hi - lo) + 1)
+            np.testing.assert_allclose(slope, slope[0], rtol=1e-9)
+            assert 4 * 0.8 * 0.3 - 1e-9 <= slope[0] <= 4 * 0.8 + 1e-9
+
+    def test_build_up_rows_are_labelled_normal(self):
+        frame = _precursor_frame(0.8, decoy=0.2)
+        marked = frame[frame["build_up"] != 0]
+        assert set(marked["build_up"]) >= {1}
+        assert not marked["is_anomalous"].any()
+        assert (marked["anomaly_type"] == "none").all()
+        assert (marked["anomaly_id"] == -1).all()
+
+    def test_true_build_up_ends_where_a_capable_anomaly_starts(self):
+        frame = _precursor_frame(0.8, decoy=0.2)
+        true_runs = [r for r in _ramps(frame) if r[3] == 1]
+        assert true_runs
+        for block_id, _, hi, _ in true_runs:
+            rows = frame[frame["block_id"] == block_id]
+            assert hi < 160
+            assert rows["is_anomalous"].to_numpy()[hi]
+            assert rows["anomaly_type"].to_numpy()[hi] in BUILD_UP_TYPES
+
+    def test_flash_crash_and_layering_have_no_build_up(self):
+        frame = _precursor_frame(
+            0.8, decoy=0.2, type_weights={"flash_crash": 1.0, "layering": 1.0}
+        )
+        assert frame["is_anomalous"].any()
+        assert _ramps(frame) == []
+        assert (frame["build_up"] == 0).all()
+
+    def test_precursor_length_is_inside_the_configured_range(self):
+        runs = _ramps(_precursor_frame(0.8, precursor_len_range=(10, 30)))
+        assert runs
+        assert all(10 <= hi - lo <= 30 for _, lo, hi, _ in runs)
+
+    def test_no_build_up_is_shorter_than_the_configured_minimum(self):
+        # a true ramp clipped by the block start or the previous anomaly below the
+        # minimum is skipped, never kept: a short ramp would give the outcome away
+        frame = _precursor_frame(
+            0.8,
+            decoy=0.5,
+            n_blocks=200,
+            contamination=1.0,
+            anomalies_per_block=(3, 3),
+            precursor_len_range=(12, 20),
+        )
+        runs = _ramps(frame)
+        assert runs
+        assert all(12 <= hi - lo <= 20 for _, lo, hi, _ in runs)
+
+    def test_strength_above_one_is_refused_at_config_load(self):
+        with pytest.raises(ValueError, match="precursor_strength"):
+            DataConfig(synthetic={"precursor_strength": 1.5})
 
 
 def _normal_frame(preset: str) -> pd.DataFrame:
