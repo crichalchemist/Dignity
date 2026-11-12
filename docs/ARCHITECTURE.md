@@ -140,9 +140,11 @@ All labels come from the per-row event record, never from a single row
 `config/synthetic_{easy,medium,hard}.yaml` are the three difficulty presets.
 `eval/gates.py::data_gate` generates each preset once per seed on the ten tuning
 seeds, splits it by block and scores two baselines on the val and the test split:
-`window_logistic` on windows and `block_tree` on blocks. Each number it judges is a
-mean over seeds, except the onset count, which every seed must meet on its own. It
-passes when all six checks hold: each baseline's hard-preset
+`window_logistic` on windows and `block_tree` on blocks. The AUROCs, the recall
+spread, the mean lift and the build-up share it judges are means over seeds, and the
+forecast PR-AUC ratio is a ratio of two means; the onset count, each seed's lift
+floor and the per-horizon win counts bind every seed on its own; the detection gain
+is pooled over all seeds' onsets. It passes when all six checks hold: each baseline's hard-preset
 AUROC, the mean of the val and test scores over all seeds, lies in
 `eval.gates.AUROC_BAND`; the same means fall strictly from easy to medium to hard for
 both baselines, and the build-up strength falls with them; the `window_logistic`
