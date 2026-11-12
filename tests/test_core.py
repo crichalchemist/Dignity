@@ -368,6 +368,14 @@ def _write(tmp_path, **sections):
 
 
 class TestSyntheticConfig:
+    def test_smoke_preset_keeps_build_ups_off_until_the_strength_is_committed(self):
+        cfg = DignityConfig.from_yaml(str(ROOT / "config/smoke.yaml"))
+        synthetic = cfg.data.synthetic
+        assert synthetic.precursor_strength == 0.0
+        assert synthetic.decoy_rate == 0.0
+        frame = SyntheticGenerator(synthetic).generate()
+        assert set(frame["build_up"]) == {0}
+
     def test_smoke_preset_val_and_test_each_hold_both_classes(self):
         # risk_metrics raises on a single-class split (M3.2); CI must never hit that.
         cfg = DignityConfig.from_yaml(str(ROOT / "config/smoke.yaml"))

@@ -1577,7 +1577,11 @@ def _normal_frame(preset: str) -> pd.DataFrame:
     """The preset's normal process alone: no anomalies or spikes, 200 blocks."""
     synthetic = DignityConfig.from_yaml(str(ROOT / preset)).data.synthetic
     normal = dataclasses.replace(
-        synthetic, contamination=0.0, benign_spike_rate=0.0, n_blocks=200
+        synthetic,
+        contamination=0.0,
+        benign_spike_rate=0.0,
+        precursor_strength=0.0,
+        n_blocks=200,
     )
     return SyntheticGenerator(normal).generate()
 
