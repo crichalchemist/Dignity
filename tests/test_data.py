@@ -1508,6 +1508,37 @@ class TestPrecursors:
         assert touching
         assert any(hi - lo == 12 for _, lo, hi in touching)
 
+    def test_decoy_build_up_is_followed_by_no_anomaly_at_its_end(self):
+        # a decoy ends the way a true build-up ends, so the end alone reveals nothing
+        frame = _precursor_frame(0.8, decoy=1.0)
+        decoys = [r for r in _ramps(frame) if r[3] == 2]
+        assert decoys
+        for block_id, _, hi, _ in decoys:
+            flagged = frame[frame["block_id"] == block_id]["is_anomalous"].to_numpy()
+            assert hi == 160 or not flagged[hi]
+
+    def test_decoys_use_the_full_length_law(self):
+        frame = _precursor_frame(0.8, decoy=1.0, precursor_len_range=(10, 30))
+        lengths = [hi - lo for _, lo, hi, v in _ramps(frame) if v == 2]
+        assert lengths
+        assert all(10 <= length <= 30 for length in lengths)
+
+    def test_no_decoy_is_drawn_when_no_build_up_type_has_weight(self):
+        none = _precursor_frame(
+            0.8, decoy=1.0, type_weights={"flash_crash": 1.0, "layering": 1.0}
+        )
+        assert (none["build_up"] == 0).all()
+        some = _precursor_frame(
+            0.8, decoy=1.0, type_weights={"wash_trading": 1.0, "layering": 1.0}
+        )
+        assert any(v == 2 for *_, v in _ramps(some))
+
+    def test_decoy_rate_sets_the_share_of_blocks_with_a_decoy(self):
+        frame = _precursor_frame(0.8, decoy=0.2, n_blocks=400)
+        with_decoy = {b for b, _, _, v in _ramps(frame) if v == 2}
+        # the one-in-ten-tries failure and the overlap rule only lower the share
+        assert 0.12 <= len(with_decoy) / 400 <= 0.28
+
     def test_strength_above_one_is_refused_at_config_load(self):
         with pytest.raises(ValueError, match="precursor_strength"):
             DataConfig(synthetic={"precursor_strength": 1.5})
@@ -1608,6 +1639,19 @@ class TestPublicBounds:
     def test_volume_bounds_cover_the_hard_preset(self):
         cfg = DignityConfig.from_yaml(str(ROOT / "config/synthetic_hard.yaml"))
         syn = dataclasses.replace(cfg.data.synthetic, n_blocks=50, seed=1000)
+        v = np.log1p(SyntheticGenerator(syn).generate()["volume"].to_numpy())
+        lo, hi = public_log1p_volume_bounds(cfg.data.synthetic)
+        assert np.mean((v < lo) | (v > hi)) <= 0.001
+
+    def test_volume_bounds_cover_the_largest_build_up(self):
+        cfg = DignityConfig.from_yaml(str(ROOT / "config/synthetic_hard.yaml"))
+        syn = dataclasses.replace(
+            cfg.data.synthetic,
+            n_blocks=50,
+            seed=1000,
+            precursor_strength=1.0,
+            decoy_rate=1.0,
+        )
         v = np.log1p(SyntheticGenerator(syn).generate()["volume"].to_numpy())
         lo, hi = public_log1p_volume_bounds(cfg.data.synthetic)
         assert np.mean((v < lo) | (v > hi)) <= 0.001

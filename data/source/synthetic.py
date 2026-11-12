@@ -101,6 +101,7 @@ class SyntheticGenerator:
             [int(self.rng.bit_generator.state["state"]["state"]), 1]
         )
         lo_len, hi_len = cfg.precursor_len_range
+        capable = [t for t in BUILD_UP_TYPES if cfg.type_weights.get(t, 0) > 0]
 
         for block_id in range(cfg.n_blocks):
             block = self._normal_block(block_id)
@@ -146,6 +147,24 @@ class SyntheticGenerator:
                             )
                             phase[lo:start] = 1
                     prev_end = start + duration
+
+                # a decoy: a ramp no anomaly follows. It may not overlap or touch an
+                # anomaly or a true ramp, so it never ends where an anomaly begins.
+                if cfg.decoy_rate > 0 and capable and crng.random() < cfg.decoy_rate:
+                    kind = str(crng.choice(capable))
+                    severity = float(crng.uniform(*cfg.severity_range))
+                    length = int(crng.integers(lo_len, hi_len + 1))
+                    for _ in range(10):
+                        lo = int(crng.integers(0, n - length + 1))
+                        hi = lo + length
+                        near = slice(max(lo - 1, 0), min(hi + 1, n))
+                        if mask[near].any() or phase[near].any():
+                            continue
+                        block = apply_build_up(
+                            block, lo, length, kind, cfg.precursor_strength * severity
+                        )
+                        phase[lo:hi] = 2
+                        break
 
             for column in RAW_COLUMNS:
                 raw[column].append(block[column].to_numpy(copy=True))
