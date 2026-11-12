@@ -101,6 +101,13 @@ def _passing():
             "metrics": {
                 "expected_cost": {"value": 0.21},
                 "review_rate": {"value": 0.03},
+                "seed_spread": {
+                    "train_seeds": [42, 43, 44],
+                    "expected_cost": {"values": [0.21, 0.22, 0.20]},
+                    "baseline_expected_cost": {"values": [0.27] * 3},
+                    "review_rate": {"values": [0.03, 0.04, 0.05]},
+                    "uncapped_review_share": {"values": [0.06, 0.08, 0.1]},
+                },
             },
             "baselines": {"threshold_policy": {"expected_cost": {"value": 0.27}}},
         },
@@ -158,20 +165,6 @@ class TestVerifyRelease:
         c2 = verify(tmp_path, SEED, EPS)[0]
         assert c2.passed is False and "n/a" in c2.detail
 
-    def test_policy_must_cost_less_than_the_threshold_baseline(self, tmp_path):
-        _write(tmp_path, policy={"metrics": {"expected_cost": {"value": 0.30}}})
-        c4 = verify(tmp_path, SEED, EPS)[2]
-        assert c4.passed is False
-        assert "0.3000" in c4.detail and "0.2700" in c4.detail
-
-    def test_a_cheaper_policy_that_overspends_the_review_budget_fails(self, tmp_path):
-        over = PolicyConfig().review_budget + 0.01
-        _write(tmp_path, policy={"metrics": {"review_rate": {"value": over}}})
-        c4 = verify(tmp_path, SEED, EPS)[2]
-        assert c4.passed is False
-        assert f"{over:.4f}" in c4.detail
-        assert f"{PolicyConfig().review_budget:.4f}" in c4.detail
-
     def test_privacy_curve_needs_every_configured_epsilon_and_the_reference(
         self, tmp_path
     ):
@@ -208,9 +201,9 @@ class TestVerifyRelease:
     def test_a_missing_key_is_unusable(self, tmp_path):
         _write(tmp_path)
         data = json.loads((tmp_path / "policy.json").read_text())
-        del data["baselines"]["threshold_policy"]
+        del data["metrics"]["seed_spread"]["baseline_expected_cost"]
         (tmp_path / "policy.json").write_text(json.dumps(data))
-        with pytest.raises(ResultsError, match="threshold_policy"):
+        with pytest.raises(ResultsError, match="baseline_expected_cost"):
             verify(tmp_path, SEED, EPS)
         assert main(["--results", str(tmp_path)]) == 2
 
@@ -278,7 +271,7 @@ class TestVerifyRelease:
         ]
 
     def test_a_failed_criterion_exits_one(self, tmp_path):
-        _write(tmp_path, policy={"metrics": {"expected_cost": {"value": 0.30}}})
+        _write(tmp_path, policy=_policy(h=[0.30] * 3))
         assert main(["--results", str(tmp_path)]) == 1
 
 
@@ -296,6 +289,23 @@ def _set(data, path, value):
     for key in path[:-1]:
         node = node[key]
     node[path[-1]] = value
+
+
+def _policy(h=None, t=None, rate=None, share=None):
+    """Policy override: the per-seed lists given, each as `{"values": [...]}`."""
+    lists = {
+        "expected_cost": h,
+        "baseline_expected_cost": t,
+        "review_rate": rate,
+        "uncapped_review_share": share,
+    }
+    spread = {k: {"values": v} for k, v in lists.items() if v is not None}
+    return {"metrics": {"seed_spread": spread}}
+
+
+def _pv(tmp_path, **policy_args):
+    _write(tmp_path, policy=_policy(**policy_args))
+    return release.policy_verdict(_read(tmp_path, "policy"), BUDGET, 3, 10.0)
 
 
 def _run(tmp_path, i, **overrides):
@@ -405,6 +415,92 @@ class TestCriterion3SeedMatchedGain:
             verify(tmp_path, SEED, EPS)
 
 
+class TestCriterion4MeanWithinTolerance:
+    @pytest.mark.parametrize(("h", "passed"), [(0.2835, True), (0.2836, False)])
+    def test_a_mean_exactly_5_percent_over_the_baseline_passes_and_just_over_fails(
+        self, tmp_path, h, passed
+    ):
+        # 1.05 * 0.27 = 0.2835
+        c4 = _run(tmp_path, 2, policy=_policy(h=[h] * 3, t=[0.27] * 3))
+        assert c4.passed is passed
+        assert f"mean cost {h:.4f} vs threshold baseline 0.2700" in c4.detail
+
+    def test_the_means_are_compared_not_the_per_seed_ratios(self, tmp_path):
+        # per-seed ratios are 4.0, 0.67 and 0.5 (mean 1.72) but the means are
+        # 0.2 against 0.25
+        c4 = _run(tmp_path, 2, policy=_policy(h=[0.2] * 3, t=[0.05, 0.3, 0.4]))
+        assert c4.passed
+
+    def test_one_collapsed_seed_fails_even_when_the_mean_is_within_tolerance(
+        self, tmp_path
+    ):
+        v = _pv(tmp_path, share=[0.06, 0.08, 0.9])
+        assert v.cost_passed and not v.passed and v.collapsed == [2]
+
+    def test_a_share_exactly_at_the_collapse_limit_passes(self, tmp_path):
+        share = [0.06, 0.08, 10.0 * BUDGET]
+        assert _run(tmp_path, 2, policy=_policy(share=share)).passed
+
+    def test_a_seed_over_the_review_budget_fails_even_when_cheaper(self, tmp_path):
+        v = _pv(tmp_path, rate=[0.03, 0.04, BUDGET + 0.0001])
+        assert v.cost_passed and not v.passed and v.over_budget == [2]
+
+    def test_a_review_rate_exactly_at_the_budget_passes(self, tmp_path):
+        assert _run(tmp_path, 2, policy=_policy(rate=[0.03, 0.04, BUDGET])).passed
+
+    def test_two_seeds_of_three_are_unusable_not_a_verdict(self, tmp_path):
+        _write(tmp_path, policy=_policy(h=[0.2, 0.2]))
+        with pytest.raises(ResultsError, match="expected_cost"):
+            verify(tmp_path, SEED, EPS)
+
+    def test_a_per_seed_list_of_the_wrong_length_is_unusable_whichever_it_is(
+        self, tmp_path
+    ):
+        _write(tmp_path, policy=_policy(rate=[0.03] * 4))
+        with pytest.raises(ResultsError, match="review_rate"):
+            verify(tmp_path, SEED, EPS)
+        _write(tmp_path, policy={"metrics": {"seed_spread": {"train_seeds": [42]}}})
+        with pytest.raises(ResultsError, match="train_seeds"):
+            verify(tmp_path, SEED, EPS)
+
+    def test_a_baseline_mean_that_is_not_positive_is_unusable_not_a_verdict(
+        self, tmp_path
+    ):
+        _write(tmp_path, policy=_policy(t=[0.0] * 3))
+        with pytest.raises(ResultsError, match="baseline"):
+            verify(tmp_path, SEED, EPS)
+
+    def test_missing_per_seed_fields_are_unusable(self, tmp_path):
+        _edit(
+            tmp_path,
+            "policy",
+            lambda d: d["metrics"]["seed_spread"].pop("uncapped_review_share"),
+        )
+        with pytest.raises(ResultsError, match="uncapped_review_share"):
+            verify(tmp_path, SEED, EPS)
+
+    def test_the_headline_seed_alone_no_longer_decides(self, tmp_path):
+        policy = {"metrics": {"expected_cost": {"value": 9.0}}}
+        assert _run(tmp_path, 2, policy=policy).passed
+
+    @pytest.mark.parametrize(
+        "field",
+        [
+            "expected_cost",
+            "baseline_expected_cost",
+            "review_rate",
+            "uncapped_review_share",
+        ],
+    )
+    def test_a_null_per_seed_value_fails_and_says_n_a(self, tmp_path, field):
+        def edit(d):
+            d["metrics"]["seed_spread"][field]["values"][1] = None
+
+        _edit(tmp_path, "policy", edit)
+        c4 = verify(tmp_path, SEED, EPS)[2]
+        assert not c4.passed and "n/a" in c4.detail
+
+
 class TestCriteriaBoundaries:
     """Each case states the verdict on a boundary of the spec: "beats", "lower" and
     "above" are strict, "at most the budget" is inclusive."""
@@ -470,43 +566,6 @@ class TestCriteriaBoundaries:
         assert c2.passed is False and "n/a" in c2.detail
 
     @pytest.mark.parametrize(
-        ("cost", "rate", "passed"),
-        [
-            (0.27, 0.03, False),  # cost equal to the baseline is not lower
-            (0.269, 0.03, True),
-            (0.21, BUDGET, True),  # rate exactly at the budget is within it
-            (0.21, BUDGET + 0.0001, False),
-        ],
-    )
-    def test_policy_must_be_strictly_cheaper_within_an_inclusive_review_budget(
-        self, tmp_path, cost, rate, passed
-    ):
-        _write(
-            tmp_path,
-            policy={
-                "metrics": {
-                    "expected_cost": {"value": cost},
-                    "review_rate": {"value": rate},
-                }
-            },
-        )
-        assert verify(tmp_path, SEED, EPS)[2].passed is passed
-
-    @pytest.mark.parametrize(
-        "path",
-        [
-            ("metrics", "expected_cost", "value"),
-            ("baselines", "threshold_policy", "expected_cost", "value"),
-            ("metrics", "review_rate", "value"),
-        ],
-        ids=lambda p: ".".join(p),
-    )
-    def test_a_null_in_criterion_4_fails_it_and_says_n_a(self, tmp_path, path):
-        _edit(tmp_path, "policy", lambda d: _set(d, path, None))
-        c4 = verify(tmp_path, SEED, EPS)[2]
-        assert c4.passed is False and "n/a" in c4.detail
-
-    @pytest.mark.parametrize(
         "epsilons",
         [
             [*EPS[:1], EPS[2], EPS[1], *EPS[3:]],
@@ -533,27 +592,18 @@ class TestDetailsShowTheMargin:
     def test_a_review_rate_just_over_the_budget_prints_two_different_numbers(
         self, tmp_path
     ):
-        _write(tmp_path, policy={"metrics": {"review_rate": {"value": 0.0504}}})
-        c4 = verify(tmp_path, SEED, EPS)[2]
+        c4 = _run(tmp_path, 2, policy=_policy(rate=[0.03, 0.04, 0.0504]))
         assert c4.passed is False
-        assert "review rate 0.0504 vs budget 0.0500" in c4.detail
+        assert "0.0504" in c4.detail and "vs budget 0.0500" in c4.detail
 
     def test_costs_that_differ_by_a_ten_thousandth_print_differently(self, tmp_path):
-        _write(
-            tmp_path,
-            policy={
-                "metrics": {"expected_cost": {"value": 1.0688}},
-                "baselines": {"threshold_policy": {"expected_cost": {"value": 1.0687}}},
-            },
-        )
-        c4 = verify(tmp_path, SEED, EPS)[2]
-        assert c4.passed is False
-        assert "expected cost 1.0688 vs threshold baseline 1.0687" in c4.detail
+        c4 = _run(tmp_path, 2, policy=_policy(h=[1.0688] * 3, t=[1.0687] * 3))
+        assert "mean cost 1.0688 vs threshold baseline 1.0687" in c4.detail
 
     def test_cost_and_pr_auc_print_four_decimals(self, tmp_path):
         _write(tmp_path)
         lines = [c.detail for c in verify(tmp_path, SEED, EPS)]
-        assert "expected cost 0.2100 vs threshold baseline 0.2700" in lines[2]
+        assert "mean cost 0.2100 vs threshold baseline 0.2700" in lines[2]
         assert "ci_low 0.4700 vs best baseline 0.3100" in lines[0]
 
     def test_the_median_lead_time_keeps_two_decimals(self, tmp_path):
@@ -596,14 +646,22 @@ class TestUnusableResults:
             ("forecast", ("metrics", "lead_time", "median"), float("nan")),
             ("forecast", ("metrics", "gain_by_horizon", 0, "ci_low"), float("inf")),
             ("forecast", ("metrics", "warning", "gain", "ci_low"), True),
-            ("policy", ("metrics", "expected_cost", "value"), "0.2"),
-            ("policy", ("metrics", "expected_cost", "value"), -float("inf")),
+            ("policy", ("metrics", "seed_spread", "expected_cost", "values", 0), "0.2"),
             (
                 "policy",
-                ("baselines", "threshold_policy", "expected_cost", "value"),
+                ("metrics", "seed_spread", "baseline_expected_cost", "values", 1),
+                -float("inf"),
+            ),
+            (
+                "policy",
+                ("metrics", "seed_spread", "review_rate", "values", 2),
+                float("nan"),
+            ),
+            (
+                "policy",
+                ("metrics", "seed_spread", "uncapped_review_share", "values", 0),
                 float("inf"),
             ),
-            ("policy", ("metrics", "review_rate", "value"), float("nan")),
             ("privacy", ("metrics", "points", 0, "epsilon"), "0.1"),
             (
                 "privacy",

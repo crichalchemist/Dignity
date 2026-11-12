@@ -17,6 +17,7 @@ from typing import NamedTuple
 
 ROOT = Path(__file__).resolve().parent.parent
 NAMES = ("risk", "forecast", "policy", "privacy")
+C4_TOLERANCE = 0.05
 
 
 class Criterion(NamedTuple):
@@ -170,17 +171,112 @@ def _criterion_3(forecast: dict, n_train_seeds: int) -> Criterion:
     return Criterion(3, v.passed, detail)
 
 
-def _criterion_4(policy: dict, review_budget: float) -> Criterion:
-    cost = _num(policy, "policy", "metrics.expected_cost.value")
-    base = _num(policy, "policy", "baselines.threshold_policy.expected_cost.value")
-    rate = _num(policy, "policy", "metrics.review_rate.value")
-    cheaper = cost is not None and base is not None and cost < base
-    within = rate is not None and rate <= review_budget
-    detail = (
-        f"expected cost {_f(cost)} vs threshold baseline {_f(base)}; "
-        f"review rate {_f(rate)} vs budget {_f(review_budget)}"
+class PolicyVerdict(NamedTuple):
+    passed: bool
+    cost_passed: bool
+    ratio: float | None
+    per_seed_ratio: list[float | None]
+    collapsed: list[int]
+    over_budget: list[int]
+    raised: dict | None
+
+
+def _per_seed(policy: dict, field: str, n_train_seeds: int) -> list:
+    """The per-seed list `metrics.seed_spread.<field>.values`, one entry per seed."""
+    values = _entries(policy, "policy", f"metrics.seed_spread.{field}.values")
+    if len(values) != n_train_seeds:
+        raise ResultsError(
+            f"policy: metrics.seed_spread.{field}.values has {len(values)} entries, "
+            f"expected {n_train_seeds}"
+        )
+    where = f"metrics.seed_spread.{field}.values."
+    return [_num({str(i): v}, "policy", str(i), where) for i, v in enumerate(values)]
+
+
+def _policy_series(policy: dict, n_train_seeds: int) -> dict[str, list]:
+    seeds = _entries(policy, "policy", "metrics.seed_spread.train_seeds")
+    if len(seeds) != n_train_seeds:
+        raise ResultsError(
+            f"policy: metrics.seed_spread.train_seeds has {len(seeds)} seeds, "
+            f"expected {n_train_seeds}"
+        )
+    fields = (
+        "expected_cost",
+        "baseline_expected_cost",
+        "review_rate",
+        "uncapped_review_share",
     )
-    return Criterion(4, cheaper and within, detail)
+    return {f: _per_seed(policy, f, n_train_seeds) for f in fields}
+
+
+def _mean(values: list) -> float | None:
+    return None if None in values else sum(values) / len(values)
+
+
+def policy_verdict(
+    policy: dict, review_budget: float, n_train_seeds: int, collapse_factor: float
+) -> PolicyVerdict:
+    """Criterion 4 as numbers: the mean-cost rule, collapsed and over-budget seeds."""
+    series = _policy_series(policy, n_train_seeds)
+    head, base = series["expected_cost"], series["baseline_expected_cost"]
+    head_mean, base_mean = _mean(head), _mean(base)
+    if base_mean is not None and base_mean <= 0:
+        raise ResultsError(
+            f"policy: mean baseline_expected_cost {base_mean} must be positive"
+        )
+    per_seed_ratio = [
+        None if h is None or t is None or t <= 0 else h / t
+        for h, t in zip(head, base, strict=True)
+    ]
+    ratio = None
+    cost_passed = False
+    if head_mean is not None and base_mean is not None:
+        ratio = head_mean / base_mean
+        limit = (1 + C4_TOLERANCE) * base_mean
+        cost_passed = head_mean <= limit or math.isclose(
+            head_mean, limit, rel_tol=1e-12
+        )
+    shares, rates = series["uncapped_review_share"], series["review_rate"]
+    collapsed = [
+        k
+        for k, share in enumerate(shares)
+        if share is not None and share > collapse_factor * review_budget
+    ]
+    over_budget = [
+        k for k, rate in enumerate(rates) if rate is not None and rate > review_budget
+    ]
+    complete = None not in shares and None not in rates
+    return PolicyVerdict(
+        cost_passed and complete and not collapsed and not over_budget,
+        cost_passed,
+        ratio,
+        per_seed_ratio,
+        collapsed,
+        over_budget,
+        None,
+    )
+
+
+def _criterion_4(
+    policy: dict, review_budget: float, n_train_seeds: int, collapse_factor: float
+) -> Criterion:
+    v = policy_verdict(policy, review_budget, n_train_seeds, collapse_factor)
+    series = _policy_series(policy, n_train_seeds)
+
+    def listing(values):
+        return "[" + ", ".join(_f(x) for x in values) + "]"
+
+    detail = (
+        f"mean cost {_f(_mean(series['expected_cost']))} vs threshold baseline "
+        f"{_f(_mean(series['baseline_expected_cost']))} "
+        f"(ratio {_f(v.ratio)}, limit {1 + C4_TOLERANCE:.2f}); "
+        f"per-seed ratios {listing(v.per_seed_ratio)}; "
+        f"uncapped review share per seed {listing(series['uncapped_review_share'])} "
+        f"(limit {_f(collapse_factor * review_budget)}); "
+        f"review rate per seed {listing(series['review_rate'])} "
+        f"vs budget {_f(review_budget)}"
+    )
+    return Criterion(4, v.passed, detail)
 
 
 def _criterion_5(privacy: dict, epsilons: list[float]) -> Criterion:
@@ -239,7 +335,7 @@ def verify(
     return [
         _criterion_2(files["risk"]),
         _criterion_3(files["forecast"], n_train_seeds),
-        _criterion_4(files["policy"], review_budget),
+        _criterion_4(files["policy"], review_budget, n_train_seeds, collapse_factor),
         _criterion_5(files["privacy"], epsilons),
     ]
 
