@@ -1,11 +1,16 @@
 """Check the v1.0 success criteria 2 to 5 against the committed results files.
 
 Reads results/v1.0/{risk,forecast,policy,privacy}.json and prints one line per
-criterion, `C<n> PASS|FAIL <detail>`. Exit 0: all pass; 1: a criterion failed;
-2: the results are unusable (missing file, bad JSON, missing key, a value that is
-not a finite number, wrong seed), in which case nothing is reported as passing.
+criterion, `C<n> PASS|FAIL <detail>`. Exit 0: all pass; 1: a criterion failed
+(a recorded training raise counts as a failure); 2: the results are unusable
+(missing file, bad JSON, missing key, a value that is not a finite number, wrong
+seed, wrong number of training seeds), in which case nothing is reported as passing.
 
-    python scripts/verify_release.py [--results results/v1.0]
+`--seed tuning` rehearses on a run from one tuning seed (read from risk.json, every
+file must carry it): it prints a banner naming the seed first and is not the
+evaluation.
+
+    python scripts/verify_release.py [--results results/v1.0] [--seed {eval,tuning}]
 """
 
 import argparse
@@ -28,6 +33,23 @@ class Criterion(NamedTuple):
 
 class ResultsError(ValueError):
     """The results cannot be judged: missing file, bad JSON, missing key, wrong seed."""
+
+
+def _raised(data: dict, name: str) -> dict | None:
+    """The recorded training raise of a results file, or None when there is none."""
+    metrics = _get(data, name, "metrics")
+    if not isinstance(metrics, dict) or "raised" not in metrics:
+        return None
+    raised = metrics["raised"]
+    if not isinstance(raised, dict) or not {"error", "train_seed"} <= raised.keys():
+        raise ResultsError(
+            f"{name}: metrics.raised must hold error and train_seed, found {raised!r}"
+        )
+    return raised
+
+
+def _raised_detail(raised: dict) -> str:
+    return f"training raised {raised['error']} on train seed {raised['train_seed']}"
 
 
 def _load(results_dir: Path, name: str) -> dict:
@@ -127,6 +149,9 @@ class ForecastVerdict(NamedTuple):
 
 def forecast_verdict(forecast: dict, n_train_seeds: int) -> ForecastVerdict:
     """Criterion 3 as numbers: the horizons won and the warning share."""
+    raised = _raised(forecast, "forecast")
+    if raised is not None:
+        return ForecastVerdict(False, 0, 0, 0, False, None, None, None, False, raised)
     seeds = _entries(forecast, "forecast", "metrics.seed_spread.train_seeds")
     if len(seeds) != n_train_seeds:
         raise ResultsError(
@@ -160,6 +185,8 @@ def forecast_verdict(forecast: dict, n_train_seeds: int) -> ForecastVerdict:
 
 def _criterion_3(forecast: dict, n_train_seeds: int) -> Criterion:
     v = forecast_verdict(forecast, n_train_seeds)
+    if v.raised is not None:
+        return Criterion(3, False, _raised_detail(v.raised))
     median = _num(forecast, "forecast", "metrics.lead_time.median")
     detail = (
         f"{v.wins} of {v.n_horizons} horizons clear the seed-matched risk-score "
@@ -217,6 +244,9 @@ def policy_verdict(
     policy: dict, review_budget: float, n_train_seeds: int, collapse_factor: float
 ) -> PolicyVerdict:
     """Criterion 4 as numbers: the mean-cost rule, collapsed and over-budget seeds."""
+    raised = _raised(policy, "policy")
+    if raised is not None:
+        return PolicyVerdict(False, False, None, [], [], [], raised)
     series = _policy_series(policy, n_train_seeds)
     head, base = series["expected_cost"], series["baseline_expected_cost"]
     head_mean, base_mean = _mean(head), _mean(base)
@@ -261,6 +291,8 @@ def _criterion_4(
     policy: dict, review_budget: float, n_train_seeds: int, collapse_factor: float
 ) -> Criterion:
     v = policy_verdict(policy, review_budget, n_train_seeds, collapse_factor)
+    if v.raised is not None:
+        return Criterion(4, False, _raised_detail(v.raised))
     series = _policy_series(policy, n_train_seeds)
 
     def listing(values):
@@ -343,17 +375,30 @@ def verify(
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--results", default=str(ROOT / "results" / "v1.0"))
+    parser.add_argument("--seed", choices=("eval", "tuning"), default="eval")
     args = parser.parse_args(argv)
 
     sys.path.insert(0, str(ROOT))
-    from core.config import EvalConfig
+    from core.config import TUNING_SEEDS, EvalConfig
 
     cfg = EvalConfig()
+    banner = None
     try:
-        criteria = verify(Path(args.results), cfg.eval_seed, cfg.epsilons)
+        seed = cfg.eval_seed
+        if args.seed == "tuning":
+            seed = _get(_load(Path(args.results), "risk"), "risk", "seed")
+            if type(seed) is not int or seed not in TUNING_SEEDS:
+                raise ResultsError(
+                    f"risk: seed {seed!r} is not a tuning seed "
+                    f"({TUNING_SEEDS[0]}-{TUNING_SEEDS[-1]})"
+                )
+            banner = f"rehearsal on tuning seed {seed}: not the evaluation"
+        criteria = verify(Path(args.results), seed, cfg.epsilons)
     except ResultsError as err:
         print(f"unusable results: {err}", file=sys.stderr)
         return 2
+    if banner:
+        print(banner)
     for c in criteria:
         print(f"C{c.id} {'PASS' if c.passed else 'FAIL'} {c.detail}")
     return 0 if all(c.passed for c in criteria) else 1

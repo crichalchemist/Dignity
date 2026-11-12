@@ -501,6 +501,104 @@ class TestCriterion4MeanWithinTolerance:
         assert not c4.passed and "n/a" in c4.detail
 
 
+class TestTuningSeedVerification:
+    def test_a_tuning_seed_run_is_judged_and_labelled_a_rehearsal(
+        self, tmp_path, capsys
+    ):
+        _write(tmp_path, **{n: {"seed": 1003} for n in NAMES})
+        assert main(["--results", str(tmp_path), "--seed", "tuning"]) == 0
+        out = capsys.readouterr().out.splitlines()
+        assert out[0] == "rehearsal on tuning seed 1003: not the evaluation"
+        assert [ln.split()[:2] for ln in out[1:]] == [
+            ["C2", "PASS"],
+            ["C3", "PASS"],
+            ["C4", "PASS"],
+            ["C5", "PASS"],
+        ]
+
+    def test_a_failing_tuning_seed_run_exits_one_under_the_same_label(
+        self, tmp_path, capsys
+    ):
+        _write(
+            tmp_path,
+            **{
+                **{n: {"seed": 1003} for n in NAMES},
+                "policy": {"seed": 1003, **_policy(h=[0.30] * 3)},
+            },
+        )
+        assert main(["--results", str(tmp_path), "--seed", "tuning"]) == 1
+        out = capsys.readouterr().out.splitlines()
+        assert out[0].startswith("rehearsal on tuning seed 1003")
+        assert out[3].startswith("C4 FAIL")
+
+    @pytest.mark.parametrize("seed", [2026, 2027, 999, 1010, "1003", True])
+    def test_a_seed_outside_the_tuning_range_is_unusable_for_the_tuning_mode(
+        self, tmp_path, capsys, seed
+    ):
+        _write(tmp_path, **{n: {"seed": seed} for n in NAMES})
+        assert main(["--results", str(tmp_path), "--seed", "tuning"]) == 2
+        assert capsys.readouterr().out == ""
+
+    @pytest.mark.parametrize(
+        ("policy_seed", "argv"), [(1004, ["--seed", "tuning"]), (1003, [])]
+    )
+    def test_two_tuning_seeds_in_one_run_or_a_tuning_seed_in_default_mode_is_unusable(
+        self, tmp_path, policy_seed, argv
+    ):
+        seeds = {n: {"seed": 1003} for n in NAMES}
+        _write(tmp_path, **{**seeds, "policy": {"seed": policy_seed}})
+        assert main(["--results", str(tmp_path), *argv]) == 2
+
+
+class TestRaisedTraining:
+    def _raise(self, tmp_path, name, error, seed):
+        raised = {"raised": {"error": error, "message": "m", "train_seed": seed}}
+        _edit(tmp_path, name, lambda d: d.update(metrics=raised, baselines={}))
+
+    def test_a_recorded_forecast_raise_fails_criterion_3_and_names_the_seed(
+        self, tmp_path
+    ):
+        self._raise(tmp_path, "forecast", "ForecastNotEligibleError", 43)
+        c3 = verify(tmp_path, SEED, EPS)[1]
+        assert not c3.passed
+        assert c3.detail == "training raised ForecastNotEligibleError on train seed 43"
+
+    def test_a_recorded_policy_raise_fails_criterion_4_but_not_the_others(
+        self, tmp_path
+    ):
+        self._raise(tmp_path, "policy", "PolicyCollapseError", 44)
+        results = verify(tmp_path, SEED, EPS)
+        assert (
+            results[2].detail == "training raised PolicyCollapseError on train seed 44"
+        )
+        assert [c.passed for c in results] == [True, True, False, True]
+
+    def test_a_raise_is_a_failure_exit_one_not_an_unusable_result(self, tmp_path):
+        self._raise(tmp_path, "forecast", "ForecastNotEligibleError", 42)
+        assert main(["--results", str(tmp_path)]) == 1
+
+    def test_the_verdicts_hold_the_raised_payload_and_nothing_passes(self, tmp_path):
+        self._raise(tmp_path, "forecast", "ForecastNotEligibleError", 43)
+        f = release.forecast_verdict(_read(tmp_path, "forecast"), 3)
+        assert f.raised["train_seed"] == 43
+        assert not any(f[:9])
+        self._raise(tmp_path, "policy", "PolicyCollapseError", 44)
+        p = release.policy_verdict(_read(tmp_path, "policy"), BUDGET, 3, 10.0)
+        assert p.raised["train_seed"] == 44
+        assert not (
+            p.passed or p.cost_passed or p.ratio or p.collapsed or p.over_budget
+        )
+
+    def test_a_raised_payload_without_its_error_name_is_unusable(self, tmp_path):
+        _edit(
+            tmp_path,
+            "policy",
+            lambda d: d.update(metrics={"raised": {"train_seed": 44}}),
+        )
+        with pytest.raises(ResultsError, match="raised"):
+            verify(tmp_path, SEED, EPS)
+
+
 class TestCriteriaBoundaries:
     """Each case states the verdict on a boundary of the spec: "beats", "lower" and
     "above" are strict, "at most the budget" is inclusive."""
