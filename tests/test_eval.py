@@ -524,6 +524,61 @@ class TestForecastCriterionStats:
         assert len(seen) == 2 and all(len(d[0]) == 6 for d in seen)
         assert all((a == b).all() for a, b in zip(*seen, strict=True))
 
+    def test_an_alarm_exactly_on_the_threshold_warns_like_the_lead_time_rule(self):
+        # block 0's eligible alarms are 0.5, 0.9, 0.95 and the last is the threshold;
+        # block 1 has nothing eligible at or above it
+        alarm, y, mask, block, end_row = TestLeadTimes()._fixture()
+        onset_block, warned = warned_onsets(alarm, 0.95, y, mask, block, end_row)
+        assert onset_block.tolist() == [0, 1] and warned.tolist() == [True, False]
+        lead = lead_times(alarm, 0.95, y, mask, block, end_row)
+        assert lead["values"] == [1] and lead["n_missed"] == 1
+
+    @staticmethod
+    def _fixed_draw(monkeypatch, counts):
+        monkeypatch.setattr(
+            metrics_module, "_block_counts", lambda *a: iter([np.array(counts)])
+        )
+
+    def test_gain_replicate_weights_rows_by_block_multiplicity_and_means_seeds(
+        self, monkeypatch
+    ):
+        # H = 1, three blocks of two rows; one replicate draws block 0 twice, block 1
+        # once, block 2 never. Hand-computed weighted AP for seed 0: model 11/12,
+        # baseline 13/30, gain 29/60 (presence-only weights would give 5/12). Seed 1
+        # scores the model as its own baseline: gain 0. The mean over seeds is 29/120;
+        # the first seed alone would give 29/60, the last 0.
+        block = np.repeat([0, 1, 2], 2)
+        y = np.array([1, 0, 0, 1, 1, 0], np.float32)[:, None]
+        model = np.array([0.9, 0.3, 0.6, 0.4, 0.1, 0.2])[:, None]
+        base = np.array([0.2, 0.8, 0.5, 0.1, 0.9, 0.4])[:, None]
+        mask = np.ones(6, bool)
+        self._fixed_draw(monkeypatch, [2, 1, 0])
+        (g,) = paired_forecast_gain(y, mask, block, [model, model], [base, model], 1, 0)
+        # full-data AP: model 13/18, baseline 19/30, seed-0 gain 4/45, mean 2/45
+        assert g["value"] == pytest.approx(2 / 45)
+        assert g["ci_low"] == pytest.approx(29 / 120)
+        assert g["ci_high"] == pytest.approx(29 / 120)
+
+    def test_detection_gain_replicate_weights_onsets_by_block_multiplicity(
+        self, monkeypatch
+    ):
+        # onsets sit in blocks 0, 0, 1; the replicate draws block 0 twice, block 1
+        # once, so the onset weights are 2, 2, 1 (presence-only would use 1, 1, 1).
+        # Seed 0 warns on onsets 0 and 1: weighted share 4/5. Seed 1 warns on onset
+        # 0 only: 2/5. The random score warns on onset 2: 1/5. Gain: (3/5) - 1/5 = 2/5.
+        self._fixed_draw(monkeypatch, [2, 1])
+        out = detection_gain(
+            [np.array([1, 1, 0], bool), np.array([1, 0, 0], bool)],
+            np.array([0, 0, 1], bool),
+            np.array([0, 0, 1]),
+            np.array([0, 1]),
+            1,
+            0,
+        )
+        assert out["gain"]["value"] == pytest.approx(1 / 2 - 1 / 3)
+        assert out["gain"]["ci_low"] == pytest.approx(2 / 5)
+        assert out["gain"]["ci_high"] == pytest.approx(2 / 5)
+
 
 def _windows(y, mask, block, end_row):
     """The WindowSet fields ``_early_warning`` reads."""
