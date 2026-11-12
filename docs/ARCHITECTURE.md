@@ -97,12 +97,15 @@ that stay labelled normal.
 - A true build-up that the block start or the previous anomaly clips to fewer rows than the
   range minimum is skipped, so a short ramp cannot give the outcome away. A ramp can still
   start right where the previous anomaly ended (recurrence context).
-- A decoy is a build-up that no anomaly follows: with probability
+- A decoy is a build-up that leads to no anomaly: with probability
   `data.synthetic.decoy_rate` a block holds at most one, of a type drawn evenly among the
   four, with the same length law and intensity as a true one. It may not overlap or touch
   an anomaly or a true build-up (rows one before to one after hold neither), so it never
   ends where an anomaly begins; after ten tries without room the block has none. Its rows
-  are marked `build_up` 2 and stay labelled normal.
+  are marked `build_up` 2 and stay labelled normal. Two limits follow from these rules.
+  An anomaly of a type without a build-up can still begin a few rows after a decoy by
+  chance. And a decoy never starts on the row right after an anomaly, so a build-up that
+  starts there is a true one; the risk score sees the same earlier anomaly.
 - Strength 0 reproduces the earlier frame exactly, because the ramps use their own random
   stream, and no label moves at any strength. Decoys use a stream of their own, so
   `data.synthetic.decoy_rate` never moves a true build-up.
