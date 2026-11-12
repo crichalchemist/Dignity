@@ -1198,6 +1198,7 @@ class TestPrivacyUtility:
             data=dataclasses.replace(
                 shipped.data,
                 batch_size=128,
+                split=(0.7, 0.15, 0.15),  # 150 blocks: keep 105 to train on
                 num_workers=0,
                 synthetic=dataclasses.replace(
                     easy_config.data.synthetic,

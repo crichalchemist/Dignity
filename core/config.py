@@ -102,7 +102,7 @@ class DataConfig:
             "regime",
         ]
     )
-    split: tuple[float, float, float] = (0.7, 0.15, 0.15)  # train / val / test blocks
+    split: tuple[float, float, float] = (0.45, 0.15, 0.40)  # train / val / test blocks
     label_overlap: float = 0.0  # risk positive if overlap fraction > this
     synthetic: SyntheticConfig = field(default_factory=SyntheticConfig)
 

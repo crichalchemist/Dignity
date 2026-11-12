@@ -7,7 +7,7 @@ data:
   seq_len: 50
   batch_size: 64
   num_workers: 0
-  split: [0.7, 0.15, 0.15]
+  split: [0.45, 0.15, 0.40]
   label_overlap: 0.0
   synthetic: {n_blocks: 60, block_len: 120, contamination: 0.5, seed: 1000}
 train: {epochs: 1, use_amp: false, checkpoint_dir: runs/smoke/train, save_interval: 1,

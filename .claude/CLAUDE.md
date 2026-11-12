@@ -45,7 +45,7 @@ format that export no longer supports (DGNTY-3, DGNTY-35). No shipped config wri
 ## Commands
 
 ```bash
-# Tests (1464 collected: test_core 78, test_data 169, test_models 23, test_privacy 42,
+# Tests (1466 collected: test_core 80, test_data 169, test_models 23, test_privacy 42,
 # test_operator 4, test_docs 769, test_train 78, test_checkpoint 3, test_export 9,
 # test_calibration 3, test_labels 7, test_gates 11, test_ci 4, test_eval 103,
 # test_colab_eval 13, test_scripts 19, test_release 129 — one skips without CUDA)
@@ -104,7 +104,7 @@ data/source/synthetic.py            →  event-record frame: raw columns + block
 data/source/crypto.py               →  raw DataFrame (volume, price[, fee_rate, tx_count]), no labels
 core/privacy.py                     →  privacy stage: one release per block split (train/val/test), BEFORE signals
 data/pipeline.py TransactionPipeline→  compute_signals → RobustScaler → sliding windows
-                                       (process_blocks: block split 70/15/15 → SplitData)
+                                       (process_blocks: block split 45/15/40 → SplitData)
 data/labels.py                      →  risk/forecast labels from the event record
 data/loader.py                      →  TransactionDataset (dict batches) / create_dataloader
 models/dignity.py Dignity           →  DignityBackbone + one head
@@ -158,7 +158,7 @@ a mechanism, it needs a test in `tests/test_privacy.py` or CI's 100% gate on tha
   never moves a true build-up; strength 0 reproduces the old frame. `build_up` is for tests
   and analysis: `data.pipeline.EVENT_LABEL_COLUMNS` refuses it and the other label columns
   as features.
-  `train/loop.py::prepare_data` uses `TransactionPipeline.process_blocks`: shuffle and split blocks 70/15/15,
+  `train/loop.py::prepare_data` uses `TransactionPipeline.process_blocks`: shuffle and split blocks 45/15/40,
   fit the scaler on train blocks only, and compute signals and windows inside each block.
   `prepare_data(config, privacy_seed=None)` seeds only the privacy noise (default: `synthetic.seed`);
   the data and the block split always follow `synthetic.seed`.

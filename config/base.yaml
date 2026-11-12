@@ -23,7 +23,7 @@ data:
   source: synthetic  # only "synthetic" in v1.0; other sources are v1.1 (DGNTY-41)
   seq_len: 100  # rows per window (the time axis of the model input)
   batch_size: 64  # windows per batch, for training and for validation scoring
-  split: [0.7, 0.15, 0.15]  # train / val / test shares of BLOCKS; 3 positive fractions summing to 1
+  split: [0.45, 0.15, 0.40]  # train / val / test shares of BLOCKS; 3 positive fractions summing to 1
   label_overlap: 0.0  # risk positive if the anomalous fraction of the window is > this (0.0 = any anomalous row)
   num_workers: 4  # DataLoader worker processes
   # Columns fed to the model, in this order (the order is stored in checkpoints).

@@ -14,7 +14,7 @@ data:
   source: synthetic
   seq_len: 200  # longer context for early warning; block_len 260 >= seq_len + horizon + 1
   batch_size: 32  # Smaller batch for memory
-  split: [0.7, 0.15, 0.15]  # train / val / test blocks
+  split: [0.45, 0.15, 0.40]  # train / val / test blocks
   synthetic:
     block_len: 260  # seq_len 200 + horizon 10 + slack
   num_workers: 4

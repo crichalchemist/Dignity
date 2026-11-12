@@ -401,7 +401,7 @@ class TestSyntheticConfig:
         )
         assert isinstance(cfg.data.synthetic, SyntheticConfig)
         assert cfg.data.synthetic.duration_range == (5, 9)
-        assert cfg.data.split == (0.7, 0.15, 0.15)
+        assert cfg.data.split == (0.45, 0.15, 0.40)
 
     def test_unknown_synthetic_key_is_rejected(self, tmp_path):
         with pytest.raises(TypeError, match="nope"):
@@ -625,3 +625,17 @@ class TestPolicyConfig:
         mutate(d)
         with pytest.raises(ValueError, match=match):
             PolicyConfig(**d)
+
+
+class TestShippedEvaluationSize:
+    def test_every_shipped_config_splits_blocks_45_15_40(self):
+        for path in sorted((ROOT / "config").glob("*.yaml")):
+            split = DignityConfig.from_yaml(path).data.split
+            assert split == (0.45, 0.15, 0.40), path.name
+
+    def test_presets_hold_3000_blocks_so_the_test_split_has_over_200_onsets(self):
+        for name in ("easy", "medium", "hard"):
+            path = ROOT / "config" / f"synthetic_{name}.yaml"
+            syn = DignityConfig.from_yaml(path).data.synthetic
+            assert (syn.n_blocks, syn.block_len) == (3000, 160), name
+            assert (syn.decoy_rate, syn.precursor_len_range) == (0.2, (10, 30)), name
