@@ -19,6 +19,7 @@ from core.signals import SignalProcessor
 from data.labels import window_starts
 from data.loader import TransactionDataset, create_dataloader
 from data.pipeline import (
+    EVENT_LABEL_COLUMNS,
     SIGNAL_SOURCES,
     SplitData,
     TransactionPipeline,
@@ -1538,6 +1539,34 @@ class TestPrecursors:
         with_decoy = {b for b, _, _, v in _ramps(frame) if v == 2}
         # the one-in-ten-tries failure and the overlap rule only lower the share
         assert 0.12 <= len(with_decoy) / 400 <= 0.28
+
+    @pytest.mark.parametrize("col", EVENT_LABEL_COLUMNS)
+    def test_label_columns_cannot_be_named_as_features(self, col):
+        with pytest.raises(ValueError, match=col):
+            TransactionPipeline(features=["volume", col])
+
+    def test_windows_are_identical_when_the_build_up_column_is_dropped_or_shuffled(
+        self,
+    ):
+        frame = _precursor_frame(0.8, decoy=0.2, n_blocks=30)
+        shuffled = frame.copy()
+        shuffled["build_up"] = np.random.default_rng(1).permutation(
+            frame["build_up"].to_numpy()
+        )
+        variants = [frame, frame.drop(columns="build_up"), shuffled]
+        splits = []
+        for df in variants:
+            pipe = TransactionPipeline(seq_len=50, features=list(RAW_COLUMNS))
+            splits.append(
+                pipe.process_blocks(
+                    df, (0.5, 0.25, 0.25), 10, 0.0, np.random.default_rng(0)
+                )
+            )
+        for other in splits[1:]:
+            for name in ("train", "val", "test"):
+                assert np.array_equal(
+                    getattr(splits[0], name).X, getattr(other, name).X
+                )
 
     def test_strength_above_one_is_refused_at_config_load(self):
         with pytest.raises(ValueError, match="precursor_strength"):

@@ -15,6 +15,15 @@ from core.privacy import BudgetExhausted, Generalization, PrivacyBudget, Privacy
 from core.signals import SignalProcessor
 from data.labels import forecast_labels, risk_labels, window_meta, window_starts
 
+# Event-record columns that carry labels: never a feature.
+EVENT_LABEL_COLUMNS = (
+    "is_anomalous",
+    "anomaly_type",
+    "anomaly_id",
+    "block_label",
+    "build_up",
+)
+
 # Derived signal -> the raw column it is computed from, in column order.
 SIGNAL_SOURCES: dict[str, str] = {
     "volume_volatility": "volume",
@@ -107,6 +116,11 @@ class TransactionPipeline:
             "price_change",
             "momentum",
         ]
+        bad = [f for f in self.features if f in EVENT_LABEL_COLUMNS]
+        if bad:
+            raise ValueError(
+                f"{bad[0]!r} is an event-record label column and cannot be a feature"
+            )
 
         # Initialize scaler
         if scaler_type == "robust":
