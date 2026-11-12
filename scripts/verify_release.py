@@ -111,33 +111,63 @@ def _criterion_2(risk: dict) -> Criterion:
     return Criterion(2, window_ok and block_ok, detail)
 
 
-def _criterion_3(forecast: dict) -> Criterion:
-    model = _entries(forecast, "forecast", "metrics.pr_auc_by_horizon")
-    base_path = "baselines.risk_score_forecast.pr_auc_by_horizon"
-    base = _entries(forecast, "forecast", base_path)
-    if len(model) != len(base):
+class ForecastVerdict(NamedTuple):
+    passed: bool
+    wins: int
+    n_horizons: int
+    n_missing: int
+    ranking_passed: bool
+    detection_rate: float | None
+    random_rate: float | None
+    warning_ci_low: float | None
+    warning_passed: bool
+    raised: dict | None
+
+
+def forecast_verdict(forecast: dict, n_train_seeds: int) -> ForecastVerdict:
+    """Criterion 3 as numbers: the horizons won and the warning share."""
+    seeds = _entries(forecast, "forecast", "metrics.seed_spread.train_seeds")
+    if len(seeds) != n_train_seeds:
         raise ResultsError(
-            f"forecast: {len(model)} model horizons but {len(base)} baseline horizons"
+            f"forecast: metrics.seed_spread.train_seeds has {len(seeds)} seeds, "
+            f"expected {n_train_seeds}"
         )
-    if not model:
-        raise ResultsError("forecast: metrics.pr_auc_by_horizon has no horizons")
-    model_path = "metrics.pr_auc_by_horizon."
-    pairs = [
-        (
-            _num(m, "forecast", "value", f"{model_path}{i}."),
-            _num(b, "forecast", "value", f"{base_path}.{i}."),
-        )
-        for i, (m, b) in enumerate(zip(model, base, strict=True))
+    entries = _entries(forecast, "forecast", "metrics.gain_by_horizon")
+    if not entries:
+        raise ResultsError("forecast: metrics.gain_by_horizon has no horizons")
+    lows = [
+        _num(e, "forecast", "ci_low", f"metrics.gain_by_horizon.{i}.")
+        for i, e in enumerate(entries)
     ]
-    wins = sum(m is not None and b is not None and m > b for m, b in pairs)
-    missing = sum(m is None or b is None for m, b in pairs)
+    wins = sum(low is not None and low > 0 for low in lows)
+    ranking_passed = 2 * wins > len(lows)
+    warning_low = _num(forecast, "forecast", "metrics.warning.gain.ci_low")
+    warning_passed = warning_low is not None and warning_low > 0
+    return ForecastVerdict(
+        ranking_passed and warning_passed,
+        wins,
+        len(lows),
+        sum(low is None for low in lows),
+        ranking_passed,
+        _num(forecast, "forecast", "metrics.warning.detection_rate"),
+        _num(forecast, "forecast", "metrics.warning.random_rate"),
+        warning_low,
+        warning_passed,
+        None,
+    )
+
+
+def _criterion_3(forecast: dict, n_train_seeds: int) -> Criterion:
+    v = forecast_verdict(forecast, n_train_seeds)
     median = _num(forecast, "forecast", "metrics.lead_time.median")
     detail = (
-        f"beats the risk-score baseline at {wins} of {len(model)} horizons "
-        f"(needs more than half; {missing} horizon(s) n/a); "
+        f"{v.wins} of {v.n_horizons} horizons clear the seed-matched risk-score "
+        f"baseline (needs more than half; {v.n_missing} n/a); "
+        f"detection {_f(v.detection_rate)} vs random {_f(v.random_rate)} "
+        f"(gain ci_low {_f(v.warning_ci_low)}); "
         f"median lead time {_f(median, 2)}"
     )
-    return Criterion(3, 2 * wins > len(model) and median is not None, detail)
+    return Criterion(3, v.passed, detail)
 
 
 def _criterion_4(policy: dict, review_budget: float) -> Criterion:
@@ -179,12 +209,26 @@ def verify(
     eval_seed: int,
     epsilons: list[float],
     review_budget: float | None = None,
+    n_train_seeds: int | None = None,
+    collapse_factor: float | None = None,
 ) -> list[Criterion]:
     """Criteria 2, 3, 4, 5 in that order; raises ResultsError if unusable."""
-    if review_budget is None:
+    if review_budget is None or collapse_factor is None:
         from core.config import PolicyConfig
 
-        review_budget = PolicyConfig().review_budget
+        policy_cfg = PolicyConfig()
+        review_budget = (
+            policy_cfg.review_budget if review_budget is None else review_budget
+        )
+        collapse_factor = (
+            policy_cfg.collapse_review_factor
+            if collapse_factor is None
+            else collapse_factor
+        )
+    if n_train_seeds is None:
+        from core.config import EvalConfig
+
+        n_train_seeds = EvalConfig().n_train_seeds
     files = {name: _load(results_dir, name) for name in NAMES}
     for name, data in files.items():
         seed = _get(data, name, "seed")
@@ -194,7 +238,7 @@ def verify(
             )
     return [
         _criterion_2(files["risk"]),
-        _criterion_3(files["forecast"]),
+        _criterion_3(files["forecast"], n_train_seeds),
         _criterion_4(files["policy"], review_budget),
         _criterion_5(files["privacy"], epsilons),
     ]

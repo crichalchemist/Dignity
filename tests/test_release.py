@@ -36,11 +36,13 @@ CHARTS = [
 ]
 
 
-def _h(values):
-    """Horizon entries from a list of floats (None = no onsets at that horizon)."""
+def _gain(lows):
+    """Per-horizon gain entries from their lower bounds (None = no paired interval)."""
     return [
-        {"value": v, "ci_low": None if v is None else v / 2, "ci_high": v}
-        for v in values
+        {"value": None, "ci_low": None, "ci_high": None}
+        if low is None
+        else {"value": 0.1, "ci_low": low, "ci_high": 0.2}
+        for low in lows
     ]
 
 
@@ -82,11 +84,16 @@ def _passing():
         "forecast": {
             "seed": SEED,
             "metrics": {
-                "pr_auc_by_horizon": _h([0.40] * 10),
+                "gain_by_horizon": _gain([0.05] * 10),
+                "warning": {
+                    "n_onsets": 60,
+                    "detection_rate": 0.55,
+                    "detection_rate_by_seed": [0.5, 0.55, 0.6],
+                    "random_rate": 0.1,
+                    "gain": {"value": 0.45, "ci_low": 0.3, "ci_high": 0.6},
+                },
                 "lead_time": {"median": 4},
-            },
-            "baselines": {
-                "risk_score_forecast": {"pr_auc_by_horizon": _h([0.30] * 10)}
+                "seed_spread": {"train_seeds": [42, 43, 44]},
             },
         },
         "policy": {
@@ -105,6 +112,10 @@ def _passing():
             },
         },
     }
+
+
+def _read(tmp_path, name):
+    return json.loads((tmp_path / f"{name}.json").read_text())
 
 
 def _write(tmp_path, **overrides):
@@ -146,37 +157,6 @@ class TestVerifyRelease:
         _write(tmp_path, risk={"metrics": {"pr_auc": {"ci_low": None}}})
         c2 = verify(tmp_path, SEED, EPS)[0]
         assert c2.passed is False and "n/a" in c2.detail
-
-    def test_forecast_must_beat_risk_score_at_more_than_half_of_the_horizons(
-        self, tmp_path
-    ):
-        _write(
-            tmp_path,
-            forecast={"metrics": {"pr_auc_by_horizon": _h([0.4] * 5 + [0.2] * 5)}},
-        )
-        assert verify(tmp_path, SEED, EPS)[1].passed is False
-
-    def test_horizon_where_the_model_only_equals_the_baseline_is_not_a_win(
-        self, tmp_path
-    ):
-        # baseline is 0.30 at every horizon: 5 strict wins + 5 ties is 5 of 10
-        _write(
-            tmp_path,
-            forecast={"metrics": {"pr_auc_by_horizon": _h([0.4] * 5 + [0.30] * 5)}},
-        )
-        assert verify(tmp_path, SEED, EPS)[1].passed is False
-
-    def test_horizon_without_onsets_never_counts_as_a_win(self, tmp_path):
-        _write(
-            tmp_path,
-            forecast={"metrics": {"pr_auc_by_horizon": _h([None] * 6 + [0.4] * 4)}},
-        )
-        assert verify(tmp_path, SEED, EPS)[1].passed is False
-
-    def test_forecast_with_no_median_lead_time_fails_and_says_n_a(self, tmp_path):
-        _write(tmp_path, forecast={"metrics": {"lead_time": {"median": None}}})
-        c3 = verify(tmp_path, SEED, EPS)[1]
-        assert c3.passed is False and "n/a" in c3.detail
 
     def test_policy_must_cost_less_than_the_threshold_baseline(self, tmp_path):
         _write(tmp_path, policy={"metrics": {"expected_cost": {"value": 0.30}}})
@@ -237,8 +217,7 @@ class TestVerifyRelease:
     @pytest.mark.parametrize(
         ("name", "path"),
         [
-            ("forecast", ["metrics", "pr_auc_by_horizon"]),
-            ("forecast", ["baselines", "risk_score_forecast", "pr_auc_by_horizon"]),
+            ("forecast", ["metrics", "gain_by_horizon"]),
             ("privacy", ["metrics", "points"]),
         ],
     )
@@ -259,15 +238,13 @@ class TestVerifyRelease:
         [
             (
                 "forecast",
-                lambda d: d["metrics"]["pr_auc_by_horizon"][0].pop("value"),
-                "value",
+                lambda d: d["metrics"]["gain_by_horizon"][0].pop("ci_low"),
+                "ci_low",
             ),
             (
                 "forecast",
-                lambda d: d["baselines"]["risk_score_forecast"]["pr_auc_by_horizon"][
-                    0
-                ].pop("value"),
-                "value",
+                lambda d: d["metrics"]["warning"]["gain"].pop("ci_low"),
+                "ci_low",
             ),
             (
                 "privacy",
@@ -321,12 +298,10 @@ def _set(data, path, value):
     node[path[-1]] = value
 
 
-def _horizons(wins, count):
-    """Forecast override: `wins` strict wins over a 0.30 baseline out of `count`."""
-    return {
-        "metrics": {"pr_auc_by_horizon": _h([0.4] * wins + [0.2] * (count - wins))},
-        "baselines": {"risk_score_forecast": {"pr_auc_by_horizon": _h([0.30] * count)}},
-    }
+def _run(tmp_path, i, **overrides):
+    """Write the passing files with `overrides`, return criterion `i` (0 is C2)."""
+    _write(tmp_path, **overrides)
+    return verify(tmp_path, SEED, EPS)[i]
 
 
 class TestCriterion2WithoutBand:
@@ -359,6 +334,75 @@ class TestCriterion2WithoutBand:
         )
         c2 = verify(tmp_path, SEED, EPS)[0]
         assert c2.passed and shown in c2.detail and "reported, not judged" in c2.detail
+
+
+class TestCriterion3SeedMatchedGain:
+    @pytest.mark.parametrize(
+        ("wins", "count", "passed"),
+        [(6, 10, True), (5, 10, False), (5, 9, True), (4, 9, False)],
+    )
+    def test_more_than_half_of_the_horizons_must_be_clear_wins(
+        self, tmp_path, wins, count, passed
+    ):
+        gain = _gain([0.05] * wins + [-0.01] * (count - wins))
+        c3 = _run(tmp_path, 1, forecast={"metrics": {"gain_by_horizon": gain}})
+        assert c3.passed is passed and f"{wins} of {count} horizons" in c3.detail
+
+    @pytest.mark.parametrize(("low", "win"), [(0.0, False), (1e-9, True)])
+    def test_a_horizon_whose_interval_touches_zero_is_not_a_win(
+        self, tmp_path, low, win
+    ):
+        gain = _gain([low] + [-1.0] * 9)
+        _write(tmp_path, forecast={"metrics": {"gain_by_horizon": gain}})
+        assert release.forecast_verdict(_read(tmp_path, "forecast"), 3).wins == int(win)
+
+    def test_a_horizon_without_a_paired_interval_is_never_a_win_and_says_n_a(
+        self, tmp_path
+    ):
+        gain = _gain([None] * 6 + [0.05] * 4)
+        c3 = _run(tmp_path, 1, forecast={"metrics": {"gain_by_horizon": gain}})
+        assert not c3.passed
+        assert "4 of 10 horizons" in c3.detail and "6 n/a" in c3.detail
+
+    @pytest.mark.parametrize(
+        ("low", "passed"), [(0.0, False), (0.001, True), (None, False)]
+    )
+    def test_the_warning_share_must_beat_a_random_score_by_the_interval_lower_bound(
+        self, tmp_path, low, passed
+    ):
+        warning = {"gain": {"ci_low": low}}
+        c3 = _run(tmp_path, 1, forecast={"metrics": {"warning": warning}})
+        assert c3.passed is passed
+        assert "detection 0.5500 vs random 0.1000" in c3.detail
+
+    def test_a_good_ranking_cannot_rescue_a_chance_level_warning_and_the_reverse(
+        self, tmp_path
+    ):
+        # the median lead time is not judged: a high one rescues nothing
+        metrics = {"warning": {"gain": {"ci_low": -0.1}}, "lead_time": {"median": 9}}
+        _write(tmp_path, forecast={"metrics": metrics})
+        assert not release.forecast_verdict(_read(tmp_path, "forecast"), 3).passed
+        _write(tmp_path, forecast={"metrics": {"gain_by_horizon": _gain([-0.1] * 10)}})
+        v = release.forecast_verdict(_read(tmp_path, "forecast"), 3)
+        assert v.warning_passed and not v.ranking_passed and not v.passed
+
+    def test_the_median_lead_time_is_printed_not_judged(self, tmp_path):
+        c3 = _run(tmp_path, 1, forecast={"metrics": {"lead_time": {"median": None}}})
+        assert c3.passed and "median lead time n/a" in c3.detail
+
+    @pytest.mark.parametrize(
+        ("metrics", "needle"),
+        [
+            ({"seed_spread": {"train_seeds": [42]}}, "train_seeds"),
+            ({"gain_by_horizon": []}, "no horizons"),
+        ],
+    )
+    def test_too_few_training_seeds_or_no_horizons_is_unusable_not_a_verdict(
+        self, tmp_path, metrics, needle
+    ):
+        _write(tmp_path, forecast={"metrics": metrics})
+        with pytest.raises(ResultsError, match=needle):
+            verify(tmp_path, SEED, EPS)
 
 
 class TestCriteriaBoundaries:
@@ -424,30 +468,6 @@ class TestCriteriaBoundaries:
         _edit(tmp_path, "risk", lambda d: _set(d, path, None))
         c2 = verify(tmp_path, SEED, EPS)[0]
         assert c2.passed is False and "n/a" in c2.detail
-
-    @pytest.mark.parametrize(
-        ("wins", "count", "passed"),
-        [(6, 10, True), (5, 10, False), (5, 9, True), (4, 9, False), (1, 1, True)],
-    )
-    def test_forecast_needs_strictly_more_than_half_of_the_horizons(
-        self, tmp_path, wins, count, passed
-    ):
-        _write(tmp_path, forecast=_horizons(wins, count))
-        c3 = verify(tmp_path, SEED, EPS)[1]
-        assert c3.passed is passed
-        assert f"{wins} of {count} horizons" in c3.detail
-
-    def test_a_null_baseline_horizon_is_never_a_win_and_says_n_a(self, tmp_path):
-        base = _h([None] * 6 + [0.30] * 4)
-        _write(
-            tmp_path,
-            forecast={
-                "baselines": {"risk_score_forecast": {"pr_auc_by_horizon": base}}
-            },
-        )
-        c3 = verify(tmp_path, SEED, EPS)[1]
-        assert c3.passed is False
-        assert "4 of 10 horizons" in c3.detail and "6 horizon(s) n/a" in c3.detail
 
     @pytest.mark.parametrize(
         ("cost", "rate", "passed"),
@@ -574,12 +594,8 @@ class TestUnusableResults:
             ("risk", ("baselines", "block_tree", "pr_auc", "value"), [0.5]),
             ("forecast", ("metrics", "lead_time", "median"), "4"),
             ("forecast", ("metrics", "lead_time", "median"), float("nan")),
-            ("forecast", ("metrics", "pr_auc_by_horizon", 0, "value"), float("inf")),
-            (
-                "forecast",
-                ("baselines", "risk_score_forecast", "pr_auc_by_horizon", 3, "value"),
-                True,
-            ),
+            ("forecast", ("metrics", "gain_by_horizon", 0, "ci_low"), float("inf")),
+            ("forecast", ("metrics", "warning", "gain", "ci_low"), True),
             ("policy", ("metrics", "expected_cost", "value"), "0.2"),
             ("policy", ("metrics", "expected_cost", "value"), -float("inf")),
             (
@@ -606,30 +622,6 @@ class TestUnusableResults:
             verify(tmp_path, SEED, EPS)
         assert main(["--results", str(tmp_path)]) == 2
         assert capsys.readouterr().out == ""
-
-    @pytest.mark.parametrize(("model", "base"), [(10, 9), (9, 10)])
-    def test_horizon_lists_of_different_lengths_are_unusable(
-        self, tmp_path, capsys, model, base
-    ):
-        _write(
-            tmp_path,
-            forecast={
-                "metrics": {"pr_auc_by_horizon": _h([0.4] * model)},
-                "baselines": {
-                    "risk_score_forecast": {"pr_auc_by_horizon": _h([0.3] * base)}
-                },
-            },
-        )
-        with pytest.raises(ResultsError, match=f"{model} model horizons but {base}"):
-            verify(tmp_path, SEED, EPS)
-        assert main(["--results", str(tmp_path)]) == 2
-        assert capsys.readouterr().out == ""
-
-    def test_no_horizons_at_all_is_unusable_not_a_failed_criterion(self, tmp_path):
-        _write(tmp_path, forecast=_horizons(0, 0))
-        with pytest.raises(ResultsError, match="no horizons"):
-            verify(tmp_path, SEED, EPS)
-        assert main(["--results", str(tmp_path)]) == 2
 
 
 class TestFinalResults:
