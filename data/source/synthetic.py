@@ -4,9 +4,11 @@ Every block is an independent normal process (``data.source.dynamics``). With
 probability ``contamination`` a block gets typed anomalies at random onsets
 (``data.source.anomalies``); the generator writes the label columns. One
 ``np.random.Generator`` drives everything and the global numpy RNG is never
-touched (DGNTY-19). The build-up overlay draws from a child stream, so the
-main stream, and with it every anomaly and every row outside a build-up, is the
-same at any ``precursor_strength``.
+touched (DGNTY-19). The build-up overlay draws from child streams, so the main
+stream, and with it every anomaly, is the same at any ``precursor_strength``. So is
+every log-return and every volume, fee and count outside a build-up; only a
+pump-and-dump ramp's drift moves the price level for the rest of its block. True
+ramps and decoys have a stream each, so ``decoy_rate`` never moves a true ramp.
 """
 
 import math
@@ -100,6 +102,11 @@ class SyntheticGenerator:
         crng = np.random.default_rng(
             [int(self.rng.bit_generator.state["state"]["state"]), 1]
         )
+        # a second child stream for decoys: the decoy gate runs in every block, so
+        # on the true-ramp stream it would shift every later true-ramp length
+        drng = np.random.default_rng(
+            [int(self.rng.bit_generator.state["state"]["state"]), 2]
+        )
         lo_len, hi_len = cfg.precursor_len_range
         capable = [t for t in BUILD_UP_TYPES if cfg.type_weights.get(t, 0) > 0]
 
@@ -150,12 +157,12 @@ class SyntheticGenerator:
 
                 # a decoy: a ramp no anomaly follows. It may not overlap or touch an
                 # anomaly or a true ramp, so it never ends where an anomaly begins.
-                if cfg.decoy_rate > 0 and capable and crng.random() < cfg.decoy_rate:
-                    kind = str(crng.choice(capable))
-                    severity = float(crng.uniform(*cfg.severity_range))
-                    length = int(crng.integers(lo_len, hi_len + 1))
+                if cfg.decoy_rate > 0 and capable and drng.random() < cfg.decoy_rate:
+                    kind = str(drng.choice(capable))
+                    severity = float(drng.uniform(*cfg.severity_range))
+                    length = int(drng.integers(lo_len, hi_len + 1))
                     for _ in range(10):
-                        lo = int(crng.integers(0, n - length + 1))
+                        lo = int(drng.integers(0, n - length + 1))
                         hi = lo + length
                         near = slice(max(lo - 1, 0), min(hi + 1, n))
                         if mask[near].any() or phase[near].any():

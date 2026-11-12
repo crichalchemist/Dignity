@@ -26,7 +26,9 @@ ANOMALY_TYPES = (
 BUILD_UP_TYPES = ("wash_trading", "pump_and_dump", "fee_spike", "fee_evasion")
 # Leading coefficients of each type's injector, scaled by the ramp weight in
 # apply_build_up: a column is multiplied by 1 + c * w, "drift" is added to the
-# log-return. At peak <= severity a ramp never exceeds the anomaly it precedes.
+# log-return. At peak <= severity every ramp row's volume, fee and count effect stays
+# below the anomaly's own; the pump_and_dump drift is the exception, a ramp of L rows
+# adds 0.01 * peak * (L + 1) to the log-price against the pump's 0.15 * severity.
 PRECURSOR_EFFECT: dict[str, dict[str, float]] = {
     "wash_trading": {"volume": 4.0, "tx_count": 3.0},
     "pump_and_dump": {"volume": 3.0, "drift": 0.02},

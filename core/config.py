@@ -68,6 +68,16 @@ class SyntheticConfig:
             raise ValueError(
                 f"precursor_len_range={lo_hi} must be two ints with 4 <= lo <= hi"
             )
+        # only a decoy needs a whole ramp inside one block (a true ramp is clipped)
+        if (
+            self.precursor_strength > 0
+            and self.decoy_rate > 0
+            and lo_hi[1] > self.block_len
+        ):
+            raise ValueError(
+                f"precursor_len_range={lo_hi} must not exceed block_len="
+                f"{self.block_len} while decoy_rate > 0: a decoy has to fit in a block"
+            )
 
 
 @dataclass
