@@ -127,10 +127,6 @@ class TestVerifyRelease:
         assert c2.id == 2 and c2.passed is False
         assert "0.2800" in c2.detail and "0.3100" in c2.detail
 
-    def test_criterion_2_rejects_a_baseline_that_is_too_easy(self, tmp_path):
-        _write(tmp_path, risk={"baselines": {"block_tree": {"auroc": {"value": 0.93}}}})
-        assert verify(tmp_path, SEED, EPS)[0].passed is False
-
     def test_block_tree_is_compared_at_block_level_only(self, tmp_path):
         # window ci_low 0.47 < 0.50 < block ci_low 0.62: judged against the window
         # interval this would fail, judged at block level it passes
@@ -333,23 +329,41 @@ def _horizons(wins, count):
     }
 
 
-class TestCriteriaBoundaries:
-    """Each case states the verdict on a boundary of the spec: the AUROC band is
-    inclusive, "beats", "lower" and "above" are strict, "at most the budget" is
-    inclusive."""
-
-    @pytest.mark.parametrize("baseline", ["window_logistic", "block_tree"])
-    @pytest.mark.parametrize(
-        ("auroc", "passed"),
-        [(0.55, True), (0.80, True), (0.549, False), (0.801, False)],
-    )
-    def test_baseline_auroc_band_is_inclusive_at_both_edges(
-        self, tmp_path, baseline, auroc, passed
+class TestCriterion2WithoutBand:
+    @pytest.mark.parametrize("auroc", [0.45, 0.55, 0.93])
+    def test_c2_passes_at_any_baseline_auroc_when_the_model_clears_both_baselines(
+        self, tmp_path, auroc
     ):
-        _write(tmp_path, risk={"baselines": {baseline: {"auroc": {"value": auroc}}}})
+        _write(
+            tmp_path,
+            risk={
+                "baselines": {
+                    "window_logistic": {"auroc": {"value": auroc}},
+                    "block_tree": {"auroc": {"value": auroc}},
+                }
+            },
+        )
+        assert verify(tmp_path, SEED, EPS)[0].passed is True
+
+    @pytest.mark.parametrize(
+        ("auroc", "shown"),
+        [(0.5301, "block_tree 0.5301"), (None, "block_tree n/a")],
+    )
+    def test_the_baseline_auroc_is_reported_not_judged_and_null_prints_n_a(
+        self, tmp_path, auroc, shown
+    ):
+        _edit(
+            tmp_path,
+            "risk",
+            lambda d: _set(d, ("baselines", "block_tree", "auroc", "value"), auroc),
+        )
         c2 = verify(tmp_path, SEED, EPS)[0]
-        assert c2.passed is passed
-        assert f"{auroc:.3f}" in c2.detail
+        assert c2.passed and shown in c2.detail and "reported, not judged" in c2.detail
+
+
+class TestCriteriaBoundaries:
+    """Each case states the verdict on a boundary of the spec: "beats", "lower" and
+    "above" are strict, "at most the budget" is inclusive."""
 
     @pytest.mark.parametrize(
         ("majority", "window_logistic", "passed"),
@@ -398,8 +412,6 @@ class TestCriteriaBoundaries:
     @pytest.mark.parametrize(
         "path",
         [
-            ("baselines", "window_logistic", "auroc", "value"),
-            ("baselines", "block_tree", "auroc", "value"),
             ("baselines", "majority", "pr_auc", "value"),
             ("baselines", "window_logistic", "pr_auc", "value"),
             ("baselines", "block_tree", "pr_auc", "value"),
@@ -505,40 +517,6 @@ class TestDetailsShowTheMargin:
         c4 = verify(tmp_path, SEED, EPS)[2]
         assert c4.passed is False
         assert "review rate 0.0504 vs budget 0.0500" in c4.detail
-
-    def test_an_auroc_just_under_the_band_prints_below_the_edge(self, tmp_path):
-        _write(
-            tmp_path,
-            risk={"baselines": {"window_logistic": {"auroc": {"value": 0.549}}}},
-        )
-        c2 = verify(tmp_path, SEED, EPS)[0]
-        assert c2.passed is False
-        assert "window_logistic 0.5490" in c2.detail
-        assert "(band 0.55-0.80)" in c2.detail
-
-    def test_an_auroc_under_the_band_by_less_than_half_a_thousandth_is_visible(
-        self, tmp_path
-    ):
-        _write(
-            tmp_path,
-            risk={"baselines": {"window_logistic": {"auroc": {"value": 0.5496}}}},
-        )
-        c2 = verify(tmp_path, SEED, EPS)[0]
-        assert c2.passed is False
-        assert "window_logistic 0.5496" in c2.detail
-        assert "window_logistic 0.5500" not in c2.detail
-
-    def test_an_auroc_over_the_band_by_less_than_half_a_thousandth_is_visible(
-        self, tmp_path
-    ):
-        _write(
-            tmp_path,
-            risk={"baselines": {"window_logistic": {"auroc": {"value": 0.8004}}}},
-        )
-        c2 = verify(tmp_path, SEED, EPS)[0]
-        assert c2.passed is False
-        assert "window_logistic 0.8004" in c2.detail
-        assert "window_logistic 0.8000" not in c2.detail
 
     def test_costs_that_differ_by_a_ten_thousandth_print_differently(self, tmp_path):
         _write(

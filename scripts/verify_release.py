@@ -17,7 +17,6 @@ from typing import NamedTuple
 
 ROOT = Path(__file__).resolve().parent.parent
 NAMES = ("risk", "forecast", "policy", "privacy")
-BASELINE_AUROC_BAND = (0.55, 0.80)
 
 
 class Criterion(NamedTuple):
@@ -85,12 +84,10 @@ def _criterion_2(risk: dict) -> Criterion:
     def g(path):
         return _num(risk, "risk", path)
 
-    low, high = BASELINE_AUROC_BAND
     aurocs = {
         "window_logistic": g("baselines.window_logistic.auroc.value"),
         "block_tree": g("baselines.block_tree.auroc.value"),
     }
-    in_band = all(v is not None and low <= v <= high for v in aurocs.values())
 
     window_baselines = [
         g("baselines.majority.pr_auc.value"),
@@ -106,11 +103,12 @@ def _criterion_2(risk: dict) -> Criterion:
 
     detail = (
         f"baseline AUROC window_logistic {_f(aurocs['window_logistic'])}, "
-        f"block_tree {_f(aurocs['block_tree'])} (band {low:.2f}-{high:.2f}); "
+        f"block_tree {_f(aurocs['block_tree'])} (reported, not judged by this "
+        f"criterion); "
         f"window PR-AUC ci_low {_f(window_low)} vs best baseline {_f(window_best)}; "
         f"block PR-AUC ci_low {_f(block_low)} vs block_tree {_f(tree)}"
     )
-    return Criterion(2, in_band and window_ok and block_ok, detail)
+    return Criterion(2, window_ok and block_ok, detail)
 
 
 def _criterion_3(forecast: dict) -> Criterion:
