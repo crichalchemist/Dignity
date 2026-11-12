@@ -26,6 +26,8 @@ from data.pipeline import (
 from data.source.anomalies import (
     ANOMALY_INJECTORS,
     ANOMALY_TYPES,
+    BUILD_UP_TYPES,
+    apply_build_up,
     inject_benign_spike,
 )
 from data.source.dynamics import (
@@ -1253,6 +1255,82 @@ class TestAnomalyInjectors:
         b = _block()
         out = inject_benign_spike(b, np.random.default_rng(3))
         assert (out["volume"] > b["volume"] * 1.9).any()
+
+
+def _flat(rows: int = 60) -> pd.DataFrame:
+    return pd.DataFrame(
+        {
+            "volume": np.full(rows, 100.0),
+            "price": np.full(rows, 100.0),
+            "fee_rate": np.full(rows, 0.01),
+            "tx_count": np.full(rows, 10_000, dtype=np.int64),
+        }
+    )
+
+
+class TestPrecursors:
+    """Build-ups: the early, weaker form of an anomaly's own effect (DGNTY-50)."""
+
+    @pytest.mark.parametrize(
+        ("kind", "coefficients"),
+        [
+            ("wash_trading", {"volume": 4.0, "tx_count": 3.0}),
+            ("pump_and_dump", {"volume": 3.0}),
+            ("fee_spike", {"fee_rate": 9.0, "tx_count": 1.0}),
+            ("fee_evasion", {"fee_rate": -0.9, "volume": 1.0}),
+        ],
+    )
+    def test_each_kind_scales_its_own_columns_by_the_injectors_coefficients(
+        self, kind, coefficients
+    ):
+        flat = _flat()
+        out = apply_build_up(flat, 10, 20, kind, 0.5)
+        ramp = (np.arange(20) + 1) / 20
+        for col in ("volume", "fee_rate", "tx_count"):
+            expected = flat[col].to_numpy(dtype=float).copy()
+            expected[10:30] *= 1 + coefficients.get(col, 0.0) * 0.5 * ramp
+            np.testing.assert_allclose(
+                out[col].to_numpy(dtype=float), expected, rtol=1e-3
+            )
+        # outside the ramp (and in untouched columns) the frame is as it was
+        rest = np.r_[0:10, 30:60]
+        for col in flat.columns:
+            if col == "price" and kind != "pump_and_dump":
+                np.testing.assert_allclose(out[col], flat[col])
+            elif col != "price":
+                np.testing.assert_array_equal(
+                    out[col].to_numpy()[rest], flat[col].to_numpy()[rest]
+                )
+
+    def test_accumulation_makes_the_quoted_level_drift_up_before_the_onset(self):
+        flat = _flat()
+        out = apply_build_up(flat, 10, 20, "pump_and_dump", 0.5)
+        shift = np.diff(np.log(out["price"])) - np.diff(np.log(flat["price"]))
+        w = 0.5 * (np.arange(20) + 1) / 20
+        expected = np.zeros(59)
+        expected[9:29] = 0.02 * w
+        np.testing.assert_allclose(shift, expected, atol=1e-12)
+
+    def test_a_build_up_at_row_zero_skips_the_missing_return_instead_of_failing(
+        self,
+    ):
+        flat = _flat()
+        out = apply_build_up(flat, 0, 20, "pump_and_dump", 0.5)
+        w = 0.5 * (np.arange(20) + 1) / 20
+        np.testing.assert_allclose(out["volume"].to_numpy()[:20], 100.0 * (1 + 3 * w))
+        assert (out["volume"].to_numpy()[20:] == 100.0).all()
+
+    def test_the_input_frame_is_never_modified(self):
+        flat = _flat()
+        before = flat.copy()
+        apply_build_up(flat, 10, 20, "wash_trading", 0.5)
+        pd.testing.assert_frame_equal(flat, before)
+
+    @pytest.mark.parametrize("kind", ["flash_crash", "layering"])
+    def test_a_type_without_a_build_up_is_refused(self, kind):
+        assert kind not in BUILD_UP_TYPES
+        with pytest.raises(ValueError, match=kind):
+            apply_build_up(_flat(), 10, 20, kind, 0.5)
 
 
 def _normal_frame(preset: str) -> pd.DataFrame:
