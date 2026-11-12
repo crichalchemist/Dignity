@@ -45,7 +45,7 @@ from eval.plots import (
     plot_policy_cost,
     plot_pr_curves,
 )
-from models.head.policy import cost_matrix, decide_actions
+from models.head.policy import ACTIONS, cost_matrix, decide_actions
 from train.checkpoint import build_model_from_meta, load_checkpoint
 from train.engine import predict
 from train.loop import FitResult, fit, prepare_data
@@ -491,10 +491,12 @@ def run_policy(
         policy_config, data, seed_name, [r.best_path for _, r in risk_runs]
     )
 
-    model_sides, baseline_sides = [], []
+    model_sides, baseline_sides, uncapped = [], [], []
     for k, (_, result) in enumerate(runs):
         boot = n_boot if k == 0 else 0  # CIs only for the headline seed
         probs = _predict(policy_config, result, test.X)["probs"]
+        # the share of windows whose argmax is review, before the cap
+        uncapped.append(float((probs.argmax(1) == ACTIONS.index("review")).mean()))
         actions = decide_actions(probs, budget)
         model_sides.append(
             policy_metrics(actions, test.y_risk, C, test.block_index, boot, seed)
@@ -515,6 +517,11 @@ def run_policy(
         "baseline_expected_cost": _spread(
             [m["expected_cost"]["value"] for m in baseline_sides]
         ),
+        "review_rate": _spread([m["review_rate"]["value"] for m in model_sides]),
+        "baseline_review_rate": _spread(
+            [m["review_rate"]["value"] for m in baseline_sides]
+        ),
+        "uncapped_review_share": _spread(uncapped),
     }
     baselines = {"threshold_policy": baseline_sides[0]}
 

@@ -974,6 +974,32 @@ class TestPolicyPlots:
         plot_policy_cost(result, str(tmp_path / "cost.png"))
         assert (tmp_path / "cost.png").read_bytes()[:8] == PNG_MAGIC
 
+    def test_policy_chart_shows_every_training_seed(self, tmp_path, monkeypatch):
+        import matplotlib.axes
+
+        drawn, real = [], matplotlib.axes.Axes.scatter
+
+        def spy(self, x, y, *args, **kwargs):
+            drawn.append(list(y))
+            return real(self, x, y, *args, **kwargs)
+
+        monkeypatch.setattr(matplotlib.axes.Axes, "scatter", spy)
+        side = {
+            "expected_cost": {"value": 0.8, "ci_low": 0.6, "ci_high": 1.0},
+            "review_rate": {"value": 0.05},
+            "block_rate": {"value": 0.2},
+        }
+        spread = {
+            "expected_cost": {"values": [0.7, 0.8, 0.9]},
+            "baseline_expected_cost": {"values": [0.6, 0.65, 0.7]},
+        }
+        result = {
+            "metrics": {**side, "seed_spread": spread},
+            "baselines": {"threshold_policy": side},
+        }
+        plot_policy_cost(result, str(tmp_path / "cost.png"))
+        assert sorted(drawn) == [[0.6, 0.65, 0.7], [0.7, 0.8, 0.9]]
+
 
 class TestEvalRunPolicy:
     def test_policy_and_baseline_both_stay_within_analyst_capacity(
@@ -1004,6 +1030,24 @@ class TestEvalRunPolicy:
         spread = r["metrics"]["seed_spread"]
         assert spread["train_seeds"] == [42]
         assert len(spread["expected_cost"]["values"]) == 1
+
+    def test_policy_results_carry_every_seeds_review_rate_and_uncapped_share(
+        self, monkeypatch, tmp_path
+    ):
+        # C4 judges the rate against the budget and the uncapped share against
+        # the collapse limit
+        monkeypatch.chdir(tmp_path)
+        assert main(["--smoke", "--seed", "tuning", "--tasks", "policy"]) == 0
+        r = json.loads((tmp_path / "runs/smoke/results/policy.json").read_text())
+        spread = r["metrics"]["seed_spread"]
+        for key in ("review_rate", "baseline_review_rate", "uncapped_review_share"):
+            assert len(spread[key]["values"]) == 1
+            assert set(spread[key]) == {"values", "mean", "std"}
+        assert (
+            spread["review_rate"]["values"][0] == r["metrics"]["review_rate"]["value"]
+        )
+        assert spread["review_rate"]["values"][0] <= 0.05 + 1e-9  # capped
+        assert 0.0 <= spread["uncapped_review_share"]["values"][0] <= 1.0
 
     @pytest.mark.parametrize("tasks", ["risks", "risk,forcast", "", "policy,"])
     def test_unknown_task_names_are_refused_before_anything_runs(
