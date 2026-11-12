@@ -50,12 +50,24 @@ class SyntheticConfig:
     benign_spike_rate: float = 0.0  # P(normal block gets an unlabelled burst)
     label_noise: float = 0.0  # P(block label flipped)
     regime_switch_prob: float = 0.0  # per-row P(Markov regime change)
+    precursor_strength: float = 0.0  # build-up intensity, 0 off, 1 the anomaly's own
+    precursor_len_range: tuple[int, int] = (10, 30)  # rows of a build-up, inclusive
+    decoy_rate: float = 0.0  # P(a block holds one build-up that nothing follows)
     seed: int = 42
 
     def __post_init__(self):
         self.anomalies_per_block = tuple(int(x) for x in self.anomalies_per_block)
         self.duration_range = tuple(int(x) for x in self.duration_range)
         self.severity_range = tuple(float(x) for x in self.severity_range)
+        self.precursor_len_range = tuple(int(x) for x in self.precursor_len_range)
+        for name in ("precursor_strength", "decoy_rate"):
+            if not 0.0 <= getattr(self, name) <= 1.0:
+                raise ValueError(f"{name}={getattr(self, name)} must lie in [0, 1]")
+        lo_hi = self.precursor_len_range
+        if len(lo_hi) != 2 or not 4 <= lo_hi[0] <= lo_hi[1]:
+            raise ValueError(
+                f"precursor_len_range={lo_hi} must be two ints with 4 <= lo <= hi"
+            )
 
 
 @dataclass

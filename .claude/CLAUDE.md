@@ -45,7 +45,7 @@ format that export no longer supports (DGNTY-3, DGNTY-35). No shipped config wri
 ## Commands
 
 ```bash
-# Tests (1404 collected: test_core 69, test_data 118, test_models 23, test_privacy 42,
+# Tests (1412 collected: test_core 77, test_data 118, test_models 23, test_privacy 42,
 # test_operator 4, test_docs 769, test_train 78, test_checkpoint 3, test_export 9,
 # test_calibration 3, test_labels 7, test_gates 11, test_ci 4, test_eval 103,
 # test_colab_eval 13, test_scripts 19, test_release 129 — one skips without CUDA)

@@ -56,6 +56,9 @@ data:
 #     benign_spike_rate: 0.0      # P(a normal block gets an unlabelled burst)
 #     label_noise: 0.0            # P(a block's label is flipped)
 #     regime_switch_prob: 0.0     # per-row P(the Markov regime changes)
+#     precursor_strength: 0.0     # build-up intensity before four anomaly types, 0 off, 1 the anomaly's own effect
+#     precursor_len_range: [10, 30]  # rows a build-up may run before its onset, inclusive; first value is the shortest kept
+#     decoy_rate: 0.0             # P(a block holds one build-up that nothing follows); ignored at strength 0
 #     seed: 42                    # generator and block-split seed; eval.run overwrites it from eval.<seed>_seed
 
 # Training loop (train/loop.py fit). A run writes best.pt (once the val metric has

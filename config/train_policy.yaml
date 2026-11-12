@@ -37,6 +37,9 @@ data:
 #     benign_spike_rate: 0.0
 #     label_noise: 0.0
 #     regime_switch_prob: 0.0
+#     precursor_strength: 0.0
+#     precursor_len_range: [10, 30]
+#     decoy_rate: 0.0
 #     seed: 42
 
 train:
