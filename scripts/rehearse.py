@@ -13,6 +13,7 @@ import argparse
 import functools
 import importlib.util
 import json
+import shutil
 import subprocess
 import sys
 import time
@@ -156,8 +157,10 @@ def _judge(results: dict[str, dict | None], n_train_seeds: int) -> dict:
             policy_defaults.collapse_review_factor,
         )
         rates = _dig(policy, "metrics.seed_spread.review_rate.values")
-        floor_met = isinstance(rates, list) and all(
-            r is not None and r >= REHEARSAL_MIN_REVIEW_RATE for r in rates
+        floor_met = (
+            isinstance(rates, list)
+            and bool(rates)
+            and all(r is not None and r >= REHEARSAL_MIN_REVIEW_RATE for r in rates)
         )
         verdict["C4"] = c4.passed and floor_met
     for name, task in (("C3", "forecast"), ("C4", "policy")):
@@ -203,6 +206,9 @@ def _run_seed(args: argparse.Namespace, seed: int) -> tuple[dict, int]:
     """Run eval.run on one seed; return its summary entry and 0, or 1 on an error."""
     cfg_path = write_seed_config(args.stage, args.variant, seed)
     config = DignityConfig.from_yaml(str(cfg_path))
+    # a result file left by an earlier run of this seed must never be judged
+    for stale in (Path(config.eval.out_dir), Path(config.eval.img_dir)):
+        shutil.rmtree(stale, ignore_errors=True)
     argv = ["--config", str(cfg_path), "--seed", "tuning", "--data-seed", str(seed)]
     argv += ["--tasks", args.tasks]
     if args.privacy_sweep:
@@ -220,17 +226,21 @@ def _run_seed(args: argparse.Namespace, seed: int) -> tuple[dict, int]:
         print(f"rehearse: seed {seed}: {error}", file=sys.stderr)
         return {"error": error, "wall_seconds": wall}, 1
     # a recorded raise (status 1) is data: eval.run already printed TRAINING_RAISED
-    results_dir = Path(config.eval.out_dir)
-    tasks = {t.strip() for t in args.tasks.split(",")}
-    results = {t: _read_result(results_dir, t) if t in tasks else None for t in tasks}
-    results = {t: results.get(t) for t in ("risk", "forecast", "policy")}
-    n = EvalConfig().n_train_seeds
-    risk_val = _risk_val_pr_auc(Path(config.train.checkpoint_dir), seed, config.seed, n)
     try:
+        results_dir = Path(config.eval.out_dir)
+        tasks = {t.strip() for t in args.tasks.split(",")}
+        results = {
+            t: _read_result(results_dir, t) if t in tasks else None for t in tasks
+        }
+        results = {t: results.get(t) for t in ("risk", "forecast", "policy")}
+        n = EvalConfig().n_train_seeds
+        ckpt = Path(config.train.checkpoint_dir)
+        risk_val = _risk_val_pr_auc(ckpt, seed, config.seed, n)
         return _summarise(results, risk_val, wall, n), 0
-    except _release().ResultsError as err:
-        print(f"rehearse: seed {seed}: unusable results: {err}", file=sys.stderr)
-        return {"error": f"unusable results: {err}", "wall_seconds": wall}, 1
+    except Exception as err:  # noqa: BLE001 - recorded in the summary, then exit 1
+        message = f"unusable results: {type(err).__name__}: {err}"
+        print(f"rehearse: seed {seed}: {message}", file=sys.stderr)
+        return {"error": message, "wall_seconds": wall}, 1
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -247,6 +257,11 @@ def main(argv: list[str] | None = None) -> int:
         "seeds": {},
     }
     out = seed_dir(args.stage, args.variant, args.seeds[0]).parent / "summary.json"
+    if out.exists():
+        earlier = json.loads(out.read_text())
+        # seeds run by an earlier invocation at this commit stay in the summary
+        if earlier.get("git_sha") == summary["git_sha"]:
+            summary["seeds"] = dict(earlier.get("seeds", {}))
     exit_code = 0
     for seed in args.seeds:
         entry, failed = _run_seed(args, seed)

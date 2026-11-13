@@ -312,6 +312,35 @@ class TestRehearse:
             assert a == b, block
         assert written("cap3").policy.multiplier_lr == preset.policy.multiplier_lr
 
+    def test_the_variants_are_exactly_the_planned_single_factor_changes(self):
+        assert _load_rehearse().VARIANTS == {
+            "base": {},
+            "cold": {"train.forecast_warm_start": False, "policy.multiplier_lr": 0.05},
+            "cap10": {
+                "train.forecast_pos_weight_cap": 10.0,
+                "policy.multiplier_lr": 0.2,
+            },
+            "cap3": {"train.forecast_pos_weight_cap": 3.0},
+            "narrow": {"model.hidden_size": 128},
+            "lr1e-3": {"train.lr": 0.001},
+        }
+
+    def test_the_stages_are_timing_variants_and_candidate(self):
+        assert _load_rehearse().STAGES == ("timing", "variants", "candidate")
+
+    def test_the_rehearsal_runs_on_the_committed_hard_preset(self):
+        rehearse = _load_rehearse()
+        hard = REHEARSE.parent.parent / "config" / "synthetic_hard.yaml"
+        assert hard == rehearse.PRESET
+
+    def test_a_variant_override_naming_an_unknown_key_fails_before_any_run(
+        self, monkeypatch, tmp_path
+    ):
+        rehearse = _rehearse(monkeypatch, tmp_path)
+        monkeypatch.setitem(rehearse.VARIANTS, "typo", {"train.lerning_rate": 1.0})
+        with pytest.raises(TypeError):
+            rehearse.write_seed_config("variants", "typo", 1000)
+
 
 def _seed_fixtures(**over):
     """The passing release fixtures plus the series rehearse.py reports."""
@@ -540,3 +569,333 @@ class TestRehearseRun:
             "1000",
         ]
         assert argv[-3:] == ["--tasks", "risk", "--privacy-sweep"]
+
+
+class _RaisesOnFirstCall(_FakeEval):
+    def __call__(self, argv):
+        if not self.calls:
+            self.calls.append(list(argv))
+            raise RuntimeError("out of memory")
+        return super().__call__(argv)
+
+
+def _passing_policy_with_rates(values):
+    return _seed_fixtures(policy__metrics__seed_spread__review_rate={"values": values})
+
+
+class TestRehearseJudgement:
+    def test_a_risk_that_fails_criterion_2_gives_c2_false_and_leaves_the_rest(
+        self, monkeypatch, tmp_path
+    ):
+        files = _seed_fixtures(risk__metrics__pr_auc__ci_low=0.2)
+        _, summary = _summary(monkeypatch, tmp_path, _FakeEval(files))
+        entry = summary["seeds"]["1000"]
+        assert (entry["C2"], entry["C3"], entry["C4"]) == (False, True, True)
+
+    def test_the_criteria_get_the_values_verify_release_hands_them(
+        self, monkeypatch, tmp_path
+    ):
+        from core.config import EvalConfig, PolicyConfig
+        from tests.test_release import SEED, _write
+
+        rehearse = _rehearse(monkeypatch, tmp_path)
+        release = rehearse._release()
+        seen = {"rehearse": [], "release": []}
+        phase = ["release"]
+        for name in ("_criterion_3", "_criterion_4"):
+            original = getattr(release, name)
+
+            def spy(*args, _name=name, _original=original):
+                seen[phase[0]].append((_name, args[1:]))
+                return _original(*args)
+
+            monkeypatch.setattr(release, name, spy)
+        _write(tmp_path)
+        names = ("risk", "forecast", "policy", "privacy")
+        files = {n: json.loads((tmp_path / f"{n}.json").read_text()) for n in names}
+        release.verify(tmp_path, SEED, EvalConfig().epsilons)
+        phase[0] = "rehearse"
+        rehearse._judge(files, EvalConfig().n_train_seeds)
+        assert seen["rehearse"] == seen["release"]
+        assert seen["release"][1][1] == (
+            PolicyConfig().review_budget,
+            EvalConfig().n_train_seeds,
+            PolicyConfig().collapse_review_factor,
+        )
+
+    @pytest.mark.parametrize("rates", [[], [None, 0.05, 0.05]])
+    def test_c4_is_false_when_the_review_rates_are_missing_or_null(
+        self, monkeypatch, tmp_path, rates
+    ):
+        rehearse = _rehearse(monkeypatch, tmp_path)
+        release = rehearse._release()
+
+        class Passes:
+            passed = True
+
+        monkeypatch.setattr(release, "_criterion_4", lambda *a: Passes)
+        files = _passing_policy_with_rates(rates)
+        files["risk"] = files["forecast"] = None
+        assert rehearse._judge(files, 3)["C4"] is False
+
+    def test_an_empty_review_rate_list_is_an_error_entry_not_a_pass(
+        self, monkeypatch, tmp_path
+    ):
+        fake = _FakeEval(_passing_policy_with_rates([]))
+        code, summary = _summary(monkeypatch, tmp_path, fake)
+        assert code == 1
+        assert "unusable results" in summary["seeds"]["1000"]["error"]
+
+    def test_a_malformed_result_file_is_an_error_entry_and_the_next_seed_still_runs(
+        self, monkeypatch, tmp_path
+    ):
+        class Corrupt(_FakeEval):
+            def __call__(self, argv):
+                status = super().__call__(argv)
+                if len(self.calls) == 1:
+                    config = yaml.safe_load(Path(argv[1]).read_text())
+                    (Path(config["eval"]["out_dir"]) / "risk.json").write_text("{")
+                return status
+
+        fake = Corrupt()
+        code, summary = _summary(monkeypatch, tmp_path, fake, seeds="1000,1001")
+        assert code == 1
+        assert "unusable results" in summary["seeds"]["1000"]["error"]
+        assert summary["seeds"]["1001"]["C2"] is True
+
+    def test_an_unreadable_checkpoint_is_an_error_entry_not_a_traceback(
+        self, monkeypatch, tmp_path
+    ):
+        rehearse = _rehearse(monkeypatch, tmp_path)
+
+        def broken(*args):
+            raise ValueError("old checkpoint format")
+
+        monkeypatch.setattr(rehearse, "_risk_val_pr_auc", broken)
+        import eval.run
+
+        monkeypatch.setattr(eval.run, "main", _FakeEval())
+        argv = ["--stage", "variants", "--variant", "base", "--seeds", "1000"]
+        assert rehearse.main(argv) == 1
+        path = rehearse.seed_dir("variants", "base", 1000).parent / "summary.json"
+        assert (
+            "old checkpoint format"
+            in json.loads(path.read_text())["seeds"]["1000"]["error"]
+        )
+
+    def test_a_raised_policy_leaves_c3_alone_and_a_raised_forecast_leaves_c4_alone(
+        self, monkeypatch, tmp_path
+    ):
+        raised = {"error": "PolicyCollapseError", "message": "m", "train_seed": 1}
+        files = _seed_fixtures()
+        files["policy"] = {"metrics": {"raised": raised}}
+        _, summary = _summary(monkeypatch, tmp_path, _FakeEval(files, status=1))
+        assert summary["seeds"]["1000"]["C3"] is True
+        files = _seed_fixtures()
+        files["forecast"] = {"metrics": {"raised": raised}}
+        _, summary = _summary(monkeypatch, tmp_path, _FakeEval(files, status=1))
+        assert summary["seeds"]["1000"]["C4"] is True
+
+    def test_a_policy_only_run_leaves_c2_and_c3_without_a_verdict(
+        self, monkeypatch, tmp_path
+    ):
+        _, summary = _summary(
+            monkeypatch, tmp_path, _FakeEval(), extra=("--tasks", "policy")
+        )
+        entry = summary["seeds"]["1000"]
+        assert (entry["C2"], entry["C3"], entry["C4"]) == (None, None, True)
+
+
+class TestRehearseSeeds:
+    def test_every_seed_runs_on_its_own_data_seed_as_a_tuning_run(
+        self, monkeypatch, tmp_path
+    ):
+        fake = _FakeEval()
+        _summary(monkeypatch, tmp_path, fake, seeds="1000,1001")
+        for call, seed in zip(fake.calls, ("1000", "1001"), strict=True):
+            assert call[call.index("--data-seed") + 1] == seed
+            assert call[call.index("--seed") + 1] == "tuning"
+            assert "--privacy-sweep" not in call
+
+    def test_the_privacy_sweep_runs_only_when_asked_for(self, monkeypatch, tmp_path):
+        fake = _FakeEval()
+        _summary(monkeypatch, tmp_path, fake, extra=("--privacy-sweep",))
+        assert fake.calls[0][-1] == "--privacy-sweep"
+
+    def test_an_eval_run_that_returns_2_is_an_error_entry_and_exit_1(
+        self, monkeypatch, tmp_path
+    ):
+        code, summary = _summary(monkeypatch, tmp_path, _FakeEval(status=2))
+        assert code == 1
+        assert "exited 2" in summary["seeds"]["1000"]["error"]
+
+    def test_an_errored_early_seed_still_exits_1_after_a_good_later_seed(
+        self, monkeypatch, tmp_path
+    ):
+        fake = _RaisesOnFirstCall()
+        code, summary = _summary(monkeypatch, tmp_path, fake, seeds="1000,1001")
+        assert code == 1
+        assert len(fake.calls) == 2
+        assert "out of memory" in summary["seeds"]["1000"]["error"]
+        assert summary["seeds"]["1001"]["C2"] is True
+
+    def test_a_stale_result_file_from_an_earlier_run_is_never_judged(
+        self, monkeypatch, tmp_path
+    ):
+        rehearse = _rehearse(monkeypatch, tmp_path)
+        stale = rehearse.seed_dir("variants", "base", 1000) / "results"
+        stale.mkdir(parents=True)
+        (stale / "forecast.json").write_text(json.dumps(_seed_fixtures()["forecast"]))
+        files = {k: v for k, v in _seed_fixtures().items() if k != "forecast"}
+        _, summary = _summary(monkeypatch, tmp_path, _FakeEval(files))
+        entry = summary["seeds"]["1000"]
+        assert entry["C3"] is None
+        assert entry["forecast_val_lift_upper"] is None
+
+    def test_seeds_from_an_earlier_invocation_at_this_commit_stay_in_the_summary(
+        self, monkeypatch, tmp_path
+    ):
+        _summary(monkeypatch, tmp_path, _FakeEval(), seeds="1000")
+        _, summary = _summary(monkeypatch, tmp_path, _FakeEval(), seeds="1001")
+        assert sorted(summary["seeds"]) == ["1000", "1001"]
+
+    def test_seeds_from_another_commit_do_not_mix_into_the_summary(
+        self, monkeypatch, tmp_path
+    ):
+        rehearse = _rehearse(monkeypatch, tmp_path)
+        import eval.run
+
+        monkeypatch.setattr(eval.run, "main", _FakeEval())
+        monkeypatch.setattr(rehearse, "_git_sha", lambda: "aaa")
+        base = ["--stage", "variants", "--variant", "base"]
+        rehearse.main([*base, "--seeds", "1000"])
+        monkeypatch.setattr(rehearse, "_git_sha", lambda: "bbb")
+        rehearse.main([*base, "--seeds", "1001"])
+        path = rehearse.seed_dir("variants", "base", 1000).parent / "summary.json"
+        assert list(json.loads(path.read_text())["seeds"]) == ["1001"]
+
+    def test_the_candidate_stage_runs_and_is_recorded_in_the_summary(
+        self, monkeypatch, tmp_path
+    ):
+        rehearse = _rehearse(monkeypatch, tmp_path)
+        import eval.run
+
+        monkeypatch.setattr(eval.run, "main", _FakeEval())
+        argv = ["--stage", "candidate", "--variant", "base", "--seeds", "1000"]
+        assert rehearse.main(argv) == 0
+        path = rehearse.seed_dir("candidate", "base", 1000).parent / "summary.json"
+        assert json.loads(path.read_text())["stage"] == "candidate"
+
+
+class TestRehearseEndToEnd:
+    def test_the_real_rehearsal_runs_the_real_eval_through_the_colab_entry_point(
+        self, monkeypatch, tmp_path
+    ):
+        import importlib
+        import os
+        import subprocess
+
+        from tests.test_colab_eval import _load_script
+
+        repo = REHEARSE.parent.parent
+        preset = yaml.safe_load((repo / "config" / "smoke.yaml").read_text())
+        preset["eval"]["n_train_seeds"] = 3
+        preset_path = tmp_path / "preset.yaml"
+        preset_path.write_text(yaml.safe_dump(preset))
+        root = tmp_path / "root"
+        root.mkdir()
+        rehearse = importlib.import_module("scripts.rehearse")
+        monkeypatch.setattr(rehearse, "ROOT", root)
+        monkeypatch.setattr(rehearse, "PRESET", preset_path)
+
+        monkeypatch.setenv("DIGNITY_SHA", "abc123")
+        monkeypatch.delenv("DIGNITY_SEED", raising=False)
+        monkeypatch.setenv(
+            "DIGNITY_REHEARSAL", "--stage timing --variant base --seeds 1000"
+        )
+        commands = []
+        script = _load_script()
+        real_run = subprocess.run
+
+        def run(cmd, *args, **kwargs):
+            # the VM-only steps are recorded; git queries run for real
+            if (
+                cmd[0] in ("tar",)
+                or cmd[:2] == ["git", "clone"]
+                or cmd[3:4]
+                in (
+                    ["fetch"],
+                    ["checkout"],
+                )
+            ):
+                commands.append(list(cmd))
+                return subprocess.CompletedProcess(cmd, 0)
+            return real_run(cmd, *args, **kwargs)
+
+        monkeypatch.setattr(script.subprocess, "run", run)
+        real_isdir = os.path.isdir
+        monkeypatch.setattr(
+            script.os.path,
+            "isdir",
+            lambda p: True if p == script.REPO_DIR else real_isdir(p),
+        )
+        monkeypatch.setattr(script.os, "chdir", lambda p: None)
+        status_before = subprocess.run(
+            ["git", "-C", str(repo), "status", "--porcelain"],
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout
+
+        script.main()
+
+        assert commands[-1] == [
+            "tar",
+            "-czf",
+            "/content/dignity_rehearsal.tar.gz",
+            "runs/rehearsal",
+        ]
+        base = root / "runs" / "rehearsal" / "timing" / "base"
+        summary = json.loads((base / "summary.json").read_text())
+        assert set(summary) == {"stage", "variant", "overrides", "git_sha", "seeds"}
+        entry = summary["seeds"]["1000"]
+        assert "error" not in entry
+        assert set(entry) == {
+            "C2",
+            "C3",
+            "C4",
+            "raised",
+            "forecast_val_lift_upper",
+            "forecast_floor",
+            "forecast_best_epoch",
+            "policy_val_neg_cost",
+            "review_rate",
+            "review_multiplier",
+            "uncapped_review_share",
+            "risk_val_pr_auc",
+            "wall_seconds",
+        }
+        assert entry["raised"] is None
+        for key in (
+            "forecast_val_lift_upper",
+            "forecast_floor",
+            "forecast_best_epoch",
+            "policy_val_neg_cost",
+            "review_rate",
+            "review_multiplier",
+            "uncapped_review_share",
+            "risk_val_pr_auc",
+        ):
+            assert len(entry[key]) == 3, key
+        written = [p for p in tmp_path.rglob("*") if p.is_file()]
+        assert preset_path in written
+        assert all(base in p.parents or p == preset_path for p in written), (
+            "a file was written outside the rehearsal output root"
+        )
+        status_after = subprocess.run(
+            ["git", "-C", str(repo), "status", "--porcelain"],
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout
+        assert status_after == status_before

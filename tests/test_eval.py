@@ -2170,6 +2170,17 @@ class TestPrivacyCurve:
 
 
 FREEZE_TAG = "v1.0-freeze-2027"
+DOCUMENTED_FROZEN_PATHS = (
+    "config",
+    "data",
+    "models",
+    "train",
+    "eval",
+    "core",
+    "export",
+    "notebooks",
+    "scripts",
+)
 REAL_ROOT = eval_run._ROOT
 
 
@@ -2202,6 +2213,9 @@ class TestFreezeTagGuard:
         (repo / "results" / "v1.0").mkdir(parents=True)
         (repo / "core" / "x.py").write_text("x = 1\n")
         (repo / "results" / "v1.0" / "risk.json").write_text("{}\n")
+        for name in DOCUMENTED_FROZEN_PATHS:
+            (repo / name).mkdir(exist_ok=True)
+            (repo / name / "f.py").write_text("f = 1\n")
         subprocess.run(["git", "init", "-q", str(repo)], check=True)
         _commit(repo, "first")
         monkeypatch.setattr(eval_run, "_ROOT", repo)
@@ -2258,6 +2272,53 @@ class TestFreezeTagGuard:
         (repo / "results" / "v1.0" / "risk.json").write_text('{"a": 1}\n')
         with pytest.raises(RuntimeError, match="generated"):
             self._final()
+
+    def test_the_frozen_paths_are_the_documented_tuple(self):
+        assert eval_run.FROZEN_PATHS == DOCUMENTED_FROZEN_PATHS
+
+    @pytest.mark.parametrize("path", DOCUMENTED_FROZEN_PATHS)
+    def test_a_modified_file_under_any_frozen_path_refuses_the_final_run(
+        self, repo, capsys, path
+    ):
+        _git(repo, "tag", FREEZE_TAG)
+        (repo / path / "f.py").write_text("f = 2\n")
+        err = self._refused(capsys)
+        assert f"modified: {path}/f.py" in err
+        assert "clean tree" in err
+
+    def test_an_annotated_freeze_tag_unlocks_the_final_run(self, repo):
+        _git(repo, "tag", "-a", "-m", "freeze", FREEZE_TAG)
+        with pytest.raises(RuntimeError, match="generated"):
+            self._final()
+
+    def test_an_untagged_dirty_tree_is_refused_for_the_missing_tag_first(
+        self, repo, capsys
+    ):
+        (repo / "core" / "x.py").write_text("x = 4\n")
+        err = self._refused(capsys)
+        assert FREEZE_TAG in err
+        assert "modified" not in err
+
+    def test_the_guard_refuses_before_the_config_is_loaded(self, repo, tmp_path):
+        with pytest.raises(SystemExit) as exc:
+            main(["--config", str(tmp_path / "missing.yaml"), "--seed", "eval"])
+        assert exc.value.code == 2
+
+    def test_dirty_paths_are_reported_exactly_as_git_names_them(self, repo):
+        (repo / "core" / "x.py").write_text("x = 5\n")
+        (repo / "core" / "new.py").write_text("n = 1\n")
+        assert sorted(eval_run._dirty_frozen_paths(repo)) == [
+            "core/new.py",
+            "core/x.py",
+        ]
+
+    def test_a_failing_git_makes_the_clean_tree_check_raise_not_pass(self, tmp_path):
+        bare = tmp_path / "not_a_repo"
+        bare.mkdir()
+        with pytest.raises(subprocess.CalledProcessError):
+            eval_run._dirty_frozen_paths(bare)
+        with pytest.raises(subprocess.CalledProcessError):
+            eval_run._head_tags(bare)
 
     def test_a_tuning_run_needs_no_tag(self, repo):
         with pytest.raises(RuntimeError, match="generated"):

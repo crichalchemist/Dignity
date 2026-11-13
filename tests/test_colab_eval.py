@@ -48,6 +48,7 @@ class TestColabEvalScript:
         rehearsal=None,
         rehearse_exit=0,
         dirty=(),
+        dirty_check=None,
     ):
         events = [] if events is None else events
         monkeypatch.setenv("DIGNITY_SHA", "abc123")
@@ -71,7 +72,7 @@ class TestColabEvalScript:
 
         fake_module = types.ModuleType("eval.run")
         fake_module.main = fake_main
-        fake_module._dirty_frozen_paths = lambda root: list(dirty)
+        fake_module._dirty_frozen_paths = dirty_check or (lambda root: list(dirty))
         monkeypatch.setitem(sys.modules, "eval.run", fake_module)
 
         def fake_rehearse(argv):
@@ -116,6 +117,27 @@ class TestColabEvalScript:
         assert "FROZEN_DIRTY=none" in capsys.readouterr().out
         self._run(monkeypatch, clone_exists=True, dirty=["core/x.py", "eval/y.py"])
         assert "FROZEN_DIRTY=core/x.py,eval/y.py" in capsys.readouterr().out
+
+    def test_a_failing_dirty_check_prints_unknown_and_lets_the_run_outcome_stand(
+        self, monkeypatch, capsys
+    ):
+        def broken(root):
+            raise subprocess.CalledProcessError(128, "git")
+
+        events = []
+        with pytest.raises(AssertionError):
+            self._run(
+                monkeypatch,
+                clone_exists=True,
+                rehearsal="--stage variants",
+                rehearse_exit=2,
+                events=events,
+                dirty_check=broken,
+            )
+        assert "FROZEN_DIRTY=unknown" in capsys.readouterr().out
+        assert events[-1][1][:2] == ["tar", "-czf"]
+        self._run(monkeypatch, clone_exists=True, dirty_check=broken)
+        assert "FROZEN_DIRTY=unknown" in capsys.readouterr().out
 
     def test_fresh_vm_clones_before_fetching(self, monkeypatch):
         events = self._run(monkeypatch, clone_exists=False)

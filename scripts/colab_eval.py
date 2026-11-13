@@ -76,11 +76,15 @@ def main():
             else:
                 assert code == 0
     finally:
+        # informational: would the final run's clean-tree check pass on this VM;
+        # it never masks the outcome of the run, so a helper failure prints unknown
+        try:
+            dirty = _dirty_frozen_paths(Path(REPO_DIR))
+            print(f"FROZEN_DIRTY={','.join(dirty) or 'none'}")
+        except Exception:  # noqa: BLE001 - informational line only
+            print("FROZEN_DIRTY=unknown")
         # results already on disk are kept even when the sweep (last) fails
         subprocess.run(["tar", "-czf", tarball, *paths], check=True)
-        # informational: would the final run's clean-tree check pass on this VM
-        dirty = _dirty_frozen_paths(Path(REPO_DIR))
-        print(f"FROZEN_DIRTY={','.join(dirty) or 'none'}")
 
 
 if __name__ == "__main__":

@@ -477,7 +477,10 @@ class TestEvalConfig:
         self, monkeypatch, tmp_path
     ):
         monkeypatch.setattr("core.config.SPENT_EVAL_SEEDS", (2031,))
-        with pytest.raises(ValueError, match="spent"):
+        with pytest.raises(
+            ValueError,
+            match="eval_seed 2031 is spent: a first evaluation already ran on it",
+        ):
             EvalConfig(eval_seed=2031)
         p = tmp_path / "c.yaml"
         p.write_text("eval:\n  eval_seed: 2031\n")
