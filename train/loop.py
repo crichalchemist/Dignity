@@ -45,6 +45,26 @@ class ForecastNotEligibleError(RuntimeError):
         self.seed = seed
 
 
+class PolicyCollapseError(RuntimeError):
+    """The policy head sat on review for ``policy.collapse_epochs`` epochs."""
+
+    def __init__(self, run_dir: str, seed: int, message: str):
+        super().__init__(message)
+        self.run_dir = run_dir
+        self.seed = seed
+
+
+def _collapse_message(
+    run_dir, policy, share: float, limit: float, streak: int, epoch: int
+) -> str:
+    return (
+        f"policy collapse in {run_dir}: val review share {share:.3f} above "
+        f"{limit:.3f} ({policy.collapse_review_factor:g} x the "
+        f"{policy.review_budget:g} budget) for {streak} epochs in a row, "
+        f"through epoch {epoch}"
+    )
+
+
 @dataclass
 class FitResult:
     best_path: str
@@ -130,6 +150,32 @@ def _task_loss(config: DignityConfig, train_ws: WindowSet):
             multiplier_floor=config.policy.multiplier_floor,
         )
     raise NotImplementedError(f"task={task!r} does not train end to end yet")
+
+
+def _refuse_collapsed_history(
+    out: Path, config: DignityConfig, seed: int, start_epoch: int, limit: float
+) -> None:
+    """Raise when the epochs before a resume already held a collapse streak.
+
+    The collapse leaves best.pt and last.pt behind; a resume that counted only its
+    own epochs would finish and return that best.pt as a healthy run.
+    """
+    path = out / "history.json"
+    if not path.exists():
+        return
+    streak = 0
+    for r in json.loads(path.read_text()):
+        if r["epoch"] >= start_epoch:
+            continue
+        streak = streak + 1 if r.get("val_review_share", 0.0) > limit else 0
+        if streak >= config.policy.collapse_epochs:
+            raise PolicyCollapseError(
+                str(out),
+                seed,
+                _collapse_message(
+                    out, config.policy, r["val_review_share"], limit, streak, r["epoch"]
+                ),
+            )
 
 
 def _loss_state(loss_fn, task: str) -> dict[str, float] | None:
@@ -315,7 +361,11 @@ def fit(
     Writes best.pt, last.pt and history.json to run_dir. With
     ``train.forecast_eligibility`` a forecast epoch is kept only when its val
     ``lift_upper`` is above ``eligibility_floor`` (default 1.0, chance); when no
-    epoch is, ``ForecastNotEligibleError`` is raised.
+    epoch is, ``ForecastNotEligibleError`` is raised. A policy run raises
+    ``PolicyCollapseError`` after ``policy.collapse_epochs`` epochs in a row whose
+    val review share is above ``collapse_review_factor * review_budget``; a
+    resumed run counts only its own epochs, but refuses a run dir whose history
+    already holds such a streak.
     """
     torch.manual_seed(seed)
     device = torch.device(config.device if torch.cuda.is_available() else "cpu")
@@ -345,6 +395,7 @@ def fit(
     )
     grad_scaler = GradScaler("cuda", enabled=use_amp)
 
+    limit = config.policy.collapse_review_factor * config.policy.review_budget
     gate = model.task == "forecast" and train_cfg.forecast_eligibility
     floor = 1.0 if eligibility_floor is None else eligibility_floor
     best_path = out / "best.pt"
@@ -370,6 +421,8 @@ def fit(
         best_metric = ckpt["best_metric"]
         if model.task == "policy" and ckpt.get("loss_state") is not None:
             loss_fn.load_state_dict(ckpt["loss_state"])
+        if model.task == "policy":
+            _refuse_collapsed_history(out, config, seed, start_epoch, limit)
         resumed_best = best_path.exists()
         if gate and resumed_best:
             # a best.pt from a run without the gate or under another floor must
@@ -410,6 +463,8 @@ def fit(
 
     history: list[dict] = []
     stale = 0
+    saturated = 0  # consecutive over-limit epochs of this call (policy only)
+    collapsed: tuple[int, float] | None = None
     wrote_best = False
     best_epoch: int | None = None
     for epoch in range(start_epoch, epochs + 1):
@@ -487,6 +542,12 @@ def fit(
                 ChanceGuardWarning,
                 stacklevel=2,
             )
+        if model.task == "policy":
+            share = row["val_review_share"]
+            saturated = saturated + 1 if share > limit else 0
+            if saturated >= config.policy.collapse_epochs:
+                collapsed = (epoch, share)
+                break
         if stop:
             break
 
@@ -497,6 +558,15 @@ def fit(
             r for r in json.loads(history_path.read_text()) if r["epoch"] < start_epoch
         ]
     history_path.write_text(json.dumps(previous + history, indent=2))
+
+    if collapsed is not None:
+        raise PolicyCollapseError(
+            str(out),
+            seed,
+            _collapse_message(
+                out, config.policy, collapsed[1], limit, saturated, collapsed[0]
+            ),
+        )
 
     # a best.pt left by an earlier run does not count; a resumed run keeps its own
     kept = wrote_best or resumed_best

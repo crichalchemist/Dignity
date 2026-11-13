@@ -29,6 +29,7 @@ from train.loop import (
     ChanceGuardWarning,
     FitResult,
     ForecastNotEligibleError,
+    PolicyCollapseError,
     _selection_metric,
     _task_loss,
     _val_metrics,
@@ -1219,6 +1220,110 @@ class TestFitPolicy:
         tiny_fit_config.train.epochs = 2
         with pytest.raises(ValueError, match="was selected on None"):
             fit(tiny_fit_config, tiny_split, 0, str(tmp_path), resume_from=str(last))
+
+
+class TestPolicyCollapseGuard:
+    @pytest.fixture
+    def cfg(self, policy_fit_config):
+        policy_fit_config.policy.collapse_epochs = 3
+        policy_fit_config.train.epochs = 5
+        return policy_fit_config
+
+    def test_three_saturated_epochs_abort_the_run_loudly(
+        self, tiny_split, cfg, tmp_path, monkeypatch
+    ):
+        _script_policy_review_shares(monkeypatch, [0.9, 0.9, 0.9, 0.9, 0.9])
+        with pytest.raises(PolicyCollapseError, match="epoch 3") as e:
+            fit(cfg, tiny_split, seed=7, run_dir=str(tmp_path))
+        assert (e.value.run_dir, e.value.seed) == (str(tmp_path), 7)
+        assert str(tmp_path) in str(e.value)
+        # the evidence is kept: history.json is written before the raise
+        assert len(json.loads((tmp_path / "history.json").read_text())) == 3
+
+    def test_two_saturated_epochs_then_recovery_does_not_abort(
+        self, tiny_split, cfg, tmp_path, monkeypatch
+    ):
+        _script_policy_review_shares(monkeypatch, [0.9, 0.9, 0.01, 0.9, 0.9])
+        r = fit(cfg, tiny_split, seed=0, run_dir=str(tmp_path))
+        assert len(r.history) == 5
+
+    def test_a_share_exactly_at_the_limit_is_not_saturated(
+        self, tiny_split, cfg, tmp_path, monkeypatch
+    ):
+        limit = cfg.policy.collapse_review_factor * cfg.policy.review_budget
+        assert limit == 0.5
+        _script_policy_review_shares(monkeypatch, [limit] * 5)
+        r = fit(cfg, tiny_split, seed=0, run_dir=str(tmp_path))
+        assert len(r.history) == 5
+
+    def test_the_limit_follows_the_configured_factor_and_budget(
+        self, tiny_split, cfg, tmp_path, monkeypatch
+    ):
+        cfg.policy.collapse_review_factor = 4.0
+        cfg.policy.review_budget = 0.1  # limit 0.4
+        _script_policy_review_shares(monkeypatch, [0.45] * 3)
+        with pytest.raises(PolicyCollapseError):
+            fit(cfg, tiny_split, seed=0, run_dir=str(tmp_path))
+
+    def test_a_one_epoch_policy_run_cannot_trip_the_guard(
+        self, tiny_split, cfg, tmp_path, monkeypatch
+    ):
+        # the smoke config runs one epoch
+        cfg.train.epochs = 1
+        _script_policy_review_shares(monkeypatch, [1.0])
+        r = fit(cfg, tiny_split, seed=0, run_dir=str(tmp_path))
+        assert len(r.history) == 1
+
+    def test_a_resumed_run_counts_the_streak_from_its_own_first_epoch(
+        self, tiny_split, cfg, tmp_path, monkeypatch
+    ):
+        cfg.train.epochs = 2
+        _script_policy_review_shares(monkeypatch, [0.9, 0.9])
+        fit(cfg, tiny_split, seed=0, run_dir=str(tmp_path))
+        cfg.train.epochs = 4
+        _script_policy_review_shares(monkeypatch, [0.9, 0.9])
+        # two saturated epochs in this call: a streak carried over would raise
+        resumed = fit(
+            cfg,
+            tiny_split,
+            seed=0,
+            run_dir=str(tmp_path),
+            resume_from=str(tmp_path / "last.pt"),
+        )
+        assert [h["epoch"] for h in resumed.history] == [3, 4]
+
+    def test_a_collapsed_run_cannot_be_resumed_into_a_normal_return(
+        self, tiny_split, cfg, tmp_path, monkeypatch
+    ):
+        # the collapse leaves best.pt (epoch 1) and last.pt (epoch 3) behind; a
+        # resume that counted only its own epochs would finish and hand back
+        # that best.pt as if the run had been healthy
+        _script_policy_review_shares(monkeypatch, [0.9, 0.9, 0.9])
+        with pytest.raises(PolicyCollapseError):
+            fit(cfg, tiny_split, seed=3, run_dir=str(tmp_path))
+        assert (tmp_path / "best.pt").exists()
+        _script_policy_review_shares(monkeypatch, [0.01, 0.01])
+        with pytest.raises(PolicyCollapseError, match=str(tmp_path)) as e:
+            fit(
+                cfg,
+                tiny_split,
+                seed=3,
+                run_dir=str(tmp_path),
+                resume_from=str(tmp_path / "last.pt"),
+            )
+        assert e.value.seed == 3
+        # nothing was trained on top of the collapsed history
+        assert len(json.loads((tmp_path / "history.json").read_text())) == 3
+
+    def test_a_rerun_into_a_collapsed_run_dir_still_raises(
+        self, tiny_split, cfg, tmp_path, monkeypatch
+    ):
+        _script_policy_review_shares(monkeypatch, [0.9, 0.9, 0.9])
+        with pytest.raises(PolicyCollapseError):
+            fit(cfg, tiny_split, seed=0, run_dir=str(tmp_path))
+        _script_policy_review_shares(monkeypatch, [0.9, 0.9, 0.9])
+        with pytest.raises(PolicyCollapseError):
+            fit(cfg, tiny_split, seed=0, run_dir=str(tmp_path))
 
 
 class TestValReviewShare:

@@ -390,6 +390,15 @@ multiplier state stored with best.pt, none for risk and forecast).
   Forecast reads the last horizon; policy has no AUROC. No warning is raised when
   `train.chance_guard_auroc` is null, when the run ends before `train.guard_epochs`, or
   (forecast) when the last horizon's validation column holds one class.
+- **Policy collapse guard.** A policy run raises `train.loop.PolicyCollapseError` when
+  the share of validation windows whose first choice is review, before the cap, stays
+  above `policy.collapse_review_factor` times `policy.review_budget` for
+  `policy.collapse_epochs` epochs in a row; the epoch history is written first, and
+  `eval.run` records the raise in the policy results file
+  (`tests/test_train.py::TestPolicyCollapseGuard::test_three_saturated_epochs_abort_the_run_loudly`,
+  `tests/test_train.py::TestPolicyCollapseGuard::test_a_collapsed_run_cannot_be_resumed_into_a_normal_return`).
+  A resumed run counts only its own epochs but refuses a run directory whose history
+  already holds such a streak.
 - **Early stopping.** After `train.patience` epochs without improvement `fit` stops;
   `None` disables it
   (`tests/test_train.py::TestFit::test_early_stopping_halts_after_patience_epochs_without_improvement`).
