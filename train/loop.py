@@ -17,7 +17,7 @@ from data.loader import create_dataloader
 from data.pipeline import SplitData, TransactionPipeline, WindowSet
 from data.source.synthetic import SyntheticGenerator
 from eval.metrics import lift_upper, risk_metrics
-from models.head.policy import cost_matrix, decide_actions
+from models.head.policy import ACTIONS, cost_matrix, decide_actions
 from train.checkpoint import (
     CheckpointMeta,
     build_model_from_meta,
@@ -45,6 +45,26 @@ class ForecastNotEligibleError(RuntimeError):
         self.seed = seed
 
 
+class PolicyCollapseError(RuntimeError):
+    """The policy head sat on review for ``policy.collapse_epochs`` epochs."""
+
+    def __init__(self, run_dir: str, seed: int, message: str):
+        super().__init__(message)
+        self.run_dir = run_dir
+        self.seed = seed
+
+
+def _collapse_message(
+    run_dir, policy, share: float, limit: float, streak: int, epoch: int
+) -> str:
+    return (
+        f"policy collapse in {run_dir}: val review share {share:.3f} above "
+        f"{limit:.3f} ({policy.collapse_review_factor:g} x the "
+        f"{policy.review_budget:g} budget) for {streak} epochs in a row, "
+        f"through epoch {epoch}"
+    )
+
+
 @dataclass
 class FitResult:
     best_path: str
@@ -52,6 +72,7 @@ class FitResult:
     best_metric: float
     meta: CheckpointMeta
     best_epoch: int | None = None
+    loss_state: dict[str, float] | None = None  # policy: best.pt's review multiplier
 
 
 def resolve_pos_weight(
@@ -122,8 +143,47 @@ def _task_loss(config: DignityConfig, train_ws: WindowSet):
             )
         )
     if task == "policy":
-        return expected_cost_loss(torch.from_numpy(cost_matrix(config.policy.costs)))
+        return expected_cost_loss(
+            torch.from_numpy(cost_matrix(config.policy.costs)),
+            review_budget=config.policy.review_budget,
+            multiplier_lr=config.policy.multiplier_lr,
+            multiplier_floor=config.policy.multiplier_floor,
+        )
     raise NotImplementedError(f"task={task!r} does not train end to end yet")
+
+
+def _history_streak(
+    out: Path, config: DignityConfig, seed: int, start_epoch: int, limit: float
+) -> int:
+    """The over-limit streak a resume continues; raise on any full streak.
+
+    Every row of history.json is scanned, so a collapse refuses a resume from
+    last.pt, from an older last.pt or from best.pt alike. The return value is
+    the run of over-limit rows at the end of the rows before ``start_epoch``.
+    A history.json deleted by hand is outside what fit can defend.
+    """
+    path = out / "history.json"
+    if not path.exists():
+        return 0
+    streak = carried = 0
+    for r in json.loads(path.read_text()):
+        streak = streak + 1 if r.get("val_review_share", 0.0) > limit else 0
+        if streak >= config.policy.collapse_epochs:
+            raise PolicyCollapseError(
+                str(out),
+                seed,
+                _collapse_message(
+                    out, config.policy, r["val_review_share"], limit, streak, r["epoch"]
+                ),
+            )
+        if r["epoch"] < start_epoch:
+            carried = streak
+    return carried
+
+
+def _loss_state(loss_fn, task: str) -> dict[str, float] | None:
+    """The policy loss's review multiplier state; risk and forecast keep none."""
+    return loss_fn.state_dict() if task == "policy" else None
 
 
 def _val_metrics(
@@ -135,7 +195,12 @@ def _val_metrics(
         costs = cost_matrix(config.policy.costs).astype(np.float64)
         actions = decide_actions(score, config.policy.review_budget)
         neg_cost = -costs[actions, val_ws.y_risk.astype(np.int64)].mean()
-        return {"val_neg_cost": float(neg_cost)}, None
+        # the share of windows whose first choice is review, before the cap
+        review_share = (score.argmax(axis=1) == ACTIONS.index("review")).mean()
+        return {
+            "val_neg_cost": float(neg_cost),
+            "val_review_share": float(review_share),
+        }, None
     if config.model.task == "risk":
         val = risk_metrics(
             val_ws.y_risk, score, val_ws.block_index, n_boot=0, seed=seed
@@ -299,7 +364,13 @@ def fit(
     Writes best.pt, last.pt and history.json to run_dir. With
     ``train.forecast_eligibility`` a forecast epoch is kept only when its val
     ``lift_upper`` is above ``eligibility_floor`` (default 1.0, chance); when no
-    epoch is, ``ForecastNotEligibleError`` is raised.
+    epoch is, ``ForecastNotEligibleError`` is raised. A policy run raises
+    ``PolicyCollapseError`` after ``policy.collapse_epochs`` epochs in a row whose
+    val review share is above ``collapse_review_factor * review_budget``. The
+    streak survives a resume: a resumed run continues the over-limit rows that
+    end the history before its first epoch, and refuses, before training or
+    rewriting anything, a run dir whose history.json holds such a streak
+    anywhere, whatever checkpoint it resumes from.
     """
     torch.manual_seed(seed)
     device = torch.device(config.device if torch.cuda.is_available() else "cpu")
@@ -329,12 +400,14 @@ def fit(
     )
     grad_scaler = GradScaler("cuda", enabled=use_amp)
 
+    limit = config.policy.collapse_review_factor * config.policy.review_budget
     gate = model.task == "forecast" and train_cfg.forecast_eligibility
     floor = 1.0 if eligibility_floor is None else eligibility_floor
     best_path = out / "best.pt"
     best_metric = float("-inf")
     start_epoch = 1
     resumed_best = False
+    saturated = 0  # consecutive over-limit epochs, carried over a resume (policy)
     if resume_from:
         ckpt = load_checkpoint(resume_from, map_location=device)
         saved_metric = _task_selection_metric(
@@ -352,6 +425,10 @@ def fit(
             grad_scaler.load_state_dict(ckpt["grad_scaler_state"])
         start_epoch = ckpt["epoch"] + 1
         best_metric = ckpt["best_metric"]
+        if model.task == "policy" and ckpt.get("loss_state") is not None:
+            loss_fn.load_state_dict(ckpt["loss_state"])
+        if model.task == "policy":
+            saturated = _history_streak(out, config, seed, start_epoch, limit)
         resumed_best = best_path.exists()
         if gate and resumed_best:
             # a best.pt from a run without the gate or under another floor must
@@ -392,6 +469,7 @@ def fit(
 
     history: list[dict] = []
     stale = 0
+    collapsed: tuple[int, float] | None = None
     wrote_best = False
     best_epoch: int | None = None
     for epoch in range(start_epoch, epochs + 1):
@@ -434,6 +512,7 @@ def fit(
                 epoch,
                 row,
                 best_metric,
+                loss_state=_loss_state(loss_fn, model.task),
             )
         elif not gate or wrote_best or resumed_best:
             # under the gate, patience starts once an epoch has been kept
@@ -450,6 +529,7 @@ def fit(
                 epoch,
                 row,
                 best_metric,
+                loss_state=_loss_state(loss_fn, model.task),
             )
 
         scheduler.step()
@@ -467,6 +547,12 @@ def fit(
                 ChanceGuardWarning,
                 stacklevel=2,
             )
+        if model.task == "policy":
+            share = row["val_review_share"]
+            saturated = saturated + 1 if share > limit else 0
+            if saturated >= config.policy.collapse_epochs:
+                collapsed = (epoch, share)
+                break
         if stop:
             break
 
@@ -477,6 +563,15 @@ def fit(
             r for r in json.loads(history_path.read_text()) if r["epoch"] < start_epoch
         ]
     history_path.write_text(json.dumps(previous + history, indent=2))
+
+    if collapsed is not None:
+        raise PolicyCollapseError(
+            str(out),
+            seed,
+            _collapse_message(
+                out, config.policy, collapsed[1], limit, saturated, collapsed[0]
+            ),
+        )
 
     # a best.pt left by an earlier run does not count; a resumed run keeps its own
     kept = wrote_best or resumed_best
@@ -504,4 +599,5 @@ def fit(
         best_metric=float(best_metric),
         meta=meta,
         best_epoch=best_epoch,
+        loss_state=load_checkpoint(best_path, map_location="cpu").get("loss_state"),
     )

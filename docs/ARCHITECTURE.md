@@ -338,7 +338,7 @@ the backbone with one head, and `Dignity.forward` returns
 | --- | --- | --- | --- |
 | `risk` | `models/head/risk.py::RiskHead` | Sigmoid probabilities `[B, 1]` | `train/losses.py::risk_loss`: binary cross-entropy with `train.pos_weight` (default: train negatives over positives) |
 | `forecast` | `models/head/forecast.py::ForecastHead` | Onset probabilities `[B, horizon]`, `P(onset within h rows)` for h = 1..H, never decreasing in h by construction | `train/losses.py::forecast_loss`: masked per-horizon binary cross-entropy with `train.pos_weight` (default: negatives over positives among the unmasked train labels, at most `train.forecast_pos_weight_cap` when that is set) |
-| `policy` | `models/head/policy.py::PolicyHead` | Logits `[B, 3]` over `models.head.policy.ACTIONS` = `allow`, `review`, `block` | `train/losses.py::expected_cost_loss`: softmax-weighted cost table |
+| `policy` | `models/head/policy.py::PolicyHead` | Logits `[B, 3]` over `models.head.policy.ACTIONS` = `allow`, `review`, `block` | `train/losses.py::expected_cost_loss`: softmax-weighted cost table plus a review multiplier: per training batch the review column's cost is raised or lowered (step `policy.multiplier_lr`, lowest value `policy.multiplier_floor`) so the mean review probability tracks `policy.review_budget`; the reported `train_loss` is the plain expected cost; the multiplier is stored in the checkpoint (`loss_state`), see `tests/test_train.py::TestExpectedCostLoss::test_the_multiplier_rises_while_the_head_reviews_more_than_the_budget` |
 
 Pinned by `tests/test_models.py::TestTaskHeads::test_forecast_probabilities_never_decrease_with_horizon`
 and `tests/test_models.py::TestTaskHeads::test_policy_head_returns_raw_logits_not_probabilities`.
@@ -358,7 +358,8 @@ review-likely windows keep `review`; the others go to their next-best action,
 `train/loop.py::fit(config, data, seed, run_dir, resume_from=None, eligibility_floor=None)` is the one
 training loop; `dignity-train` (`train/cli.py::main`), the notebook and `eval.run`
 all call it. It returns a `train.loop.FitResult`: `best_path`, `history`,
-`best_metric`, `meta` and `best_epoch`.
+`best_metric`, `meta`, `best_epoch` and `loss_state` (for a policy run the review
+multiplier state stored with best.pt, none for risk and forecast).
 
 - **Optimizer.** AdamW with a cosine schedule over `train.epochs`; gradient clipping
   at `train.gradient_clip`. `train.use_amp` only takes effect on CUDA.
@@ -389,6 +390,19 @@ all call it. It returns a `train.loop.FitResult`: `best_path`, `history`,
   Forecast reads the last horizon; policy has no AUROC. No warning is raised when
   `train.chance_guard_auroc` is null, when the run ends before `train.guard_epochs`, or
   (forecast) when the last horizon's validation column holds one class.
+- **Policy collapse guard.** A policy run raises `train.loop.PolicyCollapseError` when
+  the share of validation windows whose first choice is review, before the cap, stays
+  above `policy.collapse_review_factor` times `policy.review_budget` for
+  `policy.collapse_epochs` epochs in a row; the epoch history is written first, and
+  `eval.run` records the raise in the policy results file
+  (`tests/test_train.py::TestPolicyCollapseGuard::test_three_saturated_epochs_abort_the_run_loudly`,
+  `tests/test_train.py::TestPolicyCollapseGuard::test_a_collapsed_run_cannot_be_resumed_into_a_normal_return`).
+  The streak survives a resume: a resumed run continues the over-limit epochs that end
+  the history before its first epoch, and a policy resume refuses, before training or
+  rewriting anything, a run directory whose history file (history.json) holds such a streak anywhere,
+  whatever checkpoint it resumes from and whatever `train.save_interval` is
+  (`tests/test_train.py::TestPolicyCollapseGuard::test_a_collapse_refuses_a_resume_from_any_checkpoint_at_any_save_interval`).
+  A history file deleted by hand is outside what `fit` can defend.
 - **Early stopping.** After `train.patience` epochs without improvement `fit` stops;
   `None` disables it
   (`tests/test_train.py::TestFit::test_early_stopping_halts_after_patience_epochs_without_improvement`).
@@ -433,7 +447,10 @@ score. The forecast result file records `metrics.seed_spread.best_epoch`, `val_l
 fit that raises `ForecastNotEligibleError` is written as `metrics.raised` (`error`,
 `message`, `train_seed`) with empty baselines and no chart; the remaining tasks still run,
 and `eval.run` prints a line `TRAINING_RAISED <ErrorClass> task=<t> train_seed=<s>` and
-exits 1. Exit codes: 0 ok, 1 a recorded training raise, 2 refused arguments.
+exits 1; a policy fit that raises `PolicyCollapseError` is recorded and printed the same
+way. The policy result file records `metrics.seed_spread.review_multiplier` (the loss's
+multiplier at each seed's kept epoch) and `metrics.seed_spread.val_neg_cost` per training
+seed. Exit codes: 0 ok, 1 a recorded training raise, 2 refused arguments.
 Confidence intervals bootstrap whole blocks, never single windows, because windows of
 one block overlap (`eval/metrics.py::bootstrap_ci`, DGNTY-21).
 
@@ -453,7 +470,8 @@ baseline's PR-AUC, and `model_gate` passes when both gates do.
 
 `train/checkpoint.py` writes self-describing checkpoints: a plain dict readable with
 `torch.load(weights_only=True)` holding `model_state`, `optimizer_state`,
-`grad_scaler_state`, `meta`, `epoch`, `metrics` and `best_metric`. `meta` is stored as
+`grad_scaler_state`, `meta`, `epoch`, `metrics`, `best_metric` and `loss_state` (the policy
+loss's review multiplier state, null for risk and forecast). `meta` is stored as
 a plain dict of the fields of `train.checkpoint.CheckpointMeta`: `format_version`,
 `task`, `input_size`, `feature_names`, `head_kwargs`, `scaler_center`, `scaler_scale`
 and `config` (the whole run config); `load_checkpoint` returns it as a `CheckpointMeta`

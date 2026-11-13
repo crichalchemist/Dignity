@@ -1,5 +1,6 @@
 """Loss factories for the training engine."""
 
+import math
 from collections.abc import Callable
 
 import torch
@@ -51,18 +52,69 @@ def forecast_loss(
     return loss_fn
 
 
-def expected_cost_loss(
-    cost_matrix: Tensor,
-) -> Callable[[Tensor, dict[str, Tensor]], Tensor]:
-    """Return the mean expected triage cost under the policy's softmax.
+_SHARE_EMA = 0.95  # weight of the running review share kept per training batch
+
+
+class ExpectedCostLoss:
+    """Mean expected triage cost under the policy's softmax, with a review multiplier.
 
     ``cost_matrix`` is ``[3, 2]``: rows are actions (allow, review, block), columns
     the true state (0 normal, 1 anomaly). The softmax runs in float32.
+
+    With a ``review_budget`` the review column's cost is raised by ``multiplier``
+    for the gradient, and after every batch the multiplier moves by
+    ``multiplier_lr * (share_ema - review_budget)``, never below
+    ``multiplier_floor``, where ``share_ema`` is a running mean of the batch's mean
+    review probability. The returned value is always the plain expected cost.
     """
 
-    def loss_fn(outputs: Tensor, batch: dict[str, Tensor]) -> Tensor:
-        p = F.softmax(outputs.float(), dim=-1)
-        costs = cost_matrix.to(p)[:, batch["y"]].T
-        return (p * costs).sum(-1).mean()
+    def __init__(
+        self,
+        cost_matrix: Tensor,
+        review_budget: float | None = None,
+        multiplier_lr: float = 0.1,
+        multiplier_floor: float = -0.5,
+    ):
+        self._cost_matrix = cost_matrix
+        self._budget = review_budget
+        self._lr = multiplier_lr
+        self._floor = multiplier_floor
+        self.multiplier = 0.0
+        self.share_ema = 0.0 if review_budget is None else review_budget
 
-    return loss_fn
+    def __call__(self, outputs: Tensor, batch: dict[str, Tensor]) -> Tensor:
+        p = F.softmax(outputs.float(), dim=-1)
+        costs = self._cost_matrix.to(p)[:, batch["y"]].T
+        plain = (p * costs).sum(-1).mean()
+        if self._budget is None:
+            return plain
+        p_review = p[:, 1].mean()
+        loss = plain + self.multiplier * (p_review - p_review.detach())
+        share = p_review.item()
+        if math.isfinite(share):  # a NaN batch must not pin the multiplier
+            self.share_ema = _SHARE_EMA * self.share_ema + (1 - _SHARE_EMA) * share
+            self.multiplier = max(
+                self._floor,
+                self.multiplier + self._lr * (self.share_ema - self._budget),
+            )
+        return loss
+
+    def state_dict(self) -> dict[str, float]:
+        return {"multiplier": self.multiplier, "share_ema": self.share_ema}
+
+    def load_state_dict(self, state: dict[str, float]) -> None:
+        self.multiplier = float(state["multiplier"])
+        self.share_ema = float(state["share_ema"])
+
+
+def expected_cost_loss(
+    cost_matrix: Tensor,
+    review_budget: float | None = None,
+    multiplier_lr: float = 0.1,
+    multiplier_floor: float = -0.5,
+) -> ExpectedCostLoss:
+    """Return the expected triage cost loss; see :class:`ExpectedCostLoss`.
+
+    ``review_budget=None`` gives the plain mean expected cost and no state.
+    """
+    return ExpectedCostLoss(cost_matrix, review_budget, multiplier_lr, multiplier_floor)

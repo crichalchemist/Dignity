@@ -631,6 +631,26 @@ class TestPolicyConfig:
             PolicyConfig(review_budget=budget, collapse_review_factor=factor)
         assert PolicyConfig(collapse_review_factor=19.9).collapse_review_factor == 19.9
 
+    def test_the_review_multiplier_step_must_be_positive_and_its_floor_not_above_zero(
+        self,
+    ):
+        with pytest.raises(ValueError, match="multiplier_lr"):
+            PolicyConfig(multiplier_lr=0)
+        with pytest.raises(ValueError, match="multiplier_floor"):
+            PolicyConfig(multiplier_floor=0.1)
+        assert PolicyConfig(multiplier_floor=0.0).multiplier_floor == 0.0
+
+    def test_at_least_one_saturated_epoch_must_trigger_the_collapse_guard(self):
+        with pytest.raises(ValueError, match="collapse_epochs"):
+            PolicyConfig(collapse_epochs=0)
+        assert PolicyConfig(collapse_epochs=1).collapse_epochs == 1  # one is enough
+        c = PolicyConfig()
+        assert (c.multiplier_lr, c.multiplier_floor, c.collapse_epochs) == (
+            0.1,
+            -0.5,
+            3,
+        )
+
     def test_base_yaml_spells_out_policy_block_and_n_actions_raw(self):
         # The dataclass fills defaults, so a key missing from base.yaml would
         # still load; read the raw file.
@@ -639,6 +659,9 @@ class TestPolicyConfig:
             "costs",
             "review_budget",
             "collapse_review_factor",
+            "multiplier_lr",
+            "multiplier_floor",
+            "collapse_epochs",
         }
         assert "n_actions" in raw["model"]
         assert DignityConfig.from_yaml("config/base.yaml").policy == PolicyConfig()

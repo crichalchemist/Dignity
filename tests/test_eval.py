@@ -44,7 +44,12 @@ from eval.run import (
 )
 from models.head.policy import cost_matrix
 from train.checkpoint import load_checkpoint
-from train.loop import FitResult, ForecastNotEligibleError, prepare_data
+from train.loop import (
+    FitResult,
+    ForecastNotEligibleError,
+    PolicyCollapseError,
+    prepare_data,
+)
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -1339,6 +1344,143 @@ class TestEvalRunPolicy:
         assert spread["review_rate"]["values"][0] <= 0.05 + 1e-9  # capped
         assert 0.0 <= spread["uncapped_review_share"]["values"][0] <= 1.0
 
+    def test_policy_results_carry_the_review_multiplier_and_the_val_cost_of_every_seed(
+        self, monkeypatch, tmp_path
+    ):
+        # R6 compares multiplier_lr settings on the kept epochs' val cost, and the
+        # multiplier shows whether the budget constraint was ever active
+        import eval.run as run_module
+
+        real_fit, kept = run_module.fit, []
+
+        def spy(config, *args, **kwargs):
+            result = real_fit(config, *args, **kwargs)
+            if config.model.task == "policy":
+                kept.append(result.best_metric)
+            return result
+
+        monkeypatch.setattr(run_module, "fit", spy)
+        monkeypatch.chdir(tmp_path)
+        assert main(["--smoke", "--seed", "tuning", "--tasks", "policy"]) == 0
+        r = json.loads((tmp_path / "runs/smoke/results/policy.json").read_text())
+        spread = r["metrics"]["seed_spread"]
+        assert spread["val_neg_cost"]["values"] == kept
+        for key in ("review_multiplier", "val_neg_cost"):
+            assert len(spread[key]["values"]) == len(spread["train_seeds"])
+            assert all(isinstance(v, float) for v in spread[key]["values"])
+            assert spread[key]["mean"] == pytest.approx(np.mean(spread[key]["values"]))
+        assert all(v <= 0.0 for v in spread["val_neg_cost"]["values"])
+
+    def _raise_for(self, monkeypatch, *tasks):
+        import eval.run as run_module
+
+        real_fit = run_module.fit
+
+        def wrapped(config, *args, **kwargs):
+            if config.model.task == "policy" and "policy" in tasks:
+                raise PolicyCollapseError("rd", 7, "stuck on review")
+            if config.model.task == "forecast" and "forecast" in tasks:
+                raise ForecastNotEligibleError("rd", 42, "no epoch eligible")
+            return real_fit(config, *args, **kwargs)
+
+        monkeypatch.setattr(run_module, "fit", wrapped)
+
+    def test_a_collapsed_policy_fit_is_recorded_and_the_run_still_ends(
+        self, monkeypatch, tmp_path
+    ):
+        monkeypatch.chdir(tmp_path)
+        self._raise_for(monkeypatch, "policy")
+        assert main(["--smoke", "--seed", "tuning", "--tasks", "risk,policy"]) == 1
+        out = tmp_path / "runs/smoke/results"
+        r = json.loads((out / "policy.json").read_text())
+        assert r["metrics"] == {
+            "raised": {
+                "error": "PolicyCollapseError",
+                "message": "stuck on review",
+                "train_seed": 7,
+            }
+        }
+        assert r["baselines"] == {}
+        risk = json.loads((out / "risk.json").read_text())
+        assert "raised" not in risk["metrics"]
+        assert "pr_auc" in risk["metrics"]
+        assert list(tmp_path.rglob("policy_cost.png")) == []
+
+    def test_a_policy_failure_that_is_not_a_collapse_still_stops_the_run(
+        self, monkeypatch, tmp_path
+    ):
+        import eval.run as run_module
+
+        real_fit = run_module.fit
+
+        def wrapped(config, *args, **kwargs):
+            if config.model.task == "policy":
+                raise RuntimeError("no best checkpoint was written")
+            return real_fit(config, *args, **kwargs)
+
+        monkeypatch.setattr(run_module, "fit", wrapped)
+        monkeypatch.chdir(tmp_path)
+        with pytest.raises(RuntimeError, match="no best checkpoint"):
+            main(["--smoke", "--seed", "tuning", "--tasks", "policy"])
+
+    def test_a_recorded_policy_raise_prints_the_stable_line_the_runner_never_retries(
+        self, monkeypatch, tmp_path, capsys
+    ):
+        monkeypatch.chdir(tmp_path)
+        self._raise_for(monkeypatch, "policy")
+        assert main(["--smoke", "--seed", "tuning", "--tasks", "policy"]) == 1
+        lines = capsys.readouterr().out.splitlines()
+        stable = "TRAINING_RAISED PolicyCollapseError task=policy train_seed=7"
+        assert lines.count(stable) == 1
+        assert "policy raised: stuck on review" in lines
+
+    def test_a_recorded_policy_raise_removes_the_chart_of_an_earlier_policy_run(
+        self, monkeypatch, tmp_path
+    ):
+        monkeypatch.chdir(tmp_path)
+        img = tmp_path / "runs/smoke/img"
+        img.mkdir(parents=True)
+        old, other = img / "policy_cost.png", img / "risk_pr_curve.png"
+        for f in (old, other):
+            f.write_bytes(b"old")
+        self._raise_for(monkeypatch, "policy")
+        assert main(["--smoke", "--seed", "tuning", "--tasks", "policy"]) == 1
+        assert not old.exists()
+        assert other.exists()
+
+    def test_the_privacy_sweep_still_runs_after_a_recorded_policy_raise(
+        self, monkeypatch, tmp_path
+    ):
+        import eval.run as run_module
+
+        monkeypatch.chdir(tmp_path)
+        self._raise_for(monkeypatch, "policy")
+        swept = []
+        monkeypatch.setattr(
+            run_module, "run_privacy_sweep", lambda *a, **k: swept.append(1)
+        )
+        status = main(
+            ["--smoke", "--seed", "tuning", "--tasks", "policy", "--privacy-sweep"]
+        )
+        assert status == 1
+        assert swept == [1]
+
+    def test_a_forecast_raise_and_a_policy_raise_are_both_recorded(
+        self, monkeypatch, tmp_path, capsys
+    ):
+        monkeypatch.chdir(tmp_path)
+        self._raise_for(monkeypatch, "forecast", "policy")
+        assert main(["--smoke", "--seed", "tuning", "--tasks", "forecast,policy"]) == 1
+        out = tmp_path / "runs/smoke/results"
+        for task, error in (
+            ("forecast", "ForecastNotEligibleError"),
+            ("policy", "PolicyCollapseError"),
+        ):
+            r = json.loads((out / f"{task}.json").read_text())
+            assert r["metrics"]["raised"]["error"] == error
+        lines = capsys.readouterr().out.splitlines()
+        assert sum(line.startswith("TRAINING_RAISED ") for line in lines) == 2
+
     @pytest.mark.parametrize("tasks", ["risks", "risk,forcast", "", "policy,"])
     def test_unknown_task_names_are_refused_before_anything_runs(
         self, tasks, monkeypatch, tmp_path
@@ -1640,7 +1782,15 @@ class TestEvalRunSeedPairing:
         risk_runs = [
             (42 + k, SimpleNamespace(best_path=f"risk{k}.pt")) for k in range(self.K)
         ]
-        runs = [(42 + k, SimpleNamespace(tag=k)) for k in range(self.K)]
+        runs = [
+            (
+                42 + k,
+                SimpleNamespace(
+                    tag=k, loss_state={"multiplier": 0.0}, best_metric=-1.0
+                ),
+            )
+            for k in range(self.K)
+        ]
         monkeypatch.setattr(run_module, "_train_seeds", lambda *a, **kw: runs)
         monkeypatch.setattr(
             run_module, "_predict", lambda cfg, res, X: {"probs": probs[res.tag]}

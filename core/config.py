@@ -304,6 +304,9 @@ class PolicyConfig:
     collapse_review_factor: float = (
         10.0  # review-share multiple of the budget that counts as collapse
     )
+    multiplier_lr: float = 0.1  # step of the review multiplier per training batch
+    multiplier_floor: float = -0.5  # lowest value the review multiplier may take
+    collapse_epochs: int = 3  # consecutive over-limit epochs before fit raises
 
     def __post_init__(self):
         if set(self.costs) != _ACTION_NAMES:
@@ -330,6 +333,16 @@ class PolicyConfig:
                 f"collapse_review_factor must satisfy 0 < collapse_review_factor "
                 f"* review_budget < 1, got {self.collapse_review_factor} "
                 f"* {self.review_budget}"
+            )
+        if not self.multiplier_lr > 0:
+            raise ValueError(f"multiplier_lr must be > 0, got {self.multiplier_lr}")
+        if not self.multiplier_floor <= 0:
+            raise ValueError(
+                f"multiplier_floor must be <= 0, got {self.multiplier_floor}"
+            )
+        if not self.collapse_epochs >= 1:
+            raise ValueError(
+                f"collapse_epochs must be >= 1, got {self.collapse_epochs}"
             )
 
 

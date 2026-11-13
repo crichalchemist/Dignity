@@ -62,6 +62,23 @@ class TestCheckpoint:
         kernels = [m.kernel_size for m in rebuilt.modules() if isinstance(m, nn.Conv1d)]
         assert kernels == [(5,), (5,)]
 
+    def test_loss_state_round_trips_and_a_checkpoint_without_it_still_loads(
+        self, tmp_path
+    ):
+        _, meta, model, opt = _parts()
+        scaler = GradScaler("cpu")
+        path = tmp_path / "c.pt"
+        state = {"multiplier": 0.25, "share_ema": 0.04}
+        args = (path, model, opt, scaler, meta, 1, {}, 0.5)
+        save_checkpoint(*args, loss_state=state)
+        assert load_checkpoint(path)["loss_state"] == state
+        save_checkpoint(*args)
+        raw = torch.load(path, weights_only=True)
+        assert raw["loss_state"] is None  # risk and forecast keep no loss state
+        del raw["loss_state"]  # a checkpoint written before this key existed
+        torch.save(raw, path)
+        assert load_checkpoint(path).get("loss_state") is None
+
     def test_pre_v1_checkpoint_is_rejected_with_a_clear_message(self, tmp_path):
         torch.save(
             {
