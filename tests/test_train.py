@@ -1182,6 +1182,8 @@ class TestPrepareData:
 # Declared 2026-11-09 from tuning-seed validation evidence, before the evaluation
 # seed was touched (val AUROC min 0.735 at eps 1 over privacy seeds 0-2; chance is
 # 0.5). Easy-preset data: a "still learns" floor, not a point on the privacy curve.
+# That evidence predates R3, which gave the easy preset build-ups and decoys; the
+# floor was not re-derived on that data, and the test still passes at 0.70.
 PRIVACY_AUROC_FLOOR = 0.70
 
 

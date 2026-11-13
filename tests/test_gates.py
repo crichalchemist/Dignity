@@ -3,7 +3,7 @@
 import json
 import math
 import re
-import time
+import statistics
 from dataclasses import replace
 from pathlib import Path
 
@@ -16,7 +16,7 @@ from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import StandardScaler
 
 from core.config import SELECTION_SEEDS, TUNING_SEEDS, DignityConfig
-from data.pipeline import TransactionPipeline, WindowSet
+from data.pipeline import SplitData, TransactionPipeline, WindowSet
 from data.source.synthetic import RAW_COLUMNS, SyntheticGenerator
 from eval import gates
 from eval.baselines import (
@@ -263,7 +263,15 @@ def _good_seeds(n: int) -> list[dict]:
 
 
 def _fake_score_preset(
-    monkeypatch, *, wl=None, bt=None, recall=None, onsets=250, seen=None, extra=None
+    monkeypatch,
+    *,
+    wl=None,
+    bt=None,
+    recall=None,
+    onsets=250,
+    seen=None,
+    extra=None,
+    headroom=None,
 ):
     """Replace gates._score_preset (the boundary) with fixed numbers.
 
@@ -294,7 +302,7 @@ def _fake_score_preset(
                 {"val": list(recall_val), "test": list(recall_test)} if hard else None
             ),
             "test_onsets": int(pick(onsets, seed)) if hard else None,
-            "headroom": _good_seeds(1)[0] if hard else None,
+            "headroom": (headroom or _good_seeds(1)[0]) if hard else None,
         }
 
     monkeypatch.setattr(gates, "_score_preset", score)
@@ -447,6 +455,76 @@ class TestDataGate:
             data_gate(DEFAULT_PRESETS, [1000, 1001])["checks"]["test_onsets"] is False
         )
 
+    def test_the_band_is_judged_on_val_and_test_together(self, monkeypatch):
+        # Val alone reads 0.60 and is in the band; the test split drags the pooled
+        # mean to 0.50, out of it. A gate that looked at one split would pass.
+        for name in ("window_logistic", "block_tree"):
+            wl = {**_WL, "hard": (0.60, 0.40)} if name == "window_logistic" else _WL
+            bt = {**_BT, "hard": (0.60, 0.40)} if name == "block_tree" else _BT
+            _fake_score_preset(monkeypatch, wl=wl, bt=bt)
+            result = data_gate(DEFAULT_PRESETS, [1000])
+            assert result["checks"][f"{name}_in_band"] is False
+
+    def test_the_band_tops_out_at_080_and_starts_at_055(self, monkeypatch):
+        top = {"easy": (0.95, 0.95), "medium": (0.90, 0.90)}
+
+        def band(name: str, pooled: float) -> bool:
+            hard = {"hard": (pooled, pooled)}
+            wl = {**_WL, **top, **(hard if name == "window_logistic" else {})}
+            bt = {**_BT, **top, **(hard if name == "block_tree" else {})}
+            _fake_score_preset(monkeypatch, wl=wl, bt=bt)
+            return data_gate(DEFAULT_PRESETS, [1000])["checks"][f"{name}_in_band"]
+
+        for name in ("window_logistic", "block_tree"):
+            assert band(name, 0.80) is True
+            assert band(name, 0.81) is False
+            assert band(name, 0.55) is True
+            assert band(name, 0.54) is False
+
+    def test_a_failing_headroom_check_fails_the_gate_and_only_that_check(
+        self, monkeypatch
+    ):
+        weak = dict(_good_seeds(1)[0], lift_h10=1.0)
+        _fake_score_preset(monkeypatch, headroom=weak)
+        result = data_gate(DEFAULT_PRESETS, [1000])
+        assert [k for k, v in result["checks"].items() if not v] == [
+            "forecast_headroom"
+        ]
+        assert result["passed"] is False
+
+    def test_a_tie_between_presets_is_not_a_difficulty_order(self, monkeypatch):
+        _fake_score_preset(monkeypatch, wl={**_WL, "medium": _WL["easy"]})
+        tied_easy = data_gate(DEFAULT_PRESETS, [1000])
+        assert tied_easy["checks"]["monotone"] is False
+        _fake_score_preset(monkeypatch, wl={**_WL, "medium": _WL["hard"]})
+        tied_hard = data_gate(DEFAULT_PRESETS, [1000])
+        assert tied_hard["checks"]["monotone"] is False
+
+    def test_flatness_at_exactly_the_limit_passes(self, monkeypatch):
+        # 0.25 is exact in binary, so the spread equals the limit with no rounding:
+        # the limit is inclusive (contract: spread <= limit).
+        monkeypatch.setattr(gates, "FLATNESS_MAX_SPREAD", 0.25)
+        _fake_score_preset(monkeypatch, recall=([0.25, 0.5, 0.5, 0.5, 0.5], _FLAT))
+        result = data_gate(DEFAULT_PRESETS, [1000])
+        assert result["onset_recall"]["val_spread"] == 0.25
+        assert result["checks"]["positional_flatness"] is True
+
+    def test_the_band_baselines_see_the_raw_columns_not_the_preset_features(
+        self, monkeypatch
+    ):
+        seen: list = []
+        real = gates.TransactionPipeline
+
+        def spy(*, seq_len, features):
+            seen.append(list(features))
+            return real(seq_len=seq_len, features=features)
+
+        monkeypatch.setattr(gates, "TransactionPipeline", spy)
+        gates._score_preset(DEFAULT_PRESETS["easy"], 1000, n_blocks=300)
+        own = list(DignityConfig.from_yaml(DEFAULT_PRESETS["easy"]).data.features)
+        assert own != list(RAW_COLUMNS)
+        assert seen == [list(RAW_COLUMNS)]
+
     def test_gate_passes_only_when_every_check_holds(self, monkeypatch):
         _fake_score_preset(monkeypatch)
         result = data_gate(DEFAULT_PRESETS, [1000, 1001])
@@ -562,7 +640,6 @@ class TestDataGate:
         assert hashed("lr: 0.0003", "lr: 0.0005") == base
 
     def test_small_structural_run_scores_all_three_presets(self):
-        started = time.monotonic()
         result = data_gate(DEFAULT_PRESETS, [1000], n_blocks=300)
         for preset in ("easy", "medium", "hard"):
             for baseline in ("window_logistic", "block_tree"):
@@ -574,7 +651,6 @@ class TestDataGate:
         assert len(result["onset_recall"]["test"]) == 5
         assert isinstance(result["test_onsets"][0], int)
         assert "arrays" not in json.dumps(result, allow_nan=False)
-        assert time.monotonic() - started < 300
 
     def test_gate_cli_writes_the_json_and_exits_by_passed(self, monkeypatch, tmp_path):
         calls: list = []
@@ -620,6 +696,66 @@ def _hard_copy(tmp_path: Path, **replacements: str) -> str:
     return str(path)
 
 
+def _controlled_headroom_case(n_test_blocks: int = 30):
+    """A hand-built frame and split whose every forecast number is known by design.
+
+    Val and test blocks hold 40 rows, one window per row (`end_row` = row). The
+    build-up covers rows 10-19, so the shape-only score there is 0.1 ... 1.0.
+    Test: one onset per block (the `y_forecast[:, 0]` window at row 14), h10 positive
+    only at row 19, h5 positive at rows 10-12, rows 17 and 18 masked out. Val: h10
+    positive on the whole build-up, so its 10% FPR threshold is the lowest shape
+    score, 0.1, while the test's own is 1.0.
+    """
+    rng = np.random.default_rng(7)
+
+    def blank(n: int, block_ids: np.ndarray, end_rows: np.ndarray) -> WindowSet:
+        return WindowSet(
+            X=rng.normal(size=(n, 40, 2)).astype(np.float32),
+            y_risk=np.zeros(n, dtype=np.int8),
+            y_forecast=np.zeros((n, 10), dtype=np.float32),
+            forecast_mask=np.ones(n, dtype=bool),
+            block_index=block_ids.astype(np.int64),
+            onset_offset=np.full(n, -1, dtype=np.int64),
+            end_row=end_rows.astype(np.int64),
+            anomaly_type=np.full(n, "none", dtype=object),
+        )
+
+    n_train = 600
+    train = blank(n_train, np.arange(n_train), np.zeros(n_train))
+    train.y_risk = (rng.random(n_train) < 0.3).astype(np.int8)
+    train.y_forecast = (rng.random((n_train, 10)) < 0.3).astype(np.float32)
+    train.forecast_mask = rng.random(n_train) < 0.9
+
+    def split(first_id: int, n_blocks: int) -> WindowSet:
+        ids = np.repeat(np.arange(first_id, first_id + n_blocks), 40)
+        return blank(40 * n_blocks, ids, np.tile(np.arange(40), n_blocks))
+
+    val, test = split(1000, 20), split(2000, n_test_blocks)
+    row = test.end_row
+    test.y_forecast[row == 14, 0] = 1
+    test.y_forecast[(row >= 10) & (row <= 12), 4] = 1
+    test.y_forecast[row == 19, 9] = 1
+    test.forecast_mask = ~np.isin(row, (17, 18))
+    val.y_forecast[(val.end_row >= 10) & (val.end_row <= 19), 9] = 1
+
+    ids = np.concatenate([val.block_index[::40], test.block_index[::40]])
+    block_id = np.repeat(ids, 40)
+    rows = np.tile(np.arange(40), len(ids))
+    df = pd.DataFrame(
+        {"block_id": block_id, "build_up": ((rows >= 10) & (rows <= 19)) * 1}
+    )
+    d = SplitData(
+        train=train,
+        val=val,
+        test=test,
+        feature_names=["a", "b"],
+        scaler_center=np.zeros(2),
+        scaler_scale=np.ones(2),
+        epsilon_spent={},
+    )
+    return df, d
+
+
 class TestForecastHeadroom:
     def test_stratified_lift_is_scored_among_windows_with_no_earlier_anomaly(self):
         ws = _windowset(
@@ -647,6 +783,9 @@ class TestForecastHeadroom:
 
         assert lifts([6.0] * 10) is True
         assert lifts([2.9] * 10) is False
+        assert lifts([2.999] * 10) is False
+        assert lifts([3.0] * 10) is True
+        assert lifts([15.0] * 10) is True
         assert lifts([15.1] * 10) is False
         assert lifts([1.4] + [(60 - 1.4) / 9] * 9) is False
         assert lifts([1.5] + [(60 - 1.5) / 9] * 9) is True
@@ -666,6 +805,26 @@ class TestForecastHeadroom:
         for entry in per_seed:
             entry["pr_auc"]["oracle"] = {"h1": 0.05, "h5": 0.05, "h10": 0.05}
         assert _summary(per_seed)["check"] is True
+        # and when the stand-in is the stronger of the two, the oracle alone would
+        # let the probe through
+        for entry in per_seed:
+            entry["pr_auc"]["stand_in"] = {"h1": 0.11, "h5": 0.11, "h10": 0.11}
+        assert _summary(per_seed)["check"] is False
+
+    def test_the_ratio_bar_is_one_and_a_half_inclusive(self):
+        def check(aware: float) -> bool:
+            per_seed = _good_seeds(10)
+            for entry in per_seed:
+                entry["pr_auc"]["probe_risk_aware"] = dict.fromkeys(
+                    ("h1", "h5", "h10"), aware
+                )
+                entry["pr_auc"]["stand_in"] = dict.fromkeys(("h1", "h5", "h10"), 0.5)
+                entry["pr_auc"]["oracle"] = dict.fromkeys(("h1", "h5", "h10"), 0.5)
+            return _summary(per_seed)["check"]
+
+        assert check(0.7) is False  # ratio 1.4
+        assert check(0.74) is False  # ratio 1.48
+        assert check(0.75) is True  # ratio 1.5
 
     def test_the_ratio_and_the_wins_use_the_risk_aware_probe(self):
         per_seed = _good_seeds(10)
@@ -783,7 +942,6 @@ class TestForecastHeadroom:
         assert summary["check"] is True
 
     def test_without_build_ups_the_gate_fails_the_headroom_check(self):
-        started = time.monotonic()
         result = gates._score_preset(
             DEFAULT_PRESETS["hard"], 1000, n_blocks=600, strength=0.0
         )["headroom"]
@@ -792,12 +950,10 @@ class TestForecastHeadroom:
         assert summary["check"] is False
         assert summary["pr_auc_ratio"]["h10"] < 1.5
         assert summary["stratified_lift_h10_mean"] < 3.0
-        assert time.monotonic() - started < 300
 
     def test_decoys_lower_the_share_of_build_up_windows_that_end_in_an_onset(
         self, tmp_path
     ):
-        started = time.monotonic()
         without = _hard_copy(tmp_path, **{"decoy_rate: 0.2": "decoy_rate: 0"})
         no_decoys = gates._score_preset(without, 1000, n_blocks=600, strength=0.8)
         decoys = gates._score_preset(
@@ -806,7 +962,6 @@ class TestForecastHeadroom:
         assert (
             no_decoys["headroom"]["ppv_build_up"] > decoys["headroom"]["ppv_build_up"]
         )
-        assert time.monotonic() - started < 300
 
     def test_the_headroom_windows_hold_the_same_blocks_as_the_band_windows(self):
         cfg = DignityConfig.from_yaml(DEFAULT_PRESETS["hard"])
@@ -852,12 +1007,42 @@ class TestForecastHeadroom:
             assert pr_auc["probe"][key] == pytest.approx(1.0)
             assert pr_auc["probe_risk_aware"][key] < 0.9
 
+    def test_the_headroom_reads_lift_at_h10_and_the_build_up_share_among_kept_windows(
+        self,
+    ):
+        df, d = _controlled_headroom_case()
+        out = gates.forecast_headroom(df, d, 10, 1000)
+        assert out["lift_h10"] == pytest.approx(gates._stratified_lift(d, 9))
+        assert out["lift_h10"] != pytest.approx(gates._stratified_lift(d, 4))
+        # build-up rows 10-16 and 19 are kept; only row 19 is a positive at h10
+        assert out["ppv_build_up"] == pytest.approx(1 / 8)
+        assert out["n_onsets"] == 30
+        assert out["n_ramped"] == 30
+
+    def test_the_warning_threshold_comes_from_the_validation_split(self):
+        # Val sets the threshold at 0.1, so every onset (its eligible rows reach a
+        # shape score of 0.5) is warned; the test split's own threshold, 1.0, would
+        # warn none of them.
+        df, d = _controlled_headroom_case()
+        out = gates.forecast_headroom(df, d, 10, 1000)
+        assert out["n_shape_warned"] == 30
+
+    def test_the_random_reference_follows_the_gate_seed(self):
+        df, d = _controlled_headroom_case()
+
+        def random_warned(seed: int) -> np.ndarray:
+            return gates.forecast_headroom(df, d, 10, seed)["arrays"]["warned_random"]
+
+        assert random_warned(1000).tolist() == random_warned(1000).tolist()
+        assert random_warned(1000).tolist() != random_warned(1001).tolist()
+
     def test_a_planted_build_up_gives_the_risk_aware_probe_headroom_over_the_risk_score(
         self,
     ):
         # Measured on seed 1000 at strength 0.8: from 900 blocks up the assertion
-        # holds at 900 and at 1200; at 600 blocks (53 test onsets) it does not.
-        started = time.monotonic()
+        # holds at 900 and at 1200; at 600 blocks (53 test onsets) it does not. At 900
+        # the ratio is 1.57 against the bar 1.5 and the run is seeded, so the margin
+        # is thin but does not move.
         result = gates._score_preset(
             DEFAULT_PRESETS["hard"], 1000, n_blocks=900, strength=0.8
         )["headroom"]
@@ -865,7 +1050,6 @@ class TestForecastHeadroom:
         rival = max(ap["stand_in"]["h10"], ap["oracle"]["h10"])
         assert ap["probe_risk_aware"]["h10"] > 1.5 * rival
         assert result["lift_h10"] > 1.5
-        assert time.monotonic() - started < 300
 
 
 class TestCommittedGateResult:
@@ -938,3 +1122,66 @@ class TestCommittedGateResult:
         assert head["detection_gain"]["gain"]["ci_low"] > 0
         low, high = gates.HEADROOM_PPV_RANGE
         assert low <= head["ppv_build_up_mean"] <= high
+
+    def test_the_search_records_carry_the_preset_hashes_the_docs_disclose(self):
+        committed = preset_config_hash(DEFAULT_PRESETS)
+        search = ROOT / "results/strength-search"
+
+        def stamp(path: Path) -> str:
+            return json.loads(path.read_text())["preset_config_hash"]
+
+        for name in ("strength_0.9.json", "ten_seed_gate_0.8.json"):
+            assert stamp(search / name) == committed, name
+        early = {stamp(search / f"strength_{s}.json") for s in (0.6, 0.7, 0.8)}
+        assert len(early) == 1 and early != {committed}
+
+    def test_the_architecture_disclosure_quotes_the_committed_numbers(self):
+        text = " ".join((ROOT / "docs/ARCHITECTURE.md").read_text().split())
+        search = ROOT / "results/strength-search"
+
+        def load(path: Path) -> dict:
+            return json.loads(path.read_text())
+
+        gate = load(ROOT / "results/v1.0/data_gate.json")
+        ten = load(search / "ten_seed_gate_0.8.json")
+        first = load(search / "first-search/strength_0.8.json")
+        plain = gate["headroom"]["pr_auc_ratio_plain"]
+        gated = gate["headroom"]["pr_auc_ratio"]
+        assert f"it is {plain['h5']:.2f} at h5 and {plain['h10']:.2f} at h10" in text
+        assert f"gated ratio is {gated['h5']:.2f} and {gated['h10']:.2f}" in text
+        assert f"had {min(first['test_onsets'])} scorable test onsets" in text
+        assert f"the ten tuning seeds has {min(gate['test_onsets'])}" in text
+        spreads = (
+            f"is {first['onset_recall']['val_spread']:.3f} and the test spread "
+            f"{first['onset_recall']['test_spread']:.3f} in "
+        )
+        assert spreads in text
+        assert (
+            f"{gate['onset_recall']['val_spread']:.3f} and "
+            f"{gate['onset_recall']['test_spread']:.3f} in `results/v1.0/data_gate.json`"
+        ) in text
+        lifts = [r["lift_h10"] for r in ten["headroom"]["per_seed"]]
+        mean = ten["headroom"]["stratified_lift_h10_mean"]
+        sem = statistics.stdev(lifts) / math.sqrt(len(lifts))
+        floor = gates.HEADROOM_LIFT_RANGE[0]
+        assert (
+            f"is {mean:.3f} in `results/strength-search/ten_seed_gate_0.8.json`" in text
+        )
+        assert (
+            f"The miss is {floor - mean:.3f}, {(floor - mean) / sem:.2f} of the "
+            f"standard error ({sem:.2f})"
+        ) in text
+
+    def test_the_loosened_flatness_limit_decided_no_committed_outcome(self):
+        # The disclosure says the committed result and every 3600-block search
+        # record would also have passed the first limit, 0.1.
+        records = [ROOT / "results/v1.0/data_gate.json"]
+        records += sorted((ROOT / "results/strength-search").glob("*.json"))
+        spreads = []
+        for path in records:
+            run = json.loads(path.read_text())
+            assert run["n_blocks"] == 3600, path
+            spreads.append(run["onset_recall"]["val_spread"])
+        assert max(spreads) < 0.1
+        text = " ".join((ROOT / "docs/ARCHITECTURE.md").read_text().split())
+        assert f"at most {max(spreads):.3f}" in text

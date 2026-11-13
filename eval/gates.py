@@ -328,8 +328,9 @@ def _score_preset(
 
     The hard preset also returns the onset recalls per split and the number of
     scorable test onsets and the forecast headroom (`forecast_headroom`, on windows
-    of the preset's own features; `None` for the other presets). `n_blocks` and
-    `strength` replace the preset's values in memory.
+    of the preset's own features; `None` for the other presets). The hard preset is
+    recognised by its file name, `synthetic_hard`, as `DEFAULT_PRESETS` names it.
+    `n_blocks` and `strength` replace the preset's values in memory.
     """
     cfg = DignityConfig.from_yaml(path)
     changes: dict = {"seed": seed}

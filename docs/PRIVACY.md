@@ -188,7 +188,9 @@ sensitivity to epsilon, and it says nothing about harder data: on the hard prese
 same allocation at ε = 1.0 leaves the model's PR-AUC not distinguishable from chance on
 the evaluation seed (see *Privacy-versus-utility curve* below).
 The floor was declared from tuning-seed validation
-evidence before the evaluation seed was touched. The path a user runs is pinned
+evidence before the evaluation seed was touched, on the easy preset as it stood then;
+the preset has since gained build-ups and decoys, and the floor was not re-derived on
+that data (the test still passes at it). The path a user runs is pinned
 separately: `tests/test_train.py::TestPrivacyUtility::test_shipped_privacy_config_trains_through_the_cli_in_system_mode`
 runs `dignity-train` on the shipped block in system-randomness mode, checks the
 `Privacy: mode=system;` line, and checks that the checkpoint's stored config records
