@@ -45,9 +45,9 @@ format that export no longer supports (DGNTY-3, DGNTY-35). No shipped config wri
 ## Commands
 
 ```bash
-# Tests (1556 collected: test_core 85, test_data 169, test_models 23, test_privacy 42,
-# test_operator 4, test_docs 769, test_train 88, test_checkpoint 3, test_export 9,
-# test_calibration 3, test_labels 7, test_gates 74, test_ci 4, test_eval 115,
+# Tests (1569 collected: test_core 85, test_data 169, test_models 23, test_privacy 42,
+# test_operator 4, test_docs 769, test_train 96, test_checkpoint 3, test_export 9,
+# test_calibration 3, test_labels 7, test_gates 74, test_ci 4, test_eval 120,
 # test_colab_eval 13, test_scripts 19, test_release 129 — one skips without CUDA)
 # every test is limited to 300 s (pytest.ini; pytest-timeout), except the README quickstart
 # test, which carries its own 900 s limit (three subprocesses, each capped at 300 s)
@@ -109,7 +109,7 @@ data/labels.py                      →  risk/forecast labels from the event rec
 data/loader.py                      →  TransactionDataset (dict batches) / create_dataloader
 models/dignity.py Dignity           →  DignityBackbone + one head
 train/engine.py                     →  train_epoch / predict
-train/loop.py fit                  →  shared loop (cli, notebook, eval.run); best.pt on val PR-AUC (policy: val neg_cost under the review cap)
+train/loop.py fit                  →  shared loop (cli, notebook, eval.run); best.pt on val PR-AUC (policy: val neg_cost under the review cap; forecast: val lift_upper above the eligibility floor)
 train/checkpoint.py                 →  self-describing checkpoints (FORMAT_VERSION 2) / build_model_from_meta
 train/losses.py                     →  risk_loss, forecast_loss (masked per-horizon BCE),
                                        expected_cost_loss (policy: softmax-weighted cost table)

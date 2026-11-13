@@ -329,8 +329,12 @@ def fit(
     )
     grad_scaler = GradScaler("cuda", enabled=use_amp)
 
+    gate = model.task == "forecast" and train_cfg.forecast_eligibility
+    floor = 1.0 if eligibility_floor is None else eligibility_floor
+    best_path = out / "best.pt"
     best_metric = float("-inf")
     start_epoch = 1
+    resumed_best = False
     if resume_from:
         ckpt = load_checkpoint(resume_from, map_location=device)
         saved_metric = _task_selection_metric(
@@ -348,6 +352,16 @@ def fit(
             grad_scaler.load_state_dict(ckpt["grad_scaler_state"])
         start_epoch = ckpt["epoch"] + 1
         best_metric = ckpt["best_metric"]
+        resumed_best = best_path.exists()
+        if gate and resumed_best:
+            # a best.pt from a run without the gate or under another floor must
+            # clear the floor this run uses, else it is not a kept epoch
+            lift = load_checkpoint(best_path, map_location="cpu")["metrics"].get(
+                "val_lift_upper"
+            )
+            resumed_best = lift is not None and lift > floor  # NaN is not eligible
+            if not resumed_best:
+                best_metric = float("-inf")
 
     # Closed-form cosine keyed off each group's initial_lr (restored with the
     # optimizer state). last_epoch is one behind the epoch about to train
@@ -380,8 +394,6 @@ def fit(
     stale = 0
     wrote_best = False
     best_epoch: int | None = None
-    gate = model.task == "forecast" and train_cfg.forecast_eligibility
-    floor = 1.0 if eligibility_floor is None else eligibility_floor
     for epoch in range(start_epoch, epochs + 1):
         lr = optimizer.param_groups[0]["lr"]  # the lr this epoch trains with
         train_metrics = train_epoch(
@@ -423,7 +435,7 @@ def fit(
                 row,
                 best_metric,
             )
-        elif not gate or wrote_best or resume_from:
+        elif not gate or wrote_best or resumed_best:
             # under the gate, patience starts once an epoch has been kept
             stale += 1
 
@@ -466,9 +478,8 @@ def fit(
         ]
     history_path.write_text(json.dumps(previous + history, indent=2))
 
-    best_path = out / "best.pt"
     # a best.pt left by an earlier run does not count; a resumed run keeps its own
-    kept = wrote_best or (resume_from and best_path.exists())
+    kept = wrote_best or resumed_best
     if gate and not kept:
         lifts = [
             r["val_lift_upper"] for r in history if not math.isnan(r["val_lift_upper"])

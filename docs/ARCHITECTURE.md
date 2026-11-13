@@ -378,6 +378,8 @@ all call it. It returns a `train.loop.FitResult`: `best_path`, `history`,
   counts only after the first kept epoch, and `fit` raises
   `train.loop.ForecastNotEligibleError` when no epoch is kept
   (`tests/test_train.py::TestFitForecast::test_an_epoch_that_does_not_beat_the_risk_score_on_val_is_never_kept`).
+  A resumed forecast fit counts the `best.pt` it finds only if that checkpoint's
+  validation lift is above the floor in use.
   Policy ignores `train.select_metric`, `train.pos_weight` and the chance
   guard: it selects on validation `neg_cost`, the negative mean cost of the capped
   decisions.

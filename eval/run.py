@@ -664,6 +664,9 @@ def main(argv: list[str] | None = None) -> int:
             _write_result(
                 config, "forecast", {"raised": _raised_payload(err)}, {}, run_ctx
             )
+            # a raised task has no chart; an earlier run's must not stand in for it
+            for name in ("forecast_pr_auc_by_horizon.png", "forecast_lead_time.png"):
+                (Path(config.eval.img_dir) / name).unlink(missing_ok=True)
             print(f"forecast raised: {err}")
             print(
                 f"TRAINING_RAISED {type(err).__name__} task=forecast train_seed={err.seed}"

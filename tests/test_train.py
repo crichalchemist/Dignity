@@ -819,6 +819,153 @@ class TestFitForecast:
         DignityConfig.from_yaml(str(path))  # the edited preset is itself valid
         assert main(["--config", str(path)]) == 0
 
+    def _resume_setup(self, cfg, tiny_split, tmp_path, monkeypatch, first_lift, gate):
+        """A one-epoch forecast run whose last.pt a second fit can resume from."""
+        cfg.train.forecast_eligibility = gate
+        cfg.train.epochs = 1
+        _script_lift(monkeypatch, [first_lift])
+        fit(cfg, tiny_split, seed=0, run_dir=str(tmp_path), eligibility_floor=1.5)
+        return str(tmp_path / "last.pt")
+
+    def test_a_resumed_forecast_run_never_keeps_an_ungated_best_that_misses_the_floor(
+        self, tiny_split, forecast_fit_config, tmp_path, monkeypatch
+    ):
+        cfg = forecast_fit_config
+        # the first run had no gate; its best.pt (lift 1.2) is below the floor 1.5
+        last = self._resume_setup(cfg, tiny_split, tmp_path, monkeypatch, 1.2, False)
+        cfg.train.forecast_eligibility = True
+        cfg.train.epochs = 3
+        _script_lift(monkeypatch, [1.3, 1.4])
+        with pytest.raises(ForecastNotEligibleError, match="1.400"):
+            fit(
+                cfg,
+                tiny_split,
+                seed=0,
+                run_dir=str(tmp_path),
+                resume_from=last,
+                eligibility_floor=1.5,
+            )
+        # neither resumed epoch was written over the old file
+        assert load_checkpoint(str(tmp_path / "best.pt"))["epoch"] == 1
+
+    def test_a_resumed_forecast_run_replaces_an_ineligible_best_with_an_eligible_epoch(
+        self, tiny_split, forecast_fit_config, tmp_path, monkeypatch
+    ):
+        cfg = forecast_fit_config
+        last = self._resume_setup(cfg, tiny_split, tmp_path, monkeypatch, 1.2, False)
+        cfg.train.forecast_eligibility = True
+        cfg.train.epochs = 2
+        _script_lift(monkeypatch, [1.6])
+        r = fit(
+            cfg,
+            tiny_split,
+            seed=0,
+            run_dir=str(tmp_path),
+            resume_from=last,
+            eligibility_floor=1.5,
+        )
+        assert r.best_epoch == 2
+        assert r.best_metric == 1.6
+        assert load_checkpoint(r.best_path)["epoch"] == 2
+
+    def test_a_resumed_gated_run_counts_patience_from_the_best_it_resumed_with(
+        self, tiny_split, forecast_fit_config, tmp_path, monkeypatch
+    ):
+        cfg = forecast_fit_config
+        last = self._resume_setup(cfg, tiny_split, tmp_path, monkeypatch, 1.6, True)
+        cfg.train.epochs = 4
+        cfg.train.patience = 2
+        # only two values: a third epoch would run out of them and fail the test
+        _script_lift(monkeypatch, [1.4, 1.3])
+        r = fit(
+            cfg,
+            tiny_split,
+            seed=0,
+            run_dir=str(tmp_path),
+            resume_from=last,
+            eligibility_floor=1.5,
+        )
+        assert [h["epoch"] for h in r.history] == [2, 3]
+        assert r.best_epoch == 1  # the resumed best is kept, so no raise
+        assert r.best_metric == 1.6
+
+    def test_patience_restarts_each_time_a_gated_epoch_is_kept(
+        self, tiny_split, forecast_fit_config, tmp_path, monkeypatch
+    ):
+        cfg = forecast_fit_config
+        cfg.train.forecast_eligibility = True
+        cfg.train.epochs = 6
+        cfg.train.patience = 2
+        # epoch 2 is stale, epoch 3 is kept and resets the count, 4 and 5 are stale
+        _script_lift(monkeypatch, [1.6, 1.5, 1.7, 1.4, 1.3, 1.2])
+        r = fit(cfg, tiny_split, seed=0, run_dir=str(tmp_path))
+        assert len(r.history) == 5
+        assert r.best_epoch == 3
+
+    def test_an_epoch_without_a_lift_is_not_kept_under_the_gate(
+        self, tiny_split, forecast_fit_config, tmp_path, monkeypatch
+    ):
+        cfg = forecast_fit_config
+        cfg.train.forecast_eligibility = True
+        cfg.train.epochs = 2
+        _script_lift(monkeypatch, [None, 1.6])
+        r = fit(cfg, tiny_split, seed=0, run_dir=str(tmp_path))
+        assert math.isnan(r.history[0]["val_lift_upper"])
+        assert r.best_epoch == 2
+
+    def test_an_epoch_without_a_lift_is_not_the_best_seen_in_the_error(
+        self, tiny_split, forecast_fit_config, tmp_path, monkeypatch
+    ):
+        cfg = forecast_fit_config
+        cfg.train.forecast_eligibility = True
+        cfg.train.epochs = 3
+        _script_lift(monkeypatch, [None, 1.1, None])
+        with pytest.raises(ForecastNotEligibleError) as exc:
+            fit(
+                cfg,
+                tiny_split,
+                seed=0,
+                run_dir=str(tmp_path),
+                eligibility_floor=1.5,
+            )
+        assert "best val_lift_upper 1.100" in str(exc.value)
+        assert not (tmp_path / "best.pt").exists()
+
+    def test_epochs_are_selected_on_the_masked_validation_windows(
+        self, tiny_split, forecast_fit_config, tmp_path, monkeypatch
+    ):
+        seen = []
+
+        def spy(y, score, mask):
+            seen.append((y, mask))
+            return 1.5
+
+        monkeypatch.setattr("train.loop.lift_upper", spy)
+        tiny_split.val.forecast_mask[:7] = False  # a window with an active anomaly
+        fit(forecast_fit_config, tiny_split, seed=0, run_dir=str(tmp_path))
+        assert len(seen) == forecast_fit_config.train.epochs
+        for y, mask in seen:
+            assert np.array_equal(y, tiny_split.val.y_forecast)
+            assert np.array_equal(mask, tiny_split.val.forecast_mask)
+            assert not mask.all()
+
+    def test_the_forecast_weight_cap_limits_only_the_forecast_loss(
+        self, tiny_split, forecast_fit_config, tmp_path, monkeypatch
+    ):
+        caps = []
+
+        def spy(config_value, y_train, cap=None):
+            caps.append(cap)
+            return resolve_pos_weight(config_value, y_train, cap=cap)
+
+        monkeypatch.setattr("train.loop.resolve_pos_weight", spy)
+        cfg = forecast_fit_config
+        cfg.train.forecast_pos_weight_cap = 7.0
+        _task_loss(cfg, tiny_split.train)
+        cfg.model.task = "risk"
+        _task_loss(cfg, tiny_split.train)
+        assert caps == [7.0, None]
+
 
 def _script_policy_actions(monkeypatch, action_per_epoch):
     """Replace decide_actions with one scripted action per epoch (every window).
