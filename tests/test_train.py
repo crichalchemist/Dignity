@@ -28,6 +28,9 @@ from train.engine import predict, train_epoch
 from train.loop import (
     ChanceGuardWarning,
     FitResult,
+    ForecastNotEligibleError,
+    _selection_metric,
+    _task_loss,
     fit,
     load_backbone,
     prepare_data,
@@ -541,7 +544,21 @@ def _script_forecast_columns(monkeypatch, pr_auc, auroc):
 def forecast_fit_config(tiny_fit_config):
     tiny_fit_config.model.task = "forecast"
     tiny_fit_config.model.horizon = 10
+    # tiny random data promises no lift over the risk score; the gate has its own tests
+    tiny_fit_config.train.forecast_eligibility = False
     return tiny_fit_config
+
+
+def _script_lift(monkeypatch, values):
+    """Scripted per-epoch val lift_upper: one call per epoch."""
+    calls = {"n": 0}
+
+    def scripted(y, score, mask):
+        value = values[calls["n"]]
+        calls["n"] += 1
+        return value
+
+    monkeypatch.setattr("train.loop.lift_upper", scripted)
 
 
 class TestFitForecast:
@@ -551,10 +568,41 @@ class TestFitForecast:
         cfg = forecast_fit_config
         r = fit(cfg, tiny_split, seed=0, run_dir=str(tmp_path))
         assert r.meta.head_kwargs == {"horizon": cfg.model.horizon}
-        assert 0.0 <= r.best_metric <= 1.0
+        # forecast keeps the epoch with the best val lift_upper, not a 0-1 metric
+        assert r.best_metric == max(h["val_lift_upper"] for h in r.history) > 0.0
         model = build_model_from_meta(load_checkpoint(r.best_path)["meta"])
         out, _ = model(torch.randn(2, 20, r.meta.input_size))
         assert out.shape == (2, cfg.model.horizon)
+
+    def test_forecast_warm_start_copies_only_backbone_tensors(
+        self, tiny_split, forecast_fit_config, tmp_path
+    ):
+        cfg = forecast_fit_config
+        cfg.model.task = "risk"
+        cfg.train.epochs = 1
+        risk = fit(cfg, tiny_split, seed=0, run_dir=str(tmp_path / "risk"))
+        cfg.model.task = "forecast"
+        # lr 0 so that training cannot move a weight away from its start
+        cfg.train.lr = 0.0
+        cfg.train.init_backbone_from = risk.best_path
+        fc = fit(cfg, tiny_split, seed=0, run_dir=str(tmp_path / "forecast"))
+        rs = load_checkpoint(risk.best_path)["model_state"]
+        fs = load_checkpoint(fc.best_path)["model_state"]
+        backbone = [k for k in fs if k.startswith("backbone.")]
+        assert backbone
+        for k in backbone:
+            assert k in rs and torch.equal(fs[k], rs[k]), k
+        last = [k for k in fs if k.startswith("head.") and k.endswith(".weight")][-1]
+        last_risk = [k for k in rs if k.startswith("head.") and k.endswith(".weight")]
+        assert fs[last].shape[0] == 10 and rs[last_risk[-1]].shape[0] == 1
+        shared = [
+            k
+            for k in fs
+            if k.startswith("head.") and k in rs and fs[k].shape == rs[k].shape
+        ]
+        assert shared
+        for k in shared:
+            assert not torch.equal(fs[k], rs[k]), k
 
     def test_forecast_pos_weight_refuses_a_train_split_without_onsets(
         self, tiny_split, forecast_fit_config, tmp_path
@@ -569,10 +617,11 @@ class TestFitForecast:
         # scripted values: selection by the configured metric differs from
         # "keep the first", "keep the last" and "select on the other metric"
         _script_forecast_val_metrics(monkeypatch, [0.6, 0.9, 0.7], [0.9, 0.6, 0.95])
+        _script_lift(monkeypatch, [1.6, 1.9, 1.7])
         r = fit(forecast_fit_config, tiny_split, seed=0, run_dir=str(tmp_path))
-        metric = forecast_fit_config.train.select_metric
-        assert metric == "pr_auc"
-        assert r.best_metric == max(h[f"val_{metric}"] for h in r.history) == 0.9
+        metric = _selection_metric(forecast_fit_config)
+        assert metric == "lift_upper"
+        assert r.best_metric == max(h[f"val_{metric}"] for h in r.history) == 1.9
         assert load_checkpoint(r.best_path)["epoch"] == 2
 
     def test_forecast_history_rows_carry_the_per_horizon_mean_metrics(
@@ -586,6 +635,7 @@ class TestFitForecast:
             "val_auroc",
             "val_pr_auc",
             "val_recall_at_1pct_fpr",
+            "val_lift_upper",
         }
         assert json.loads((tmp_path / "history.json").read_text()) == r.history
 
@@ -645,6 +695,121 @@ class TestFitForecast:
             warnings.simplefilter("error", ChanceGuardWarning)
             fit(forecast_fit_config, tiny_split, seed=0, run_dir=str(tmp_path))
 
+    def test_an_epoch_that_does_not_beat_the_risk_score_on_val_is_never_kept(
+        self, tiny_split, forecast_fit_config, tmp_path, monkeypatch
+    ):
+        cfg = forecast_fit_config
+        cfg.train.epochs = 4
+        cfg.train.forecast_eligibility = True
+        # pr_auc makes epoch 1 look best; its lift 1.4 is below the floor 1.5
+        _script_forecast_val_metrics(
+            monkeypatch, [0.9, 0.5, 0.5, 0.5], [0.9, 0.5, 0.5, 0.5]
+        )
+        _script_lift(monkeypatch, [1.4, 2.0, 1.2, 1.6])
+        r = fit(cfg, tiny_split, seed=0, run_dir=str(tmp_path), eligibility_floor=1.5)
+        assert load_checkpoint(r.best_path)["epoch"] == 2
+        assert r.best_epoch == 2
+        assert r.best_metric == 2.0
+
+    def test_forecast_selection_follows_lift_upper_whatever_select_metric_says(
+        self, tiny_split, forecast_fit_config, tmp_path, monkeypatch
+    ):
+        cfg = forecast_fit_config
+        cfg.train.select_metric = "auroc"
+        _script_forecast_val_metrics(monkeypatch, [0.5] * 3, [0.95, 0.6, 0.6])
+        _script_lift(monkeypatch, [1.2, 1.8, 1.5])
+        r = fit(cfg, tiny_split, seed=0, run_dir=str(tmp_path))
+        assert _selection_metric(cfg) == "lift_upper"
+        assert load_checkpoint(r.best_path)["epoch"] == 2
+        assert r.best_epoch == 2
+
+    def test_without_a_risk_checkpoint_chance_lift_is_not_eligible(
+        self, tiny_split, forecast_fit_config, tmp_path, monkeypatch
+    ):
+        forecast_fit_config.train.forecast_eligibility = True
+        _script_lift(monkeypatch, [1.0, 1.0, 1.0])
+        # 1.0 is chance, not above the default floor of 1.0
+        with pytest.raises(ForecastNotEligibleError):
+            fit(forecast_fit_config, tiny_split, seed=0, run_dir=str(tmp_path))
+        assert not (tmp_path / "best.pt").exists()
+
+    def test_without_a_risk_checkpoint_the_first_epoch_above_chance_is_kept(
+        self, tiny_split, forecast_fit_config, tmp_path, monkeypatch
+    ):
+        forecast_fit_config.train.forecast_eligibility = True
+        forecast_fit_config.train.epochs = 2
+        _script_lift(monkeypatch, [0.9, 1.05])
+        r = fit(forecast_fit_config, tiny_split, seed=0, run_dir=str(tmp_path))
+        assert r.best_epoch == 2
+
+    def test_fit_fails_loudly_when_no_epoch_is_eligible(
+        self, tiny_split, forecast_fit_config, tmp_path, monkeypatch
+    ):
+        forecast_fit_config.train.forecast_eligibility = True
+        _script_lift(monkeypatch, [1.1, 1.1, 1.1])
+        with pytest.raises(ForecastNotEligibleError, match="1.1") as exc:
+            fit(
+                forecast_fit_config,
+                tiny_split,
+                seed=0,
+                run_dir=str(tmp_path),
+                eligibility_floor=1.5,
+            )
+        err = exc.value
+        assert "1.5" in str(err)
+        assert err.seed == 0
+        assert err.run_dir == str(tmp_path)
+        assert isinstance(err, RuntimeError)
+        assert not (tmp_path / "best.pt").exists()
+
+    def test_patience_counts_only_after_the_first_eligible_epoch(
+        self, tiny_split, forecast_fit_config, tmp_path, monkeypatch
+    ):
+        cfg = forecast_fit_config
+        cfg.train.forecast_eligibility = True
+        cfg.train.epochs = 6
+        cfg.train.patience = 2
+        _script_lift(monkeypatch, [1.0, 1.0, 1.0, 1.6, 1.5, 1.4])
+        r = fit(cfg, tiny_split, seed=0, run_dir=str(tmp_path), eligibility_floor=1.5)
+        # epochs 1-3 are not eligible and do not count as stale; 5 and 6 do
+        assert len(r.history) == 6
+        assert r.best_epoch == 4
+
+    def test_a_resumed_forecast_run_compares_against_the_checkpoints_own_selection_metric(
+        self, tiny_split, forecast_fit_config, tiny_fit_config, tmp_path
+    ):
+        cfg = forecast_fit_config
+        cfg.train.epochs = 1
+        fit(cfg, tiny_split, seed=0, run_dir=str(tmp_path / "f"))
+        cfg.train.epochs = 2
+        r = fit(
+            cfg,
+            tiny_split,
+            seed=0,
+            run_dir=str(tmp_path / "f"),
+            resume_from=str(tmp_path / "f" / "last.pt"),
+        )
+        assert [h["epoch"] for h in r.history] == [2]
+
+        risk = DignityConfig()
+        risk.device = "cpu"
+        risk.model.hidden_size = 16
+        risk.model.n_layers = 1
+        risk.data.batch_size = 32
+        risk.data.num_workers = 0
+        risk.train.epochs = 1
+        risk.train.use_amp = False
+        risk.train.save_interval = 1
+        fit(risk, tiny_split, seed=0, run_dir=str(tmp_path / "r"))
+        with pytest.raises(ValueError, match="selected on"):
+            fit(
+                cfg,
+                tiny_split,
+                seed=0,
+                run_dir=str(tmp_path / "r2"),
+                resume_from=str(tmp_path / "r" / "last.pt"),
+            )
+
     def test_forecast_config_trains_through_the_cli(self, monkeypatch, tmp_path):
         monkeypatch.chdir(tmp_path)
         raw = yaml.safe_load((ROOT / "config/smoke.yaml").read_text())
@@ -653,6 +818,153 @@ class TestFitForecast:
         path.write_text(yaml.safe_dump(raw))
         DignityConfig.from_yaml(str(path))  # the edited preset is itself valid
         assert main(["--config", str(path)]) == 0
+
+    def _resume_setup(self, cfg, tiny_split, tmp_path, monkeypatch, first_lift, gate):
+        """A one-epoch forecast run whose last.pt a second fit can resume from."""
+        cfg.train.forecast_eligibility = gate
+        cfg.train.epochs = 1
+        _script_lift(monkeypatch, [first_lift])
+        fit(cfg, tiny_split, seed=0, run_dir=str(tmp_path), eligibility_floor=1.5)
+        return str(tmp_path / "last.pt")
+
+    def test_a_resumed_forecast_run_never_keeps_an_ungated_best_that_misses_the_floor(
+        self, tiny_split, forecast_fit_config, tmp_path, monkeypatch
+    ):
+        cfg = forecast_fit_config
+        # the first run had no gate; its best.pt (lift 1.2) is below the floor 1.5
+        last = self._resume_setup(cfg, tiny_split, tmp_path, monkeypatch, 1.2, False)
+        cfg.train.forecast_eligibility = True
+        cfg.train.epochs = 3
+        _script_lift(monkeypatch, [1.3, 1.4])
+        with pytest.raises(ForecastNotEligibleError, match="1.400"):
+            fit(
+                cfg,
+                tiny_split,
+                seed=0,
+                run_dir=str(tmp_path),
+                resume_from=last,
+                eligibility_floor=1.5,
+            )
+        # neither resumed epoch was written over the old file
+        assert load_checkpoint(str(tmp_path / "best.pt"))["epoch"] == 1
+
+    def test_a_resumed_forecast_run_replaces_an_ineligible_best_with_an_eligible_epoch(
+        self, tiny_split, forecast_fit_config, tmp_path, monkeypatch
+    ):
+        cfg = forecast_fit_config
+        last = self._resume_setup(cfg, tiny_split, tmp_path, monkeypatch, 1.2, False)
+        cfg.train.forecast_eligibility = True
+        cfg.train.epochs = 2
+        _script_lift(monkeypatch, [1.6])
+        r = fit(
+            cfg,
+            tiny_split,
+            seed=0,
+            run_dir=str(tmp_path),
+            resume_from=last,
+            eligibility_floor=1.5,
+        )
+        assert r.best_epoch == 2
+        assert r.best_metric == 1.6
+        assert load_checkpoint(r.best_path)["epoch"] == 2
+
+    def test_a_resumed_gated_run_counts_patience_from_the_best_it_resumed_with(
+        self, tiny_split, forecast_fit_config, tmp_path, monkeypatch
+    ):
+        cfg = forecast_fit_config
+        last = self._resume_setup(cfg, tiny_split, tmp_path, monkeypatch, 1.6, True)
+        cfg.train.epochs = 4
+        cfg.train.patience = 2
+        # only two values: a third epoch would run out of them and fail the test
+        _script_lift(monkeypatch, [1.4, 1.3])
+        r = fit(
+            cfg,
+            tiny_split,
+            seed=0,
+            run_dir=str(tmp_path),
+            resume_from=last,
+            eligibility_floor=1.5,
+        )
+        assert [h["epoch"] for h in r.history] == [2, 3]
+        assert r.best_epoch == 1  # the resumed best is kept, so no raise
+        assert r.best_metric == 1.6
+
+    def test_patience_restarts_each_time_a_gated_epoch_is_kept(
+        self, tiny_split, forecast_fit_config, tmp_path, monkeypatch
+    ):
+        cfg = forecast_fit_config
+        cfg.train.forecast_eligibility = True
+        cfg.train.epochs = 6
+        cfg.train.patience = 2
+        # epoch 2 is stale, epoch 3 is kept and resets the count, 4 and 5 are stale
+        _script_lift(monkeypatch, [1.6, 1.5, 1.7, 1.4, 1.3, 1.2])
+        r = fit(cfg, tiny_split, seed=0, run_dir=str(tmp_path))
+        assert len(r.history) == 5
+        assert r.best_epoch == 3
+
+    def test_an_epoch_without_a_lift_is_not_kept_under_the_gate(
+        self, tiny_split, forecast_fit_config, tmp_path, monkeypatch
+    ):
+        cfg = forecast_fit_config
+        cfg.train.forecast_eligibility = True
+        cfg.train.epochs = 2
+        _script_lift(monkeypatch, [None, 1.6])
+        r = fit(cfg, tiny_split, seed=0, run_dir=str(tmp_path))
+        assert math.isnan(r.history[0]["val_lift_upper"])
+        assert r.best_epoch == 2
+
+    def test_an_epoch_without_a_lift_is_not_the_best_seen_in_the_error(
+        self, tiny_split, forecast_fit_config, tmp_path, monkeypatch
+    ):
+        cfg = forecast_fit_config
+        cfg.train.forecast_eligibility = True
+        cfg.train.epochs = 3
+        _script_lift(monkeypatch, [None, 1.1, None])
+        with pytest.raises(ForecastNotEligibleError) as exc:
+            fit(
+                cfg,
+                tiny_split,
+                seed=0,
+                run_dir=str(tmp_path),
+                eligibility_floor=1.5,
+            )
+        assert "best val_lift_upper 1.100" in str(exc.value)
+        assert not (tmp_path / "best.pt").exists()
+
+    def test_epochs_are_selected_on_the_masked_validation_windows(
+        self, tiny_split, forecast_fit_config, tmp_path, monkeypatch
+    ):
+        seen = []
+
+        def spy(y, score, mask):
+            seen.append((y, mask))
+            return 1.5
+
+        monkeypatch.setattr("train.loop.lift_upper", spy)
+        tiny_split.val.forecast_mask[:7] = False  # a window with an active anomaly
+        fit(forecast_fit_config, tiny_split, seed=0, run_dir=str(tmp_path))
+        assert len(seen) == forecast_fit_config.train.epochs
+        for y, mask in seen:
+            assert np.array_equal(y, tiny_split.val.y_forecast)
+            assert np.array_equal(mask, tiny_split.val.forecast_mask)
+            assert not mask.all()
+
+    def test_the_forecast_weight_cap_limits_only_the_forecast_loss(
+        self, tiny_split, forecast_fit_config, tmp_path, monkeypatch
+    ):
+        caps = []
+
+        def spy(config_value, y_train, cap=None):
+            caps.append(cap)
+            return resolve_pos_weight(config_value, y_train, cap=cap)
+
+        monkeypatch.setattr("train.loop.resolve_pos_weight", spy)
+        cfg = forecast_fit_config
+        cfg.train.forecast_pos_weight_cap = 7.0
+        _task_loss(cfg, tiny_split.train)
+        cfg.model.task = "risk"
+        _task_loss(cfg, tiny_split.train)
+        assert caps == [7.0, None]
 
 
 def _script_policy_actions(monkeypatch, action_per_epoch):
@@ -1017,27 +1329,32 @@ class TestLoadBackbone:
         )
         assert calls == [] and [h["epoch"] for h in resumed.history] == [2]
 
-    def test_only_a_policy_fit_with_a_configured_path_warm_starts(
+    def test_only_policy_and_forecast_fits_with_a_configured_path_warm_start(
         self, tiny_split, tiny_fit_config, tmp_path, monkeypatch
     ):
         calls = []
         monkeypatch.setattr("train.loop.load_backbone", lambda *a: calls.append(a))
         tiny_fit_config.train.epochs = 1
         tiny_fit_config.train.init_backbone_from = "risk.pt"
-        for task in ("risk", "forecast"):
-            tiny_fit_config.model.task = task
-            fit(tiny_fit_config, tiny_split, 0, str(tmp_path / task))
+        tiny_fit_config.model.task = "risk"
+        fit(tiny_fit_config, tiny_split, 0, str(tmp_path / "risk"))
         assert calls == []
+
+        # a stubbed warm start leaves a tiny random model: no eligibility gate here
+        tiny_fit_config.model.task = "forecast"
+        tiny_fit_config.train.forecast_eligibility = False
+        fit(tiny_fit_config, tiny_split, 0, str(tmp_path / "forecast"))
+        assert len(calls) == 1 and calls[0][0].task == "forecast"
 
         tiny_fit_config.model.task = "policy"
         tiny_fit_config.train.init_backbone_from = None
         fit(tiny_fit_config, tiny_split, 0, str(tmp_path / "cold"))
-        assert calls == []
+        assert len(calls) == 1
 
         tiny_fit_config.train.init_backbone_from = "risk.pt"
         fit(tiny_fit_config, tiny_split, 0, str(tmp_path / "warm"))
-        assert len(calls) == 1
-        model, path, data, privacy, data_cfg = calls[0]
+        assert len(calls) == 2
+        model, path, data, privacy, data_cfg = calls[1]
         assert model.task == "policy" and path == "risk.pt"
         assert data is tiny_split and privacy is None
         assert data_cfg == tiny_fit_config.data
@@ -1051,6 +1368,35 @@ class TestPosWeight:
     def test_pos_weight_refuses_a_train_split_without_positives(self):
         with pytest.raises(ValueError, match="no positive"):
             resolve_pos_weight(None, np.zeros(4))
+
+    def test_forecast_positive_weight_is_capped_at_the_configured_ceiling(self):
+        y = np.array([0] * 52 + [1])
+        assert resolve_pos_weight(None, y) == 52.0
+        assert resolve_pos_weight(None, y, cap=10.0) == 10.0
+        assert resolve_pos_weight(None, y, cap=100.0) == 52.0
+        # an explicit weight is the owner's choice, never capped
+        assert resolve_pos_weight(2.5, y, cap=1.0) == 2.5
+
+    def test_the_forecast_loss_is_built_with_the_capped_weight(
+        self, tiny_split, forecast_fit_config
+    ):
+        cfg = forecast_fit_config
+        train = tiny_split.train
+        train.y_forecast[:] = 0
+        train.y_forecast[np.flatnonzero(train.forecast_mask)[0], 0] = 1
+        derived = resolve_pos_weight(None, train.y_forecast[train.forecast_mask])
+        assert derived > 10.0
+        batch = {
+            "y": torch.tensor([[1.0] + [0.0] * 9]),
+            "mask": torch.tensor([True]),
+        }
+        p = torch.full((1, 10), 0.5)
+        capped_loss = forecast_loss(10.0)(p, batch).item()
+
+        cfg.train.forecast_pos_weight_cap = 10.0
+        assert _task_loss(cfg, train)(p, batch).item() == capped_loss
+        cfg.train.forecast_pos_weight_cap = None
+        assert _task_loss(cfg, train)(p, batch).item() != capped_loss
 
 
 class TestNotebook:

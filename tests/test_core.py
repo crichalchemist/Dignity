@@ -562,6 +562,42 @@ class TestEvalConfig:
             assert TrainConfig(select_metric=ok).select_metric == ok
 
 
+class TestTrainConfigForecast:
+    def test_forecast_defaults_cap_nothing_warm_start_and_require_eligibility(self):
+        t = TrainConfig()
+        assert (
+            t.forecast_pos_weight_cap,
+            t.forecast_warm_start,
+            t.forecast_eligibility,
+        ) == (None, True, True)
+
+    def test_a_non_positive_positive_weight_cap_is_rejected(self):
+        for bad in (0.0, -1.0):
+            with pytest.raises(ValueError, match="forecast_pos_weight_cap"):
+                TrainConfig(forecast_pos_weight_cap=bad)
+        assert TrainConfig(forecast_pos_weight_cap=10.0).forecast_pos_weight_cap == 10.0
+
+    def test_every_shipped_config_gates_forecast_epochs_except_the_smoke_preset(self):
+        # a gate switched off anywhere else would ship unnoticed
+        for p in sorted((ROOT / "config").glob("*.yaml")):
+            cfg = DignityConfig.from_yaml(str(p))
+            assert cfg.train.forecast_eligibility is (p.name != "smoke.yaml"), p.name
+
+    def test_base_yaml_spells_out_the_forecast_keys(self):
+        raw = yaml.safe_load((ROOT / "config/base.yaml").read_text())
+        for key in (
+            "forecast_pos_weight_cap",
+            "forecast_warm_start",
+            "forecast_eligibility",
+        ):
+            assert key in raw["train"], key
+
+    def test_no_shipped_config_still_calls_the_warm_start_policy_only(self):
+        paths = [*sorted((ROOT / "config").glob("*.yaml")), ROOT / "core/config.py"]
+        for p in paths:
+            assert "policy only" not in p.read_text(), p.name
+
+
 class TestPolicyConfig:
     def test_default_cost_table_is_the_spec_table(self):
         c = DignityConfig().policy

@@ -6,6 +6,7 @@ from types import SimpleNamespace
 import numpy as np
 import pandas as pd
 import pytest
+import yaml
 
 import eval.metrics as metrics_module
 from core.config import DignityConfig, PolicyConfig, PrivacyConfig
@@ -15,6 +16,7 @@ from eval.metrics import (
     detection_gain,
     forecast_metrics,
     lead_times,
+    lift_upper,
     model_gate,
     paired_forecast_gain,
     policy_metrics,
@@ -35,13 +37,14 @@ from eval.run import (
     _early_warning,
     _fit_risk,
     _spread,
+    _train_seeds,
     config_hash,
     main,
     run_policy,
 )
 from models.head.policy import cost_matrix
 from train.checkpoint import load_checkpoint
-from train.loop import prepare_data
+from train.loop import FitResult, ForecastNotEligibleError, prepare_data
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -423,6 +426,52 @@ class TestForecastMetrics:
         )
         json.dumps(m, allow_nan=False)
         assert all(type(p) is float for p in m["prevalence_by_horizon"])
+
+
+class TestLiftUpper:
+    @staticmethod
+    def _y():
+        y = np.zeros((100, 10), np.float32)
+        y[:10, 5:] = 1
+        y[:3, 0] = 1
+        return y, np.ones(100, bool)
+
+    def test_a_perfect_score_lifts_by_the_inverse_prevalence(self):
+        y, mask = self._y()
+        assert lift_upper(y, y.copy(), mask) == pytest.approx(10.0)
+
+    def test_a_constant_score_is_chance_lift_one(self):
+        y, mask = self._y()
+        assert lift_upper(y, np.zeros_like(y), mask) == pytest.approx(1.0)
+
+    def test_low_horizon_columns_with_few_positives_do_not_move_it(self):
+        y, mask = self._y()
+        score = y.copy()
+        score[:, 0] = 1 - y[:, 0]
+        assert lift_upper(y, score, mask) == pytest.approx(10.0)
+
+    def test_windows_with_an_active_anomaly_are_left_out(self):
+        y, mask = self._y()
+        mask[50:] = False
+        score = y.copy()
+        score[50:] = 5.0
+        assert lift_upper(y, score, mask) == pytest.approx(5.0)
+
+    def test_it_is_the_mean_of_the_upper_half_columns_and_no_other(self):
+        # a perfect score lifts a column by 1 / prevalence; column 4 is the last
+        # lower-half column and would move the mean if it were counted
+        y = np.zeros((100, 10), np.float32)
+        for h, positives in zip(range(4, 10), (5, 10, 20, 25, 50, 40), strict=True):
+            y[:positives, h] = 1
+        lifts = [20.0, 10.0, 5.0, 4.0, 2.0, 2.5]
+        assert lift_upper(y, y.copy(), np.ones(100, bool)) == pytest.approx(
+            np.mean(lifts[1:])  # 4.7: neither the median 4.0, max 10.0 nor min 2.0
+        )
+
+    def test_it_is_none_when_no_upper_horizon_holds_both_classes(self):
+        y, mask = self._y()
+        y[:, 5:] = 0
+        assert lift_upper(y, y.copy(), mask) is None
 
 
 class TestLeadTimes:
@@ -824,16 +873,29 @@ class TestEvalRunForecast:
         import eval.run as run_module
 
         tmp = tmp_path_factory.mktemp("forecast_smoke")
-        fitted_tasks = []
-        real_fit = run_module.fit
+        fitted_tasks, fits = [], []
+        real_fit, real_fit_risk = run_module.fit, run_module._fit_risk
+        ns = SimpleNamespace()
 
         def spy(config, *args, **kwargs):
             fitted_tasks.append(config.model.task)
+            fits.append(
+                (
+                    config.model.task,
+                    config.train.init_backbone_from,
+                    kwargs.get("eligibility_floor"),
+                )
+            )
             return real_fit(config, *args, **kwargs)
+
+        def risk_spy(*args, **kwargs):
+            ns.risk = real_fit_risk(*args, **kwargs)  # the real fit, kept
+            return ns.risk
 
         cwd = os.getcwd()
         os.chdir(tmp)
         run_module.fit = spy
+        run_module._fit_risk = risk_spy
         try:
             assert main(["--smoke", "--seed", "tuning", "--tasks", "forecast"]) == 0
             forecast_only = list(fitted_tasks)
@@ -845,15 +907,45 @@ class TestEvalRunForecast:
                 main(["--smoke", "--seed", "tuning", "--tasks", "risk,forecast"]) == 0
             )
             both = list(fitted_tasks)
+            fits.clear()
+            assert (
+                main(["--smoke", "--seed", "tuning", "--tasks", "forecast,policy"]) == 0
+            )
+            warm_fits = list(fits)
+            ns.risk_for_fits = ns.risk  # the fourth run below overwrites ns.risk
+            smoke_cfg = DignityConfig.from_yaml(str(ROOT / "config/smoke.yaml"))
+            smoke_cfg.data.synthetic.seed = smoke_cfg.eval.tuning_seed
+            _, data = prepare_data(smoke_cfg)
+            cold = yaml.safe_load((ROOT / "config/smoke.yaml").read_text())
+            cold["train"]["forecast_warm_start"] = False
+            (tmp / "cold.yaml").write_text(yaml.safe_dump(cold))
+            fits.clear()
+            assert (
+                main(
+                    [
+                        "--config",
+                        str(tmp / "cold.yaml"),
+                        "--seed",
+                        "tuning",
+                        "--tasks",
+                        "forecast,policy",
+                    ]
+                )
+                == 0
+            )
+            cold_fits = list(fits)
         finally:
             run_module.fit = real_fit
+            run_module._fit_risk = real_fit_risk
             os.chdir(cwd)
-        return SimpleNamespace(
-            root=tmp,
-            forecast_only=forecast_only,
-            risk_json_after_forecast_only=risk_json_after_forecast_only,
-            both=both,
-        )
+        ns.root = tmp
+        ns.forecast_only = forecast_only
+        ns.risk_json_after_forecast_only = risk_json_after_forecast_only
+        ns.both = both
+        ns.fits = warm_fits
+        ns.cold_fits = cold_fits
+        ns.data = data
+        return ns
 
     def test_forecast_results_report_every_horizon_against_the_baseline(self, run):
         out = run.root / "runs/smoke/results"
@@ -928,6 +1020,185 @@ class TestEvalRunForecast:
                 "meta"
             ].task
         assert tasks == {"risk": "risk", "forecast": "forecast"}
+
+    def test_each_forecast_seed_warm_starts_from_its_own_risk_checkpoint(
+        self, monkeypatch, tmp_path
+    ):
+        import eval.run as run_module
+
+        seen = []
+
+        def fake_fit(config, data, seed, run_dir, **kwargs):
+            seen.append(
+                (run_dir, config.train.init_backbone_from, kwargs["eligibility_floor"])
+            )
+            return FitResult(run_dir + "/best.pt", [], 0.0, None)
+
+        monkeypatch.setattr(run_module, "fit", fake_fit)
+        cfg = DignityConfig.from_yaml(str(ROOT / "config/smoke.yaml"))
+        cfg.eval.n_train_seeds = 2
+        cfg.model.task = "forecast"
+        _train_seeds(cfg, SimpleNamespace(), "tuning", ["a.pt", "b.pt"], [1.2, 1.4])
+        assert [Path(d).name for d, _, _ in seen] == ["train_seed_42", "train_seed_43"]
+        assert [w for _, w, _ in seen] == ["a.pt", "b.pt"]
+        assert [f for _, _, f in seen] == [1.2, 1.4]
+
+        seen.clear()
+        _train_seeds(cfg, SimpleNamespace(), "tuning")
+        assert [(w, f) for _, w, f in seen] == [(None, None), (None, None)]
+        assert cfg.train.init_backbone_from is None  # the caller's config is intact
+
+    def test_the_smoke_run_warm_starts_forecast_and_floors_it_at_the_risk_score(
+        self, run
+    ):
+        horizon = DignityConfig.from_yaml(str(ROOT / "config/smoke.yaml")).model.horizon
+        data = run.data
+        floor = lift_upper(
+            data.val.y_forecast,
+            risk_score_forecast(run.risk_for_fits[1][0], horizon),
+            data.val.forecast_mask,
+        )
+        by_task = {task: (warm, f) for task, warm, f in run.fits}
+        warm, got_floor = by_task["forecast"]
+        assert warm.replace("\\", "/").endswith(
+            "eval_tuning/risk/train_seed_42/best.pt"
+        )
+        assert got_floor == pytest.approx(1.0 if floor is None else floor)
+        assert by_task["policy"][0] == warm
+
+    def test_forecast_results_carry_the_kept_epoch_of_every_seed(self, run):
+        r = json.loads((run.root / "runs/smoke/results/forecast.json").read_text())
+        spread = r["metrics"]["seed_spread"]
+        for key in ("best_epoch", "val_lift_upper", "risk_val_lift_upper"):
+            assert set(spread[key]) == {"values", "mean", "std"}
+            assert len(spread[key]["values"]) == 1
+        ckpt = load_checkpoint(
+            str(
+                run.root / "runs/smoke/train/eval_tuning/forecast/train_seed_42/best.pt"
+            )
+        )
+        assert spread["best_epoch"]["values"][0] == ckpt["epoch"]
+        assert r["metrics"]["forecast_eligibility"] is False  # the smoke preset
+
+    @pytest.mark.parametrize("gate", [True, False])
+    def test_forecast_results_report_what_the_seeds_fits_returned(
+        self, run, monkeypatch, tmp_path, gate
+    ):
+        import eval.run as run_module
+
+        horizon = DignityConfig.from_yaml(str(ROOT / "config/smoke.yaml")).model.horizon
+        fit_result = FitResult("unused.pt", [], 1.7, None, best_epoch=3)
+        monkeypatch.setattr(
+            run_module, "_train_seeds", lambda *a, **k: [(42, fit_result)]
+        )
+        rng = np.random.default_rng(0)
+        monkeypatch.setattr(
+            run_module,
+            "_predict",
+            lambda config, result, X: {"score": rng.random((len(X), horizon))},
+        )
+        monkeypatch.chdir(tmp_path)
+        cfg = DignityConfig.from_yaml(str(ROOT / "config/smoke.yaml"))
+        cfg.data.synthetic.seed = cfg.eval.tuning_seed
+        cfg.train.forecast_eligibility = gate
+        run_module.run_forecast(cfg, "tuning", run.data, run.risk_for_fits)
+        r = json.loads((tmp_path / "runs/smoke/results/forecast.json").read_text())
+        spread = r["metrics"]["seed_spread"]
+        floor = lift_upper(
+            run.data.val.y_forecast,
+            risk_score_forecast(run.risk_for_fits[1][0], horizon),
+            run.data.val.forecast_mask,
+        )
+        assert r["metrics"]["forecast_eligibility"] is gate
+        assert spread["best_epoch"]["values"] == [3]
+        assert spread["val_lift_upper"]["values"] == [1.7]
+        assert spread["risk_val_lift_upper"]["values"] == [pytest.approx(floor)]
+
+    def test_a_cold_forecast_fit_is_what_forecast_warm_start_false_asks_for(self, run):
+        by_task = {task: warm for task, warm, _ in run.cold_fits}
+        assert by_task["forecast"] is None
+        assert (
+            by_task["policy"]
+            .replace("\\", "/")
+            .endswith("eval_tuning/risk/train_seed_42/best.pt")
+        )
+
+    def _raise_for_forecast(self, monkeypatch):
+        import eval.run as run_module
+
+        real_fit = run_module.fit
+
+        def wrapped(config, *args, **kwargs):
+            if config.model.task == "forecast":
+                raise ForecastNotEligibleError(
+                    "rd", 42, "no forecast epoch beat the eligibility floor"
+                )
+            return real_fit(config, *args, **kwargs)
+
+        monkeypatch.setattr(run_module, "fit", wrapped)
+
+    def test_a_raised_forecast_fit_is_recorded_and_policy_still_runs(
+        self, monkeypatch, tmp_path
+    ):
+        monkeypatch.chdir(tmp_path)
+        self._raise_for_forecast(monkeypatch)
+        status = main(["--smoke", "--seed", "tuning", "--tasks", "forecast,policy"])
+        assert status == 1
+        out = tmp_path / "runs/smoke/results"
+        r = json.loads((out / "forecast.json").read_text())
+        assert r["metrics"] == {
+            "raised": {
+                "error": "ForecastNotEligibleError",
+                "message": "no forecast epoch beat the eligibility floor",
+                "train_seed": 42,
+            }
+        }
+        assert r["baselines"] == {}
+        assert (out / "policy.json").exists()
+        assert not (tmp_path / "runs/smoke/img/forecast_pr_auc_by_horizon.png").exists()
+
+    def test_a_recorded_raise_removes_the_charts_of_an_earlier_forecast_run(
+        self, monkeypatch, tmp_path
+    ):
+        monkeypatch.chdir(tmp_path)
+        img = tmp_path / "runs/smoke/img"
+        img.mkdir(parents=True)
+        old = [img / "forecast_pr_auc_by_horizon.png", img / "forecast_lead_time.png"]
+        other = img / "risk_pr_curve.png"
+        for f in [*old, other]:
+            f.write_bytes(b"old")
+        self._raise_for_forecast(monkeypatch)
+        assert main(["--smoke", "--seed", "tuning", "--tasks", "forecast"]) == 1
+        assert not any(f.exists() for f in old)
+        assert other.exists()
+
+    def test_the_privacy_sweep_still_runs_after_a_recorded_forecast_raise(
+        self, monkeypatch, tmp_path
+    ):
+        import eval.run as run_module
+
+        monkeypatch.chdir(tmp_path)
+        self._raise_for_forecast(monkeypatch)
+        swept = []
+        monkeypatch.setattr(
+            run_module, "run_privacy_sweep", lambda *a, **k: swept.append(1)
+        )
+        status = main(
+            ["--smoke", "--seed", "tuning", "--tasks", "forecast", "--privacy-sweep"]
+        )
+        assert status == 1
+        assert swept == [1]
+
+    def test_a_recorded_raise_prints_the_stable_line_the_runner_never_retries(
+        self, monkeypatch, tmp_path, capsys
+    ):
+        monkeypatch.chdir(tmp_path)
+        self._raise_for_forecast(monkeypatch)
+        assert main(["--smoke", "--seed", "tuning", "--tasks", "forecast"]) == 1
+        lines = capsys.readouterr().out.splitlines()
+        stable = "TRAINING_RAISED ForecastNotEligibleError task=forecast train_seed=42"
+        assert lines.count(stable) == 1
+        assert "forecast raised: no forecast epoch beat the eligibility floor" in lines
 
 
 class TestPolicyMetrics:
@@ -1176,6 +1447,64 @@ class TestEvalRunSeedPairing:
         out[:, -1] = last
         return out.astype(np.float32)
 
+    def test_each_forecast_seed_starts_from_its_own_risk_checkpoint_and_floor(
+        self, monkeypatch, tmp_path
+    ):
+        import eval.run as run_module
+
+        config = self._config(tmp_path)
+        val, test = self._windows(8), self._windows(6)
+        data = SimpleNamespace(val=val, test=test)
+        assert config.train.forecast_warm_start
+
+        def risk(split, k):
+            # seed k's risk score gets noisier with k, so the floors differ
+            right = 0.1 + 0.8 * split.y_forecast[:, 2]
+            noise = np.random.default_rng(k).random(len(right)) * 0.3 * k
+            return right + noise
+
+        risk_val = [risk(val, k) for k in range(self.K)]
+        risk_test = [risk(test, k) for k in range(self.K)]
+        risk_runs = [
+            (42 + k, SimpleNamespace(best_path=f"risk{k}.pt")) for k in range(self.K)
+        ]
+        floors = [
+            lift_upper(
+                val.y_forecast,
+                risk_score_forecast(v, self.H),
+                val.forecast_mask,
+            )
+            for v in risk_val
+        ]
+        floors = [1.0 if f is None else f for f in floors]
+        assert len(set(floors)) > 1  # seed 0's floor is not every seed's floor
+
+        seen = {}
+        fit_runs = [
+            (
+                42 + k,
+                SimpleNamespace(tag=k, best_epoch=1, best_metric=1.0),
+            )
+            for k in range(self.K)
+        ]
+
+        def fake_train_seeds(cfg, d, seed_name, init=None, floors=None):
+            seen["init"], seen["floors"] = init, floors
+            return fit_runs
+
+        monkeypatch.setattr(run_module, "_train_seeds", fake_train_seeds)
+        monkeypatch.setattr(
+            run_module,
+            "_predict",
+            lambda cfg, res, X: {"score": self._scores(val, 0.9, 0.1)[: len(X)]},
+        )
+        run_module.run_forecast(
+            config, "tuning", data, (risk_runs, risk_val, risk_test)
+        )
+
+        assert seen["init"] == [f"risk{k}.pt" for k in range(self.K)]
+        assert seen["floors"] == pytest.approx(floors)
+
     def test_each_forecast_seed_is_judged_against_its_own_risk_score_and_threshold(
         self, monkeypatch, tmp_path
     ):
@@ -1204,7 +1533,15 @@ class TestEvalRunSeedPairing:
 
         risk_val = [risk(val, k) for k in range(self.K)]
         risk_test = [risk(test, k) for k in range(self.K)]
-        runs = [(42 + k, SimpleNamespace(tag=k)) for k in range(self.K)]
+        runs = [
+            (
+                42 + k,
+                SimpleNamespace(
+                    tag=k, best_path=f"risk{k}.pt", best_epoch=k + 1, best_metric=1.0
+                ),
+            )
+            for k in range(self.K)
+        ]
         monkeypatch.setattr(run_module, "_train_seeds", lambda *a, **kw: runs)
         monkeypatch.setattr(
             run_module,

@@ -74,12 +74,15 @@ train:
   gradient_clip: 1.0  # gradient norm clip; 0 disables
   checkpoint_dir: ./runs  # run directory (gitignored); never point it at checkpoints/
   save_interval: 5  # write last.pt every N epochs (and at the final or early-stop epoch)
-  select_metric: pr_auc  # best.pt = highest val value of: pr_auc, auroc or recall_at_1pct_fpr; policy ignores it
-  pos_weight: null  # weight of positive labels in the loss; null = n_neg/n_pos of train; policy ignores it
+  select_metric: pr_auc  # best.pt = highest val value of: pr_auc, auroc or recall_at_1pct_fpr; policy and forecast ignore it (forecast selects on lift_upper)
+  pos_weight: null  # weight of positive labels in the loss; null = n_neg/n_pos of train; policy ignores it; forecast derives n_neg/n_pos capped at forecast_pos_weight_cap
   chance_guard_auroc: 0.55  # warn if val AUROC is below this at guard_epochs; null disables (policy has no AUROC)
   guard_epochs: 5  # the epoch at which the chance guard is checked
   patience: 10  # early stopping: stop after this many epochs without a better val metric; null disables
-  init_backbone_from: null  # policy only: risk checkpoint (best.pt) to warm-start the backbone from; ignored on resume
+  init_backbone_from: null  # policy and forecast: risk checkpoint (best.pt) to warm-start the backbone from; ignored on resume
+  forecast_pos_weight_cap: null  # forecast only: upper limit of the derived positive weight; null = no limit; ignored when pos_weight is set
+  forecast_warm_start: true  # forecast only: eval.run warm-starts each forecast seed from the same seed's risk checkpoint; dignity-train follows init_backbone_from instead
+  forecast_eligibility: true  # forecast only: keep an epoch only when its val lift_upper beats the floor (chance, or the same seed's risk score in eval.run); fit raises when none does; false disables the gate
 
 # Evaluation run (python -m eval.run). Read by eval.run and the privacy sweep, not by training.
 eval:

@@ -144,13 +144,28 @@ class TrainConfig:
     chance_guard_auroc: float | None = 0.55  # warn below this at guard_epochs
     guard_epochs: int = 5
     patience: int | None = 10  # early stopping; None disables
-    init_backbone_from: str | None = None  # policy only: risk checkpoint to warm-start
+    # policy and forecast: risk checkpoint to warm-start the backbone from
+    init_backbone_from: str | None = None
+    # forecast only: upper limit of the derived positive weight; None = no limit
+    forecast_pos_weight_cap: float | None = None
+    # forecast only: eval.run warm-starts each seed from the same seed's risk run
+    forecast_warm_start: bool = True
+    # forecast only: keep an epoch only when its val lift_upper beats the floor
+    forecast_eligibility: bool = True
 
     def __post_init__(self):
         if self.select_metric not in _SELECT_METRICS:
             raise ValueError(
                 f"train.select_metric={self.select_metric!r} is not allowed; "
                 f"expected one of {_SELECT_METRICS}"
+            )
+        if (
+            self.forecast_pos_weight_cap is not None
+            and self.forecast_pos_weight_cap <= 0
+        ):
+            raise ValueError(
+                f"train.forecast_pos_weight_cap={self.forecast_pos_weight_cap} "
+                "must be > 0 when set"
             )
 
 

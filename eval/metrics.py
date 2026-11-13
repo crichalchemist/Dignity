@@ -194,6 +194,27 @@ def forecast_metrics(
     }
 
 
+def lift_upper(y: np.ndarray, score: np.ndarray, mask: np.ndarray) -> float | None:
+    """Mean AP lift over the upper half of the horizons; the lower horizons carry
+    too few positives to rank epochs.
+
+    ``y`` and ``score`` are ``[N, H]``, ``mask`` is ``[N]`` (``forecast_mask``).
+    Lift is ``average_precision / prevalence`` of one horizon on the masked rows,
+    so chance is 1.0. Only columns ``range(H // 2, H)`` that hold both classes
+    count; ``None`` when no column does.
+    """
+    y = np.asarray(y)
+    score = np.asarray(score)
+    mask = np.asarray(mask, dtype=bool)
+    lifts = []
+    for h in range(y.shape[1] // 2, y.shape[1]):
+        yh, sh = y[mask, h], score[mask, h]
+        if len(np.unique(yh)) < 2:
+            continue
+        lifts.append(average_precision_score(yh, sh) / yh.mean())
+    return float(np.mean(lifts)) if lifts else None
+
+
 def lead_times(
     alarm: np.ndarray,
     threshold: float,

@@ -16,7 +16,7 @@ from core.config import DataConfig, DignityConfig, PrivacyConfig
 from data.loader import create_dataloader
 from data.pipeline import SplitData, TransactionPipeline, WindowSet
 from data.source.synthetic import SyntheticGenerator
-from eval.metrics import risk_metrics
+from eval.metrics import lift_upper, risk_metrics
 from models.head.policy import cost_matrix, decide_actions
 from train.checkpoint import (
     CheckpointMeta,
@@ -36,23 +36,39 @@ class ChanceGuardWarning(RuntimeWarning):
     """Validation AUROC is still below the chance guard at ``guard_epochs``."""
 
 
+class ForecastNotEligibleError(RuntimeError):
+    """No forecast epoch beat the eligibility floor on validation lift."""
+
+    def __init__(self, run_dir: str, seed: int, message: str):
+        super().__init__(message)
+        self.run_dir = run_dir
+        self.seed = seed
+
+
 @dataclass
 class FitResult:
     best_path: str
     history: list[dict]  # only the epochs run by this call
     best_metric: float
     meta: CheckpointMeta
+    best_epoch: int | None = None
 
 
-def resolve_pos_weight(config_value: float | None, y_train: np.ndarray) -> float:
-    """The configured weight, else the train negative-to-positive ratio."""
+def resolve_pos_weight(
+    config_value: float | None, y_train: np.ndarray, cap: float | None = None
+) -> float:
+    """The configured weight, else the train negative-to-positive ratio.
+
+    ``cap`` limits the derived ratio only; a configured weight is never capped.
+    """
     if config_value is not None:
         return config_value
     y_train = np.asarray(y_train)
     n_pos = int((y_train == 1).sum())
     if n_pos == 0:
         raise ValueError("train split has no positive windows")
-    return float((y_train != 1).sum()) / n_pos
+    ratio = float((y_train != 1).sum()) / n_pos
+    return ratio if cap is None else min(ratio, cap)
 
 
 def prepare_data(
@@ -98,7 +114,13 @@ def _task_loss(config: DignityConfig, train_ws: WindowSet):
         return risk_loss(resolve_pos_weight(config.train.pos_weight, train_ws.y_risk))
     if task == "forecast":
         labels = train_ws.y_forecast[train_ws.forecast_mask].ravel()
-        return forecast_loss(resolve_pos_weight(config.train.pos_weight, labels))
+        return forecast_loss(
+            resolve_pos_weight(
+                config.train.pos_weight,
+                labels,
+                cap=config.train.forecast_pos_weight_cap,
+            )
+        )
     if task == "policy":
         return expected_cost_loss(torch.from_numpy(cost_matrix(config.policy.costs)))
     raise NotImplementedError(f"task={task!r} does not train end to end yet")
@@ -134,11 +156,15 @@ def _val_metrics(
         columns.append(risk_metrics(y, score[mask, h], blocks, n_boot=0, seed=seed))
     scored = [c for c in columns if c is not None]
     if not scored:
-        return {f"val_{k}": float("nan") for k in _FORECAST_VAL_METRICS}, None
+        row = {f"val_{k}": float("nan") for k in _FORECAST_VAL_METRICS}
+        row["val_lift_upper"] = float("nan")
+        return row, None
     row = {
         f"val_{k}": float(np.mean([c[k]["value"] for c in scored]))
         for k in _FORECAST_VAL_METRICS
     }
+    lift = lift_upper(val_ws.y_forecast, score, mask)
+    row["val_lift_upper"] = float("nan") if lift is None else float(lift)
     last = columns[-1]
     return row, None if last is None else float(last["auroc"]["value"])
 
@@ -151,9 +177,18 @@ def _head_kwargs(config: DignityConfig) -> dict:
     return {}
 
 
+def _task_selection_metric(task: str, select_metric: str) -> str:
+    """Policy always selects on neg_cost, forecast on lift_upper."""
+    if task == "policy":
+        return "neg_cost"
+    if task == "forecast":
+        return "lift_upper"
+    return select_metric
+
+
 def _selection_metric(config: DignityConfig) -> str:
-    """The val metric best.pt is kept on: policy always uses neg_cost."""
-    return "neg_cost" if config.model.task == "policy" else config.train.select_metric
+    """The val metric best.pt is kept on: policy neg_cost, forecast lift_upper."""
+    return _task_selection_metric(config.model.task, config.train.select_metric)
 
 
 # In system mode (the default) the privacy stage draws its noise from
@@ -257,10 +292,14 @@ def fit(
     seed: int,
     run_dir: str,
     resume_from: str | None = None,
+    eligibility_floor: float | None = None,
 ) -> FitResult:
     """Train a risk, forecast or policy model.
 
-    Writes best.pt, last.pt and history.json to run_dir.
+    Writes best.pt, last.pt and history.json to run_dir. With
+    ``train.forecast_eligibility`` a forecast epoch is kept only when its val
+    ``lift_upper`` is above ``eligibility_floor`` (default 1.0, chance); when no
+    epoch is, ``ForecastNotEligibleError`` is raised.
     """
     torch.manual_seed(seed)
     device = torch.device(config.device if torch.cuda.is_available() else "cpu")
@@ -279,7 +318,8 @@ def fit(
     )
     model = build_model_from_meta(meta).to(device)
     # resume restores the full state below, so a warm start would be overwritten
-    if model.task == "policy" and train_cfg.init_backbone_from and not resume_from:
+    warm = model.task in ("policy", "forecast")
+    if warm and train_cfg.init_backbone_from and not resume_from:
         load_backbone(
             model, train_cfg.init_backbone_from, data, config.privacy, config.data
         )
@@ -289,14 +329,16 @@ def fit(
     )
     grad_scaler = GradScaler("cuda", enabled=use_amp)
 
+    gate = model.task == "forecast" and train_cfg.forecast_eligibility
+    floor = 1.0 if eligibility_floor is None else eligibility_floor
+    best_path = out / "best.pt"
     best_metric = float("-inf")
     start_epoch = 1
+    resumed_best = False
     if resume_from:
         ckpt = load_checkpoint(resume_from, map_location=device)
-        saved_metric = (
-            "neg_cost"
-            if ckpt["meta"].task == "policy"
-            else ckpt["meta"].config["train"].get("select_metric")
+        saved_metric = _task_selection_metric(
+            ckpt["meta"].task, ckpt["meta"].config["train"].get("select_metric")
         )
         if saved_metric != _selection_metric(config):
             raise ValueError(
@@ -310,6 +352,16 @@ def fit(
             grad_scaler.load_state_dict(ckpt["grad_scaler_state"])
         start_epoch = ckpt["epoch"] + 1
         best_metric = ckpt["best_metric"]
+        resumed_best = best_path.exists()
+        if gate and resumed_best:
+            # a best.pt from a run without the gate or under another floor must
+            # clear the floor this run uses, else it is not a kept epoch
+            lift = load_checkpoint(best_path, map_location="cpu")["metrics"].get(
+                "val_lift_upper"
+            )
+            resumed_best = lift is not None and lift > floor  # NaN is not eligible
+            if not resumed_best:
+                best_metric = float("-inf")
 
     # Closed-form cosine keyed off each group's initial_lr (restored with the
     # optimizer state). last_epoch is one behind the epoch about to train
@@ -341,6 +393,7 @@ def fit(
     history: list[dict] = []
     stale = 0
     wrote_best = False
+    best_epoch: int | None = None
     for epoch in range(start_epoch, epochs + 1):
         lr = optimizer.param_groups[0]["lr"]  # the lr this epoch trains with
         train_metrics = train_epoch(
@@ -366,8 +419,10 @@ def fit(
         )
 
         selected = row[f"val_{_selection_metric(config)}"]
-        if selected > best_metric:
+        eligible = not gate or row["val_lift_upper"] > floor  # NaN is not eligible
+        if eligible and selected > best_metric:
             best_metric = selected
+            best_epoch = epoch
             stale = 0
             wrote_best = True
             save_checkpoint(
@@ -380,7 +435,8 @@ def fit(
                 row,
                 best_metric,
             )
-        else:
+        elif not gate or wrote_best or resumed_best:
+            # under the gate, patience starts once an epoch has been kept
             stale += 1
 
         stop = train_cfg.patience is not None and stale >= train_cfg.patience
@@ -422,16 +478,30 @@ def fit(
         ]
     history_path.write_text(json.dumps(previous + history, indent=2))
 
-    best_path = out / "best.pt"
     # a best.pt left by an earlier run does not count; a resumed run keeps its own
-    if not (wrote_best or (resume_from and best_path.exists())):
+    kept = wrote_best or resumed_best
+    if gate and not kept:
+        lifts = [
+            r["val_lift_upper"] for r in history if not math.isnan(r["val_lift_upper"])
+        ]
+        best_seen = f"{max(lifts):.3f}" if lifts else "n/a"
+        raise ForecastNotEligibleError(
+            str(out),
+            seed,
+            f"no forecast epoch beat the eligibility floor {floor:.3f}: "
+            f"best val_lift_upper {best_seen} in run_dir {out}",
+        )
+    if not kept:
         raise RuntimeError(
             f"no best checkpoint was written: validation {_selection_metric(config)} "
             f"never improved (NaN or no epochs run) in run_dir {out}"
         )
+    if best_epoch is None:
+        best_epoch = load_checkpoint(best_path, map_location="cpu")["epoch"]
     return FitResult(
         best_path=str(best_path),
         history=history,
         best_metric=float(best_metric),
         meta=meta,
+        best_epoch=best_epoch,
     )

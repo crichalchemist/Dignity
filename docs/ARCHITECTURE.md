@@ -337,7 +337,7 @@ the backbone with one head, and `Dignity.forward` returns
 | Task | Head | `predictions` | Training loss |
 | --- | --- | --- | --- |
 | `risk` | `models/head/risk.py::RiskHead` | Sigmoid probabilities `[B, 1]` | `train/losses.py::risk_loss`: binary cross-entropy with `train.pos_weight` (default: train negatives over positives) |
-| `forecast` | `models/head/forecast.py::ForecastHead` | Onset probabilities `[B, horizon]`, `P(onset within h rows)` for h = 1..H, never decreasing in h by construction | `train/losses.py::forecast_loss`: masked per-horizon binary cross-entropy with `train.pos_weight` (default: negatives over positives among the unmasked train labels) |
+| `forecast` | `models/head/forecast.py::ForecastHead` | Onset probabilities `[B, horizon]`, `P(onset within h rows)` for h = 1..H, never decreasing in h by construction | `train/losses.py::forecast_loss`: masked per-horizon binary cross-entropy with `train.pos_weight` (default: negatives over positives among the unmasked train labels, at most `train.forecast_pos_weight_cap` when that is set) |
 | `policy` | `models/head/policy.py::PolicyHead` | Logits `[B, 3]` over `models.head.policy.ACTIONS` = `allow`, `review`, `block` | `train/losses.py::expected_cost_loss`: softmax-weighted cost table |
 
 Pinned by `tests/test_models.py::TestTaskHeads::test_forecast_probabilities_never_decrease_with_horizon`
@@ -355,10 +355,10 @@ review-likely windows keep `review`; the others go to their next-best action,
 
 ## Training and evaluation
 
-`train/loop.py::fit(config, data, seed, run_dir, resume_from=None)` is the one
+`train/loop.py::fit(config, data, seed, run_dir, resume_from=None, eligibility_floor=None)` is the one
 training loop; `dignity-train` (`train/cli.py::main`), the notebook and `eval.run`
 all call it. It returns a `train.loop.FitResult`: `best_path`, `history`,
-`best_metric` and `meta`.
+`best_metric`, `meta` and `best_epoch`.
 
 - **Optimizer.** AdamW with a cosine schedule over `train.epochs`; gradient clipping
   at `train.gradient_clip`. `train.use_amp` only takes effect on CUDA.
@@ -370,8 +370,17 @@ all call it. It returns a `train.loop.FitResult`: `best_path`, `history`,
 - **Selection.** `best.pt` is the epoch with the highest validation value of
   `train.select_metric` (`pr_auc`, `auroc` or `recall_at_1pct_fpr`), on a strict
   improvement (`tests/test_train.py::TestFit::test_best_checkpoint_is_the_epoch_with_highest_val_pr_auc`).
-  For forecast the validation metric is the mean over the horizons that hold both
-  classes. Policy ignores `train.select_metric`, `train.pos_weight` and the chance
+  Forecast ignores `train.select_metric`: it selects on validation `lift_upper`
+  (`eval.metrics.lift_upper`), the mean over the upper half of the horizons of
+  PR-AUC divided by prevalence on the masked validation windows. With
+  `train.forecast_eligibility` an epoch is kept only when its `lift_upper` is
+  above the floor (1.0, chance, unless the caller passes a floor). Patience
+  counts only after the first kept epoch, and `fit` raises
+  `train.loop.ForecastNotEligibleError` when no epoch is kept
+  (`tests/test_train.py::TestFitForecast::test_an_epoch_that_does_not_beat_the_risk_score_on_val_is_never_kept`).
+  A resumed forecast fit counts the `best.pt` it finds only if that checkpoint's
+  validation lift is above the floor in use.
+  Policy ignores `train.select_metric`, `train.pos_weight` and the chance
   guard: it selects on validation `neg_cost`, the negative mean cost of the capped
   decisions.
 - **Chance guard.** At `train.guard_epochs`, if validation AUROC is below
@@ -387,7 +396,10 @@ all call it. It returns a `train.loop.FitResult`: `best_path`, `history`,
   epoch. `--resume` restores the model, optimizer and grad-scaler state; resuming across
   selection metrics raises `ValueError`.
 - **Warm start.** The shipped policy config sets `train.init_backbone_from` to a risk
-  `best.pt`; the key is read only for `task: policy` and is skipped on `--resume`.
+  `best.pt`; the key is read for `task: policy` and `task: forecast` and is skipped on
+  `--resume`. `eval.run` warm-starts forecast from the same seed's risk checkpoint when
+  `train.forecast_warm_start` is true, and forecast needs the same input width as risk
+  (`ValueError` otherwise, from `train/loop.py::load_backbone`).
   `train/loop.py::load_backbone` copies only the `backbone.*` tensors and raises
   `ValueError` when the features, the scaler, the privacy block, the data block, the
   set of backbone tensors or any tensor shape differs. Without a `privacy:` block any
@@ -405,7 +417,7 @@ forecast alarm threshold and the baseline policy's thresholds all use validation
 | `--config PATH` or `--smoke` | A full run of a config, or the CI-sized `config/smoke.yaml`. Exactly one is required. |
 | `--seed tuning` or `--seed eval` | Which `eval` seed drives the generator. `--smoke` never runs on the evaluation seed. |
 | `--data-seed N` | Needs `--seed tuning`; N is any tuning seed (1000 to 1009) and replaces the generator seed, so a rehearsal can run on a seed other than the config's. The three tasks train under their own run directory `eval_tuning_<N>`; the privacy sweep directories are not seed-qualified, so give each data seed its own `train.checkpoint_dir` when sweeping. |
-| `--tasks risk,forecast,policy` | The default. Unknown names exit 2. Forecast and policy also fit risk, because their baseline is today's risk score and each policy seed warm-starts from the same seed's risk model, but the risk result file is written only when `risk` is in `--tasks`. |
+| `--tasks risk,forecast,policy` | The default. Unknown names exit 2. Forecast and policy also fit risk, because their baseline is today's risk score and each forecast and policy seed warm-starts from the same seed's risk model (forecast only when `train.forecast_warm_start` is true), but the risk result file is written only when `risk` is in `--tasks`. |
 | `--privacy-sweep` | Also trains risk with this run's config at each `eval.epsilons` value, taking the privacy block and the features of `config/train_risk.yaml`, with its Laplace epsilons rescaled to that total, public bounds and seeded noise (`privacy.deterministic_rng`, not DP-grade). Trains a non-private reference per replicate, then writes the privacy results and the curve (`docs/img/privacy_curve.png` by default). |
 
 Each result file `eval.run` writes (risk, forecast, policy and, with
@@ -414,6 +426,14 @@ Each result file `eval.run` writes (risk, forecast, policy and, with
 first of `eval.n_train_seeds` training seeds. The risk, forecast and policy files carry
 `metrics.seed_spread` over every training seed, the headline included; the privacy file
 carries `replicate_spread` per epsilon and `seed_spread` for its reference.
+
+Each forecast seed's eligibility floor is the val `lift_upper` of the same seed's risk
+score. The forecast result file records `metrics.seed_spread.best_epoch`, `val_lift_upper` and
+`risk_val_lift_upper` per training seed, and `metrics.forecast_eligibility`. A forecast
+fit that raises `ForecastNotEligibleError` is written as `metrics.raised` (`error`,
+`message`, `train_seed`) with empty baselines and no chart; the remaining tasks still run,
+and `eval.run` prints a line `TRAINING_RAISED <ErrorClass> task=<t> train_seed=<s>` and
+exits 1. Exit codes: 0 ok, 1 a recorded training raise, 2 refused arguments.
 Confidence intervals bootstrap whole blocks, never single windows, because windows of
 one block overlap (`eval/metrics.py::bootstrap_ci`, DGNTY-21).
 
