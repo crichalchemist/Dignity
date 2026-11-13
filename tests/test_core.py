@@ -643,6 +643,7 @@ class TestPolicyConfig:
     def test_at_least_one_saturated_epoch_must_trigger_the_collapse_guard(self):
         with pytest.raises(ValueError, match="collapse_epochs"):
             PolicyConfig(collapse_epochs=0)
+        assert PolicyConfig(collapse_epochs=1).collapse_epochs == 1  # one is enough
         c = PolicyConfig()
         assert (c.multiplier_lr, c.multiplier_floor, c.collapse_epochs) == (
             0.1,

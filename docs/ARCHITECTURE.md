@@ -397,8 +397,12 @@ multiplier state stored with best.pt, none for risk and forecast).
   `eval.run` records the raise in the policy results file
   (`tests/test_train.py::TestPolicyCollapseGuard::test_three_saturated_epochs_abort_the_run_loudly`,
   `tests/test_train.py::TestPolicyCollapseGuard::test_a_collapsed_run_cannot_be_resumed_into_a_normal_return`).
-  A resumed run counts only its own epochs but refuses a run directory whose history
-  already holds such a streak.
+  The streak survives a resume: a resumed run continues the over-limit epochs that end
+  the history before its first epoch, and a policy resume refuses, before training or
+  rewriting anything, a run directory whose history file (history.json) holds such a streak anywhere,
+  whatever checkpoint it resumes from and whatever `train.save_interval` is
+  (`tests/test_train.py::TestPolicyCollapseGuard::test_a_collapse_refuses_a_resume_from_any_checkpoint_at_any_save_interval`).
+  A history file deleted by hand is outside what `fit` can defend.
 - **Early stopping.** After `train.patience` epochs without improvement `fit` stops;
   `None` disables it
   (`tests/test_train.py::TestFit::test_early_stopping_halts_after_patience_epochs_without_improvement`).
@@ -443,7 +447,10 @@ score. The forecast result file records `metrics.seed_spread.best_epoch`, `val_l
 fit that raises `ForecastNotEligibleError` is written as `metrics.raised` (`error`,
 `message`, `train_seed`) with empty baselines and no chart; the remaining tasks still run,
 and `eval.run` prints a line `TRAINING_RAISED <ErrorClass> task=<t> train_seed=<s>` and
-exits 1. Exit codes: 0 ok, 1 a recorded training raise, 2 refused arguments.
+exits 1; a policy fit that raises `PolicyCollapseError` is recorded and printed the same
+way. The policy result file records `metrics.seed_spread.review_multiplier` (the loss's
+multiplier at each seed's kept epoch) and `metrics.seed_spread.val_neg_cost` per training
+seed. Exit codes: 0 ok, 1 a recorded training raise, 2 refused arguments.
 Confidence intervals bootstrap whole blocks, never single windows, because windows of
 one block overlap (`eval/metrics.py::bootstrap_ci`, DGNTY-21).
 
@@ -463,7 +470,8 @@ baseline's PR-AUC, and `model_gate` passes when both gates do.
 
 `train/checkpoint.py` writes self-describing checkpoints: a plain dict readable with
 `torch.load(weights_only=True)` holding `model_state`, `optimizer_state`,
-`grad_scaler_state`, `meta`, `epoch`, `metrics` and `best_metric`. `meta` is stored as
+`grad_scaler_state`, `meta`, `epoch`, `metrics`, `best_metric` and `loss_state` (the policy
+loss's review multiplier state, null for risk and forecast). `meta` is stored as
 a plain dict of the fields of `train.checkpoint.CheckpointMeta`: `format_version`,
 `task`, `input_size`, `feature_names`, `head_kwargs`, `scaler_center`, `scaler_scale`
 and `config` (the whole run config); `load_checkpoint` returns it as a `CheckpointMeta`

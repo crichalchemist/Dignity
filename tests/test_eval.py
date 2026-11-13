@@ -1349,10 +1349,22 @@ class TestEvalRunPolicy:
     ):
         # R6 compares multiplier_lr settings on the kept epochs' val cost, and the
         # multiplier shows whether the budget constraint was ever active
+        import eval.run as run_module
+
+        real_fit, kept = run_module.fit, []
+
+        def spy(config, *args, **kwargs):
+            result = real_fit(config, *args, **kwargs)
+            if config.model.task == "policy":
+                kept.append(result.best_metric)
+            return result
+
+        monkeypatch.setattr(run_module, "fit", spy)
         monkeypatch.chdir(tmp_path)
         assert main(["--smoke", "--seed", "tuning", "--tasks", "policy"]) == 0
         r = json.loads((tmp_path / "runs/smoke/results/policy.json").read_text())
         spread = r["metrics"]["seed_spread"]
+        assert spread["val_neg_cost"]["values"] == kept
         for key in ("review_multiplier", "val_neg_cost"):
             assert len(spread[key]["values"]) == len(spread["train_seeds"])
             assert all(isinstance(v, float) for v in spread[key]["values"])
@@ -1393,6 +1405,23 @@ class TestEvalRunPolicy:
         assert "raised" not in risk["metrics"]
         assert "pr_auc" in risk["metrics"]
         assert list(tmp_path.rglob("policy_cost.png")) == []
+
+    def test_a_policy_failure_that_is_not_a_collapse_still_stops_the_run(
+        self, monkeypatch, tmp_path
+    ):
+        import eval.run as run_module
+
+        real_fit = run_module.fit
+
+        def wrapped(config, *args, **kwargs):
+            if config.model.task == "policy":
+                raise RuntimeError("no best checkpoint was written")
+            return real_fit(config, *args, **kwargs)
+
+        monkeypatch.setattr(run_module, "fit", wrapped)
+        monkeypatch.chdir(tmp_path)
+        with pytest.raises(RuntimeError, match="no best checkpoint"):
+            main(["--smoke", "--seed", "tuning", "--tasks", "policy"])
 
     def test_a_recorded_policy_raise_prints_the_stable_line_the_runner_never_retries(
         self, monkeypatch, tmp_path, capsys

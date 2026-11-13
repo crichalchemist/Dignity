@@ -1,5 +1,6 @@
 """Loss factories for the training engine."""
 
+import math
 from collections.abc import Callable
 
 import torch
@@ -89,10 +90,9 @@ class ExpectedCostLoss:
             return plain
         p_review = p[:, 1].mean()
         loss = plain + self.multiplier * (p_review - p_review.detach())
-        with torch.no_grad():
-            self.share_ema = (
-                _SHARE_EMA * self.share_ema + (1 - _SHARE_EMA) * p_review.item()
-            )
+        share = p_review.item()
+        if math.isfinite(share):  # a NaN batch must not pin the multiplier
+            self.share_ema = _SHARE_EMA * self.share_ema + (1 - _SHARE_EMA) * share
             self.multiplier = max(
                 self._floor,
                 self.multiplier + self._lr * (self.share_ema - self._budget),

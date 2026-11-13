@@ -152,21 +152,21 @@ def _task_loss(config: DignityConfig, train_ws: WindowSet):
     raise NotImplementedError(f"task={task!r} does not train end to end yet")
 
 
-def _refuse_collapsed_history(
+def _history_streak(
     out: Path, config: DignityConfig, seed: int, start_epoch: int, limit: float
-) -> None:
-    """Raise when the epochs before a resume already held a collapse streak.
+) -> int:
+    """The over-limit streak a resume continues; raise on any full streak.
 
-    The collapse leaves best.pt and last.pt behind; a resume that counted only its
-    own epochs would finish and return that best.pt as a healthy run.
+    Every row of history.json is scanned, so a collapse refuses a resume from
+    last.pt, from an older last.pt or from best.pt alike. The return value is
+    the run of over-limit rows at the end of the rows before ``start_epoch``.
+    A history.json deleted by hand is outside what fit can defend.
     """
     path = out / "history.json"
     if not path.exists():
-        return
-    streak = 0
+        return 0
+    streak = carried = 0
     for r in json.loads(path.read_text()):
-        if r["epoch"] >= start_epoch:
-            continue
         streak = streak + 1 if r.get("val_review_share", 0.0) > limit else 0
         if streak >= config.policy.collapse_epochs:
             raise PolicyCollapseError(
@@ -176,6 +176,9 @@ def _refuse_collapsed_history(
                     out, config.policy, r["val_review_share"], limit, streak, r["epoch"]
                 ),
             )
+        if r["epoch"] < start_epoch:
+            carried = streak
+    return carried
 
 
 def _loss_state(loss_fn, task: str) -> dict[str, float] | None:
@@ -363,9 +366,11 @@ def fit(
     ``lift_upper`` is above ``eligibility_floor`` (default 1.0, chance); when no
     epoch is, ``ForecastNotEligibleError`` is raised. A policy run raises
     ``PolicyCollapseError`` after ``policy.collapse_epochs`` epochs in a row whose
-    val review share is above ``collapse_review_factor * review_budget``; a
-    resumed run counts only its own epochs, but refuses a run dir whose history
-    already holds such a streak.
+    val review share is above ``collapse_review_factor * review_budget``. The
+    streak survives a resume: a resumed run continues the over-limit rows that
+    end the history before its first epoch, and refuses, before training or
+    rewriting anything, a run dir whose history.json holds such a streak
+    anywhere, whatever checkpoint it resumes from.
     """
     torch.manual_seed(seed)
     device = torch.device(config.device if torch.cuda.is_available() else "cpu")
@@ -402,6 +407,7 @@ def fit(
     best_metric = float("-inf")
     start_epoch = 1
     resumed_best = False
+    saturated = 0  # consecutive over-limit epochs, carried over a resume (policy)
     if resume_from:
         ckpt = load_checkpoint(resume_from, map_location=device)
         saved_metric = _task_selection_metric(
@@ -422,7 +428,7 @@ def fit(
         if model.task == "policy" and ckpt.get("loss_state") is not None:
             loss_fn.load_state_dict(ckpt["loss_state"])
         if model.task == "policy":
-            _refuse_collapsed_history(out, config, seed, start_epoch, limit)
+            saturated = _history_streak(out, config, seed, start_epoch, limit)
         resumed_best = best_path.exists()
         if gate and resumed_best:
             # a best.pt from a run without the gate or under another floor must
@@ -463,7 +469,6 @@ def fit(
 
     history: list[dict] = []
     stale = 0
-    saturated = 0  # consecutive over-limit epochs of this call (policy only)
     collapsed: tuple[int, float] | None = None
     wrote_best = False
     best_epoch: int | None = None

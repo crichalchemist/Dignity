@@ -38,7 +38,7 @@ from train.loop import (
     prepare_data,
     resolve_pos_weight,
 )
-from train.losses import expected_cost_loss, forecast_loss, risk_loss
+from train.losses import ExpectedCostLoss, expected_cost_loss, forecast_loss, risk_loss
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -246,6 +246,62 @@ class TestExpectedCostLoss:
             grads.append(z.grad[:, 1].clone())
         assert values[1] == pytest.approx(values[0])  # train_loss stays comparable
         assert (grads[1] > grads[0]).all()  # review is penalised: its logit goes down
+
+    def test_the_review_term_adds_the_multiplier_times_the_batch_mean_gradient(self):
+        # d(mean p_review)/d z_review at uniform logits is p (1 - p) / batch
+        C = torch.from_numpy(cost_matrix(PolicyConfig().costs))
+        batch = {"y": torch.tensor([0, 1])}
+        grads = []
+        for loss in (expected_cost_loss(C), expected_cost_loss(C, review_budget=0.05)):
+            loss.multiplier = 0.0 if loss._budget is None else 2.0
+            z = torch.zeros(2, 3, requires_grad=True)
+            loss(z, batch).backward()
+            grads.append(z.grad[:, 1])
+        extra = 2.0 * (1 / 3) * (2 / 3) / 2
+        assert (grads[1] - grads[0]).tolist() == pytest.approx([extra, extra])
+
+    def test_a_batch_is_scored_with_the_multiplier_it_arrived_with(self):
+        C = torch.from_numpy(cost_matrix(PolicyConfig().costs))
+        batch = {"y": torch.tensor([0])}
+        grads = []
+        for loss in (expected_cost_loss(C), expected_cost_loss(C, review_budget=0.05)):
+            z = torch.tensor([[0.0, 5.0, 0.0]], requires_grad=True)
+            loss(z, batch).backward()  # the multiplier starts at 0 in both
+            grads.append(z.grad.clone())
+        assert torch.allclose(grads[0], grads[1])
+
+    @pytest.mark.parametrize("make", [expected_cost_loss, ExpectedCostLoss])
+    def test_a_loss_built_with_only_a_budget_uses_the_shipped_step_and_floor(
+        self, make
+    ):
+        C = torch.from_numpy(cost_matrix(PolicyConfig().costs))
+        loss = make(C, 0.05)
+        z = torch.tensor([[0.0, 5.0, 0.0]])
+        p1 = torch.softmax(z, -1)[0, 1].item()
+        loss(z, {"y": torch.tensor([0])})
+        assert loss.multiplier == pytest.approx(0.1 * (0.95 * 0.05 + 0.05 * p1 - 0.05))
+        loss = make(C, 0.5)
+        for _ in range(200):
+            loss(torch.tensor([[50.0, 0.0, 0.0]]), {"y": torch.tensor([0])})
+        assert loss.multiplier == -0.5
+
+    def test_without_a_budget_the_review_share_is_not_tracked_either(self):
+        C = torch.from_numpy(cost_matrix(PolicyConfig().costs))
+        loss = expected_cost_loss(C)
+        loss(torch.tensor([[0.0, 5.0, 0.0]]), {"y": torch.tensor([0])})
+        assert loss.share_ema == 0.0
+
+    def test_a_batch_with_no_finite_review_share_leaves_the_multiplier_alone(self):
+        C = torch.from_numpy(cost_matrix(PolicyConfig().costs))
+        loss = expected_cost_loss(C, review_budget=0.05)
+        good = torch.tensor([[0.0, 5.0, 0.0]])
+        loss(good, {"y": torch.tensor([0])})
+        before = loss.state_dict()
+        bad = torch.tensor([[float("nan"), 0.0, 0.0]])
+        assert loss(bad, {"y": torch.tensor([0])}).isnan()  # the loss is as before
+        assert loss.state_dict() == before
+        loss(good, {"y": torch.tensor([0])})
+        assert loss.multiplier > before["multiplier"]  # and it keeps working
 
     def test_a_head_stuck_on_review_is_pushed_off_it(self):
         # 30% anomalies: review (cost 1) is the plain optimum, the attractor
@@ -1206,6 +1262,34 @@ class TestFitPolicy:
         m3 = load_checkpoint(tmp_path / "last.pt")["loss_state"]["multiplier"]
         assert m3 == pytest.approx(m2, abs=1e-3)
 
+    def test_a_resume_from_a_checkpoint_without_loss_state_restarts_the_multiplier(
+        self, tiny_split, policy_fit_config, tmp_path
+    ):
+        policy_fit_config.train.epochs = 2
+        fit(policy_fit_config, tiny_split, 0, str(tmp_path))
+        last = tmp_path / "last.pt"
+        raw = torch.load(last, weights_only=True)
+        del raw["loss_state"]  # a checkpoint written before this key existed
+        torch.save(raw, last)
+        policy_fit_config.policy.multiplier_lr = 1e-9  # the multiplier barely moves
+        policy_fit_config.train.epochs = 3
+        r = fit(policy_fit_config, tiny_split, 0, str(tmp_path), resume_from=str(last))
+        assert [h["epoch"] for h in r.history] == [3]
+        state = load_checkpoint(tmp_path / "last.pt")["loss_state"]
+        assert state["multiplier"] == pytest.approx(0.0, abs=1e-3)  # started again
+        assert load_checkpoint(r.best_path).get("loss_state") is not None
+
+    def test_the_configured_multiplier_floor_and_step_reach_the_training_loss(
+        self, tiny_split, policy_fit_config
+    ):
+        policy_fit_config.policy.multiplier_floor = -0.25
+        policy_fit_config.policy.multiplier_lr = 1.0
+        policy_fit_config.policy.review_budget = 0.5
+        loss = _task_loss(policy_fit_config, tiny_split.train)
+        for _ in range(50):  # never reviews, far under the budget
+            loss(torch.tensor([[50.0, 0.0, 0.0]]), {"y": torch.tensor([0])})
+        assert loss.multiplier == -0.25
+
     def test_resume_refuses_an_m1_era_checkpoint_without_select_metric(
         self, tiny_split, tiny_fit_config, tmp_path
     ):
@@ -1274,15 +1358,32 @@ class TestPolicyCollapseGuard:
         r = fit(cfg, tiny_split, seed=0, run_dir=str(tmp_path))
         assert len(r.history) == 1
 
-    def test_a_resumed_run_counts_the_streak_from_its_own_first_epoch(
+    def test_a_streak_split_by_a_resume_is_still_one_collapse(
         self, tiny_split, cfg, tmp_path, monkeypatch
     ):
+        # two over-limit epochs before the resume plus one after are three in a row
         cfg.train.epochs = 2
         _script_policy_review_shares(monkeypatch, [0.9, 0.9])
         fit(cfg, tiny_split, seed=0, run_dir=str(tmp_path))
         cfg.train.epochs = 4
         _script_policy_review_shares(monkeypatch, [0.9, 0.9])
-        # two saturated epochs in this call: a streak carried over would raise
+        with pytest.raises(PolicyCollapseError, match="3 epochs in a row.*epoch 3"):
+            fit(
+                cfg,
+                tiny_split,
+                seed=0,
+                run_dir=str(tmp_path),
+                resume_from=str(tmp_path / "last.pt"),
+            )
+
+    def test_a_recovery_before_the_resume_ends_the_streak_it_carries(
+        self, tiny_split, cfg, tmp_path, monkeypatch
+    ):
+        cfg.train.epochs = 3
+        _script_policy_review_shares(monkeypatch, [0.9, 0.9, 0.01])
+        fit(cfg, tiny_split, seed=0, run_dir=str(tmp_path))
+        cfg.train.epochs = 5
+        _script_policy_review_shares(monkeypatch, [0.9, 0.9])
         resumed = fit(
             cfg,
             tiny_split,
@@ -1290,7 +1391,31 @@ class TestPolicyCollapseGuard:
             run_dir=str(tmp_path),
             resume_from=str(tmp_path / "last.pt"),
         )
-        assert [h["epoch"] for h in resumed.history] == [3, 4]
+        assert [h["epoch"] for h in resumed.history] == [4, 5]
+
+    def test_the_guard_follows_the_configured_epoch_count(
+        self, tiny_split, cfg, tmp_path, monkeypatch
+    ):
+        cfg.policy.collapse_epochs = 2
+        _script_policy_review_shares(monkeypatch, [0.9, 0.9])
+        with pytest.raises(PolicyCollapseError, match="2 epochs in a row"):
+            fit(cfg, tiny_split, seed=0, run_dir=str(tmp_path / "two"))
+        cfg.policy.collapse_epochs = 4
+        _script_policy_review_shares(monkeypatch, [0.9] * 3 + [0.01, 0.01])
+        r = fit(cfg, tiny_split, seed=0, run_dir=str(tmp_path / "four"))
+        assert len(r.history) == 5
+
+    def test_the_collapse_message_names_the_share_the_limit_and_the_streak(
+        self, tiny_split, cfg, tmp_path, monkeypatch
+    ):
+        _script_policy_review_shares(monkeypatch, [0.9, 0.9, 0.9])
+        with pytest.raises(PolicyCollapseError) as e:
+            fit(cfg, tiny_split, seed=0, run_dir=str(tmp_path))
+        assert isinstance(e.value, RuntimeError)
+        assert str(e.value) == (
+            f"policy collapse in {tmp_path}: val review share 0.900 above 0.500 "
+            "(10 x the 0.05 budget) for 3 epochs in a row, through epoch 3"
+        )
 
     def test_a_collapsed_run_cannot_be_resumed_into_a_normal_return(
         self, tiny_split, cfg, tmp_path, monkeypatch
@@ -1314,6 +1439,162 @@ class TestPolicyCollapseGuard:
         assert e.value.seed == 3
         # nothing was trained on top of the collapsed history
         assert len(json.loads((tmp_path / "history.json").read_text())) == 3
+
+    @pytest.mark.parametrize("source", ["last.pt", "best.pt"])
+    def test_a_collapse_refuses_a_resume_from_any_checkpoint_at_any_save_interval(
+        self, tiny_split, cfg, tmp_path, monkeypatch, source
+    ):
+        # save_interval 5: the collapse at epochs 2-4 leaves no last.pt for epoch 4,
+        # so a replay of only the rows before the checkpoint would never see it
+        cfg.train.save_interval = 5
+        cfg.train.epochs = 6
+        _script_policy_review_shares(monkeypatch, [0.01, 0.9, 0.9, 0.9])
+        with pytest.raises(PolicyCollapseError):
+            fit(cfg, tiny_split, seed=3, run_dir=str(tmp_path))
+        assert not (tmp_path / "last.pt").exists()
+        history = (tmp_path / "history.json").read_text()
+        ckpt = tmp_path / source
+        if source == "last.pt":
+            # an older last.pt, from before the collapse
+            _script_policy_review_shares(monkeypatch, [0.01])
+            cfg.train.epochs = 1
+            cfg.train.save_interval = 1
+            fit(cfg, tiny_split, seed=3, run_dir=str(tmp_path / "old"))
+            ckpt = tmp_path / "old" / "last.pt"
+        cfg.train.epochs = 6
+        _script_policy_review_shares(monkeypatch, [0.01, 0.01])
+        with pytest.raises(PolicyCollapseError, match="through epoch 4") as e:
+            fit(cfg, tiny_split, 3, str(tmp_path), resume_from=str(ckpt))
+        assert e.value.seed == 3
+        assert (tmp_path / "history.json").read_text() == history
+
+    def test_a_resume_without_a_history_file_trains_on(
+        self, tiny_split, cfg, tmp_path, monkeypatch
+    ):
+        cfg.train.epochs = 1
+        _script_policy_review_shares(monkeypatch, [0.01])
+        fit(cfg, tiny_split, seed=0, run_dir=str(tmp_path))
+        (tmp_path / "history.json").unlink()
+        cfg.train.epochs = 2
+        _script_policy_review_shares(monkeypatch, [0.01])
+        resumed = fit(
+            cfg,
+            tiny_split,
+            seed=0,
+            run_dir=str(tmp_path),
+            resume_from=str(tmp_path / "last.pt"),
+        )
+        assert [h["epoch"] for h in resumed.history] == [2]
+
+    @pytest.mark.parametrize("over, refused", [(0.0, False), (0.01, True)])
+    def test_a_history_streak_at_the_limit_resumes_and_just_above_it_does_not(
+        self, tiny_split, cfg, tmp_path, monkeypatch, over, refused
+    ):
+        limit = cfg.policy.collapse_review_factor * cfg.policy.review_budget
+        cfg.train.epochs = 2
+        _script_policy_review_shares(monkeypatch, [0.01, 0.01])
+        fit(cfg, tiny_split, seed=0, run_dir=str(tmp_path))
+        rows = [
+            {"epoch": e, "val_review_share": limit + over, "val_neg_cost": -1.0}
+            for e in (1, 2, 3)
+        ]
+        (tmp_path / "history.json").write_text(json.dumps(rows))
+        cfg.train.epochs = 3
+        _script_policy_review_shares(monkeypatch, [0.01])
+        last = str(tmp_path / "last.pt")
+        if refused:
+            with pytest.raises(PolicyCollapseError):
+                fit(cfg, tiny_split, 0, str(tmp_path), resume_from=last)
+        else:
+            r = fit(cfg, tiny_split, 0, str(tmp_path), resume_from=last)
+            assert [h["epoch"] for h in r.history] == [3]
+
+    def test_a_history_streak_is_judged_against_the_configured_epoch_count(
+        self, tiny_split, cfg, tmp_path, monkeypatch
+    ):
+        cfg.train.epochs = 2
+        _script_policy_review_shares(monkeypatch, [0.01, 0.01])
+        fit(cfg, tiny_split, seed=0, run_dir=str(tmp_path))
+        rows = [
+            {"epoch": e, "val_review_share": 0.9, "val_neg_cost": -1.0}
+            for e in (1, 2, 3)
+        ]
+        (tmp_path / "history.json").write_text(json.dumps(rows))
+        last = str(tmp_path / "last.pt")
+        cfg.policy.collapse_epochs = 2
+        with pytest.raises(PolicyCollapseError, match="2 epochs in a row"):
+            fit(cfg, tiny_split, 0, str(tmp_path), resume_from=last)
+        cfg.policy.collapse_epochs = 4
+        cfg.train.epochs = 3
+        _script_policy_review_shares(monkeypatch, [0.01])
+        r = fit(cfg, tiny_split, 0, str(tmp_path), resume_from=last)
+        assert [h["epoch"] for h in r.history] == [3]
+
+    def test_rows_from_epochs_the_resume_retrains_do_not_count_toward_its_streak(
+        self, tiny_split, cfg, tmp_path, monkeypatch
+    ):
+        # last.pt is from epoch 2, but history.json also holds an over-limit row 3
+        # from the run that was cut off; epoch 3 is trained again and replaces it
+        cfg.policy.collapse_epochs = 4
+        cfg.train.epochs = 2
+        _script_policy_review_shares(monkeypatch, [0.9, 0.9])
+        fit(cfg, tiny_split, seed=0, run_dir=str(tmp_path))
+        rows = json.loads((tmp_path / "history.json").read_text())
+        rows.append({**rows[-1], "epoch": 3})
+        (tmp_path / "history.json").write_text(json.dumps(rows))
+        cfg.train.epochs = 4
+        _script_policy_review_shares(monkeypatch, [0.9, 0.9])
+        with pytest.raises(PolicyCollapseError, match="4 epochs in a row.*epoch 4"):
+            fit(
+                cfg,
+                tiny_split,
+                0,
+                str(tmp_path),
+                resume_from=str(tmp_path / "last.pt"),
+            )
+
+    def test_a_streak_broken_by_a_recovery_in_the_history_is_not_a_collapse(
+        self, tiny_split, cfg, tmp_path, monkeypatch
+    ):
+        cfg.train.epochs = 2
+        _script_policy_review_shares(monkeypatch, [0.01, 0.01])
+        fit(cfg, tiny_split, seed=0, run_dir=str(tmp_path))
+        shares = [0.9, 0.9, 0.01, 0.9, 0.9]
+        rows = [
+            {"epoch": e, "val_review_share": s, "val_neg_cost": -1.0}
+            for e, s in enumerate(shares, 1)
+        ]
+        (tmp_path / "history.json").write_text(json.dumps(rows))
+        cfg.train.epochs = 3
+        _script_policy_review_shares(monkeypatch, [0.01])
+        resumed = fit(
+            cfg,
+            tiny_split,
+            0,
+            str(tmp_path),
+            resume_from=str(tmp_path / "last.pt"),
+        )
+        assert [h["epoch"] for h in resumed.history] == [3]
+
+    def test_a_history_row_without_a_review_share_is_not_over_the_limit(
+        self, tiny_split, cfg, tmp_path, monkeypatch
+    ):
+        # a history written before the share was recorded cannot hold a streak
+        cfg.train.epochs = 2
+        _script_policy_review_shares(monkeypatch, [0.01, 0.01])
+        fit(cfg, tiny_split, seed=0, run_dir=str(tmp_path))
+        rows = [{"epoch": e, "val_neg_cost": -1.0} for e in (1, 2, 3)]
+        (tmp_path / "history.json").write_text(json.dumps(rows))
+        cfg.train.epochs = 3
+        _script_policy_review_shares(monkeypatch, [0.01])
+        resumed = fit(
+            cfg,
+            tiny_split,
+            0,
+            str(tmp_path),
+            resume_from=str(tmp_path / "last.pt"),
+        )
+        assert [h["epoch"] for h in resumed.history] == [3]
 
     def test_a_rerun_into_a_collapsed_run_dir_still_raises(
         self, tiny_split, cfg, tmp_path, monkeypatch
@@ -1339,6 +1620,14 @@ class TestValReviewShare:
         # decide_actions caps reviews at 5%; the share is the uncapped first choice
         assert row["val_review_share"] == k / n
         assert auroc is None
+
+    def test_the_share_is_the_hard_first_choice_not_the_mean_review_probability(
+        self, tiny_split, policy_fit_config
+    ):
+        n = len(tiny_split.val.y_risk)
+        probs = np.tile([0.3, 0.4, 0.3], (n, 1))  # review first everywhere, mean 0.4
+        row, _ = _val_metrics(policy_fit_config, tiny_split.val, probs, 0)
+        assert row["val_review_share"] == 1.0
 
 
 def _backbone_state(path):

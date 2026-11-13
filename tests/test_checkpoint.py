@@ -74,6 +74,7 @@ class TestCheckpoint:
         assert load_checkpoint(path)["loss_state"] == state
         save_checkpoint(*args)
         raw = torch.load(path, weights_only=True)
+        assert raw["loss_state"] is None  # risk and forecast keep no loss state
         del raw["loss_state"]  # a checkpoint written before this key existed
         torch.save(raw, path)
         assert load_checkpoint(path).get("loss_state") is None

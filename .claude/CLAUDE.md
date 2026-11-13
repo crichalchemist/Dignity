@@ -45,9 +45,9 @@ format that export no longer supports (DGNTY-3, DGNTY-35). No shipped config wri
 ## Commands
 
 ```bash
-# Tests (1596 collected: test_core 87, test_data 169, test_models 23, test_privacy 42,
-# test_operator 4, test_docs 769, test_train 114, test_checkpoint 4, test_export 9,
-# test_calibration 3, test_labels 7, test_gates 74, test_ci 4, test_eval 126,
+# Tests (1618 collected: test_core 87, test_data 169, test_models 23, test_privacy 42,
+# test_operator 4, test_docs 769, test_train 135, test_checkpoint 4, test_export 9,
+# test_calibration 3, test_labels 7, test_gates 74, test_ci 4, test_eval 127,
 # test_colab_eval 13, test_scripts 19, test_release 129 — one skips without CUDA)
 # every test is limited to 300 s (pytest.ini; pytest-timeout), except the README quickstart
 # test, which carries its own 900 s limit (three subprocesses, each capped at 300 s)
@@ -185,8 +185,8 @@ a mechanism, it needs a test in `tests/test_privacy.py` or CI's 100% gate on tha
   updated on train batches only, stored as `loss_state` in the checkpoint and in
   `FitResult.loss_state`); `fit` records `val_review_share` per epoch and raises
   `train.loop.PolicyCollapseError` after `policy.collapse_epochs` epochs above
-  `policy.collapse_review_factor` times the budget (a resume counts only its own epochs but
-  refuses a run directory whose history already holds that streak), and `eval.run` records the
+  `policy.collapse_review_factor` times the budget (the streak survives a resume, and a
+  resume refuses any run directory whose `history.json` holds that streak anywhere), and `eval.run` records the
   raise in `policy.json`; `best.pt` selection is unchanged.
 - **Forecast is early warning, and `eval.run` fits risk for it.** Forecast windows with an
   anomaly active at their last row are masked out of the loss, the metrics and lead time
