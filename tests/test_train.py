@@ -31,6 +31,7 @@ from train.loop import (
     ForecastNotEligibleError,
     _selection_metric,
     _task_loss,
+    _val_metrics,
     fit,
     load_backbone,
     prepare_data,
@@ -1054,9 +1055,20 @@ def _script_policy_actions(monkeypatch, action_per_epoch):
     return budgets
 
 
+def _script_policy_review_shares(monkeypatch, shares):
+    """Replace _val_metrics with one scripted review share per epoch."""
+    it = iter(shares)
+    monkeypatch.setattr(
+        "train.loop._val_metrics",
+        lambda *a, **k: ({"val_neg_cost": -1.0, "val_review_share": next(it)}, None),
+    )
+
+
 @pytest.fixture
 def policy_fit_config(tiny_fit_config):
     tiny_fit_config.model.task = "policy"
+    # a cold 3-epoch net may sit on review; the guard has its own tests
+    tiny_fit_config.policy.collapse_epochs = 99
     return tiny_fit_config
 
 
@@ -1093,20 +1105,29 @@ class TestFitPolicy:
         assert load_checkpoint(r.best_path)["epoch"] == 2
         assert budgets == [cfg.policy.review_budget] * 3
 
-    def test_policy_history_rows_carry_only_the_cost_metric(
+    def test_policy_history_rows_carry_the_cost_and_the_review_share(
         self, tiny_split, policy_fit_config, tmp_path
     ):
         with warnings.catch_warnings():
             warnings.simplefilter("error", ChanceGuardWarning)  # guard is skipped
             r = fit(policy_fit_config, tiny_split, seed=0, run_dir=str(tmp_path))
-        assert set(r.history[0]) == {"epoch", "lr", "train_loss", "val_neg_cost"}
+        assert set(r.history[0]) == {
+            "epoch",
+            "lr",
+            "train_loss",
+            "val_neg_cost",
+            "val_review_share",
+        }
 
     def test_a_policy_run_that_never_improves_names_neg_cost_in_its_error(
         self, tiny_split, policy_fit_config, tmp_path, monkeypatch
     ):
         monkeypatch.setattr(
             "train.loop._val_metrics",
-            lambda *a, **k: ({"val_neg_cost": float("nan")}, None),
+            lambda *a, **k: (
+                {"val_neg_cost": float("nan"), "val_review_share": 0.0},
+                None,
+            ),
         )
         with pytest.raises(RuntimeError, match="neg_cost"):
             fit(policy_fit_config, tiny_split, seed=0, run_dir=str(tmp_path))
@@ -1145,6 +1166,45 @@ class TestFitPolicy:
         )
         assert [h["epoch"] for h in resumed.history] == [3]
 
+    def test_one_seed_gives_one_multiplier_trajectory(
+        self, tiny_split, policy_fit_config, tmp_path
+    ):
+        a = fit(policy_fit_config, tiny_split, seed=0, run_dir=str(tmp_path / "a"))
+        b = fit(policy_fit_config, tiny_split, seed=0, run_dir=str(tmp_path / "b"))
+        assert a.loss_state == b.loss_state
+        assert [h["train_loss"] for h in a.history] == [
+            h["train_loss"] for h in b.history
+        ]
+
+    def test_the_multiplier_at_the_best_epoch_is_stored_with_best_pt(
+        self, tiny_split, policy_fit_config, tiny_fit_config, tmp_path
+    ):
+        r = fit(policy_fit_config, tiny_split, seed=0, run_dir=str(tmp_path / "p"))
+        assert r.loss_state == load_checkpoint(r.best_path)["loss_state"]
+        assert set(r.loss_state) == {"multiplier", "share_ema"}
+        tiny_fit_config.model.task = "risk"
+        risk = fit(tiny_fit_config, tiny_split, seed=0, run_dir=str(tmp_path / "r"))
+        assert risk.loss_state is None
+
+    def test_a_resumed_run_continues_the_multiplier_it_left(
+        self, tiny_split, policy_fit_config, tmp_path
+    ):
+        policy_fit_config.train.epochs = 2
+        fit(policy_fit_config, tiny_split, 0, str(tmp_path))
+        m2 = load_checkpoint(tmp_path / "last.pt")["loss_state"]["multiplier"]
+        assert m2 != 0.0
+        policy_fit_config.policy.multiplier_lr = 1e-9  # a fresh start stays near 0
+        policy_fit_config.train.epochs = 3
+        fit(
+            policy_fit_config,
+            tiny_split,
+            0,
+            str(tmp_path),
+            resume_from=str(tmp_path / "last.pt"),
+        )
+        m3 = load_checkpoint(tmp_path / "last.pt")["loss_state"]["multiplier"]
+        assert m3 == pytest.approx(m2, abs=1e-3)
+
     def test_resume_refuses_an_m1_era_checkpoint_without_select_metric(
         self, tiny_split, tiny_fit_config, tmp_path
     ):
@@ -1159,6 +1219,21 @@ class TestFitPolicy:
         tiny_fit_config.train.epochs = 2
         with pytest.raises(ValueError, match="was selected on None"):
             fit(tiny_fit_config, tiny_split, 0, str(tmp_path), resume_from=str(last))
+
+
+class TestValReviewShare:
+    def test_the_share_counts_first_choices_before_the_review_cap(
+        self, tiny_split, policy_fit_config
+    ):
+        n = len(tiny_split.val.y_risk)
+        k = n // 4
+        probs = np.zeros((n, 3))
+        probs[:k, 1] = 1.0
+        probs[k:, 0] = 1.0
+        row, auroc = _val_metrics(policy_fit_config, tiny_split.val, probs, 0)
+        # decide_actions caps reviews at 5%; the share is the uncapped first choice
+        assert row["val_review_share"] == k / n
+        assert auroc is None
 
 
 def _backbone_state(path):

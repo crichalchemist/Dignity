@@ -338,7 +338,7 @@ the backbone with one head, and `Dignity.forward` returns
 | --- | --- | --- | --- |
 | `risk` | `models/head/risk.py::RiskHead` | Sigmoid probabilities `[B, 1]` | `train/losses.py::risk_loss`: binary cross-entropy with `train.pos_weight` (default: train negatives over positives) |
 | `forecast` | `models/head/forecast.py::ForecastHead` | Onset probabilities `[B, horizon]`, `P(onset within h rows)` for h = 1..H, never decreasing in h by construction | `train/losses.py::forecast_loss`: masked per-horizon binary cross-entropy with `train.pos_weight` (default: negatives over positives among the unmasked train labels, at most `train.forecast_pos_weight_cap` when that is set) |
-| `policy` | `models/head/policy.py::PolicyHead` | Logits `[B, 3]` over `models.head.policy.ACTIONS` = `allow`, `review`, `block` | `train/losses.py::expected_cost_loss`: softmax-weighted cost table |
+| `policy` | `models/head/policy.py::PolicyHead` | Logits `[B, 3]` over `models.head.policy.ACTIONS` = `allow`, `review`, `block` | `train/losses.py::expected_cost_loss`: softmax-weighted cost table plus a review multiplier: per training batch the review column's cost is raised or lowered (step `policy.multiplier_lr`, lowest value `policy.multiplier_floor`) so the mean review probability tracks `policy.review_budget`; the reported `train_loss` is the plain expected cost; the multiplier is stored in the checkpoint (`loss_state`), see `tests/test_train.py::TestExpectedCostLoss::test_the_multiplier_rises_while_the_head_reviews_more_than_the_budget` |
 
 Pinned by `tests/test_models.py::TestTaskHeads::test_forecast_probabilities_never_decrease_with_horizon`
 and `tests/test_models.py::TestTaskHeads::test_policy_head_returns_raw_logits_not_probabilities`.
@@ -358,7 +358,8 @@ review-likely windows keep `review`; the others go to their next-best action,
 `train/loop.py::fit(config, data, seed, run_dir, resume_from=None, eligibility_floor=None)` is the one
 training loop; `dignity-train` (`train/cli.py::main`), the notebook and `eval.run`
 all call it. It returns a `train.loop.FitResult`: `best_path`, `history`,
-`best_metric`, `meta` and `best_epoch`.
+`best_metric`, `meta`, `best_epoch` and `loss_state` (for a policy run the review
+multiplier state stored with best.pt, none for risk and forecast).
 
 - **Optimizer.** AdamW with a cosine schedule over `train.epochs`; gradient clipping
   at `train.gradient_clip`. `train.use_amp` only takes effect on CUDA.

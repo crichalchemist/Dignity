@@ -17,7 +17,7 @@ from data.loader import create_dataloader
 from data.pipeline import SplitData, TransactionPipeline, WindowSet
 from data.source.synthetic import SyntheticGenerator
 from eval.metrics import lift_upper, risk_metrics
-from models.head.policy import cost_matrix, decide_actions
+from models.head.policy import ACTIONS, cost_matrix, decide_actions
 from train.checkpoint import (
     CheckpointMeta,
     build_model_from_meta,
@@ -52,6 +52,7 @@ class FitResult:
     best_metric: float
     meta: CheckpointMeta
     best_epoch: int | None = None
+    loss_state: dict[str, float] | None = None  # policy: best.pt's review multiplier
 
 
 def resolve_pos_weight(
@@ -122,8 +123,18 @@ def _task_loss(config: DignityConfig, train_ws: WindowSet):
             )
         )
     if task == "policy":
-        return expected_cost_loss(torch.from_numpy(cost_matrix(config.policy.costs)))
+        return expected_cost_loss(
+            torch.from_numpy(cost_matrix(config.policy.costs)),
+            review_budget=config.policy.review_budget,
+            multiplier_lr=config.policy.multiplier_lr,
+            multiplier_floor=config.policy.multiplier_floor,
+        )
     raise NotImplementedError(f"task={task!r} does not train end to end yet")
+
+
+def _loss_state(loss_fn, task: str) -> dict[str, float] | None:
+    """The policy loss's review multiplier state; risk and forecast keep none."""
+    return loss_fn.state_dict() if task == "policy" else None
 
 
 def _val_metrics(
@@ -135,7 +146,12 @@ def _val_metrics(
         costs = cost_matrix(config.policy.costs).astype(np.float64)
         actions = decide_actions(score, config.policy.review_budget)
         neg_cost = -costs[actions, val_ws.y_risk.astype(np.int64)].mean()
-        return {"val_neg_cost": float(neg_cost)}, None
+        # the share of windows whose first choice is review, before the cap
+        review_share = (score.argmax(axis=1) == ACTIONS.index("review")).mean()
+        return {
+            "val_neg_cost": float(neg_cost),
+            "val_review_share": float(review_share),
+        }, None
     if config.model.task == "risk":
         val = risk_metrics(
             val_ws.y_risk, score, val_ws.block_index, n_boot=0, seed=seed
@@ -352,6 +368,8 @@ def fit(
             grad_scaler.load_state_dict(ckpt["grad_scaler_state"])
         start_epoch = ckpt["epoch"] + 1
         best_metric = ckpt["best_metric"]
+        if model.task == "policy" and ckpt.get("loss_state") is not None:
+            loss_fn.load_state_dict(ckpt["loss_state"])
         resumed_best = best_path.exists()
         if gate and resumed_best:
             # a best.pt from a run without the gate or under another floor must
@@ -434,6 +452,7 @@ def fit(
                 epoch,
                 row,
                 best_metric,
+                loss_state=_loss_state(loss_fn, model.task),
             )
         elif not gate or wrote_best or resumed_best:
             # under the gate, patience starts once an epoch has been kept
@@ -450,6 +469,7 @@ def fit(
                 epoch,
                 row,
                 best_metric,
+                loss_state=_loss_state(loss_fn, model.task),
             )
 
         scheduler.step()
@@ -504,4 +524,5 @@ def fit(
         best_metric=float(best_metric),
         meta=meta,
         best_epoch=best_epoch,
+        loss_state=load_checkpoint(best_path, map_location="cpu").get("loss_state"),
     )

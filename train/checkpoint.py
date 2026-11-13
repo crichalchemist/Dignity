@@ -60,6 +60,7 @@ def save_checkpoint(
     epoch: int,
     metrics: dict,
     best_metric: float,
+    loss_state: dict[str, float] | None = None,
 ) -> None:
     """Write one plain dict so torch.load(weights_only=True) can read it."""
     Path(path).parent.mkdir(parents=True, exist_ok=True)
@@ -72,6 +73,7 @@ def save_checkpoint(
             "epoch": epoch,
             "metrics": metrics,
             "best_metric": best_metric,
+            "loss_state": loss_state,
         },
         path,
     )
