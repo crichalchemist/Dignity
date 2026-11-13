@@ -1,6 +1,7 @@
 """Tests for the difficulty gate and its baselines."""
 
 import json
+import math
 import re
 import time
 from dataclasses import replace
@@ -829,6 +830,28 @@ class TestForecastHeadroom:
                 == np.unique(getattr(raw, split).block_index).tolist()
             )
 
+    def test_the_risk_aware_probe_is_what_the_headroom_stores_under_its_key(
+        self, monkeypatch
+    ):
+        # The ratio and the wins read `probe_risk_aware`; a swap of the two probes
+        # would pass every check built from stored numbers and judge the wrong one.
+        cfg = DignityConfig.from_yaml(DEFAULT_PRESETS["hard"])
+        df = SyntheticGenerator(
+            replace(cfg.data.synthetic, seed=1000, n_blocks=150)
+        ).generate()
+        d = gates._feature_split(df, cfg, 1000)
+
+        def fake_probe(train, risk_aware=False):
+            if risk_aware:
+                return lambda ws: np.full(ws.y_forecast.shape, 0.5)
+            return lambda ws: ws.y_forecast.astype(float)
+
+        monkeypatch.setattr(gates, "_fit_forecast_probe", fake_probe)
+        pr_auc = gates.forecast_headroom(df, d, cfg.model.horizon, 1000)["pr_auc"]
+        for key in ("h1", "h5", "h10"):
+            assert pr_auc["probe"][key] == pytest.approx(1.0)
+            assert pr_auc["probe_risk_aware"][key] < 0.9
+
     def test_a_planted_build_up_gives_the_risk_aware_probe_headroom_over_the_risk_score(
         self,
     ):
@@ -886,3 +909,32 @@ class TestCommittedGateResult:
             for name in ("hard", "medium", "easy")
         }
         assert shipped == gates._preset_strengths(DEFAULT_PRESETS, chosen)
+
+    def test_the_first_search_record_is_kept_beside_the_current_one(self):
+        # The first search (3000 blocks, first rule, plain probe) passed at no
+        # strength; the docs link these files as the record of that.
+        first = ROOT / "results/strength-search/first-search"
+        for s in (0.6, 0.7, 0.8):
+            run = json.loads((first / f"strength_{s}.json").read_text())
+            assert run["n_blocks"] == 3000, s
+            assert run["seeds"] == list(SELECTION_SEEDS), s
+            assert run["checks"]["forecast_headroom"] is False, s
+            assert "pr_auc_ratio_plain" not in run["headroom"], s
+
+    def test_the_ten_seed_miss_at_the_earlier_strength_failed_on_the_lift_floor_alone(
+        self,
+    ):
+        ten = json.loads(
+            (ROOT / "results/strength-search/ten_seed_gate_0.8.json").read_text()
+        )
+        assert ten["passed"] is False
+        assert [k for k, v in ten["checks"].items() if not v] == ["forecast_headroom"]
+        head = ten["headroom"]
+        assert head["stratified_lift_h10_mean"] < gates.HEADROOM_LIFT_RANGE[0]
+        for key in ("h5", "h10"):
+            assert head["pr_auc_ratio"][key] >= gates.HEADROOM_PR_AUC_RATIO
+        needed = math.ceil(gates.HEADROOM_MIN_WIN_SHARE * 10)
+        assert min(head["wins"].values()) >= needed
+        assert head["detection_gain"]["gain"]["ci_low"] > 0
+        low, high = gates.HEADROOM_PPV_RANGE
+        assert low <= head["ppv_build_up_mean"] <= high

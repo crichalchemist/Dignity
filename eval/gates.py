@@ -16,8 +16,8 @@ from core.config import TUNING_SEEDS, DignityConfig
 from data.pipeline import SplitData, TransactionPipeline, WindowSet
 from data.source.synthetic import RAW_COLUMNS, SyntheticGenerator
 from eval.baselines import (
+    _fit_forecast_probe,
     block_tree,
-    fit_forecast_probe,
     risk_score_forecast,
     window_logistic,
     window_logistic_forecast,
@@ -150,11 +150,11 @@ def forecast_headroom(df: pd.DataFrame, d: SplitData, horizon: int, seed: int) -
     """
     val, test = d.val, d.test
     cols = {f"h{h}": h - 1 for h in HEADROOM_HORIZONS}
-    plain = fit_forecast_probe(d.train)
+    plain = _fit_forecast_probe(d.train)
     probe = plain(test)
     scores = {
         "probe": probe,
-        "probe_risk_aware": fit_forecast_probe(d.train, risk_aware=True)(test),
+        "probe_risk_aware": _fit_forecast_probe(d.train, risk_aware=True)(test),
         "stand_in": risk_score_forecast(window_logistic(d.train, test), horizon),
         "oracle": risk_score_forecast(test.y_risk.astype(float), horizon),
     }

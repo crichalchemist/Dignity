@@ -102,7 +102,7 @@ def _probe_inputs(ws: WindowSet, rows, risk_aware: bool) -> np.ndarray:
     return np.concatenate([features, ws.y_risk[rows, None].astype(float)], axis=1)
 
 
-def fit_forecast_probe(
+def _fit_forecast_probe(
     train: WindowSet, risk_aware: bool = False
 ) -> Callable[[WindowSet], np.ndarray]:
     """Fit one logistic probe per horizon on the windows `forecast_mask` keeps.
@@ -138,7 +138,7 @@ def window_logistic_forecast(
     `risk_aware` the probe is also told, as `y_risk`, whether an anomaly lies
     earlier in the window.
     """
-    return fit_forecast_probe(train, risk_aware)(test)
+    return _fit_forecast_probe(train, risk_aware)(test)
 
 
 def _block_features(df: pd.DataFrame) -> pd.DataFrame:
