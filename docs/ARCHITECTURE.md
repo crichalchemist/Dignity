@@ -394,7 +394,10 @@ all call it. It returns a `train.loop.FitResult`: `best_path`, `history`,
   epoch. `--resume` restores the model, optimizer and grad-scaler state; resuming across
   selection metrics raises `ValueError`.
 - **Warm start.** The shipped policy config sets `train.init_backbone_from` to a risk
-  `best.pt`; the key is read only for `task: policy` and is skipped on `--resume`.
+  `best.pt`; the key is read for `task: policy` and `task: forecast` and is skipped on
+  `--resume`. `eval.run` warm-starts forecast from the same seed's risk checkpoint when
+  `train.forecast_warm_start` is true, and forecast needs the same input width as risk
+  (`ValueError` otherwise, from `train/loop.py::load_backbone`).
   `train/loop.py::load_backbone` copies only the `backbone.*` tensors and raises
   `ValueError` when the features, the scaler, the privacy block, the data block, the
   set of backbone tensors or any tensor shape differs. Without a `privacy:` block any

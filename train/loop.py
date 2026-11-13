@@ -318,7 +318,8 @@ def fit(
     )
     model = build_model_from_meta(meta).to(device)
     # resume restores the full state below, so a warm start would be overwritten
-    if model.task == "policy" and train_cfg.init_backbone_from and not resume_from:
+    warm = model.task in ("policy", "forecast")
+    if warm and train_cfg.init_backbone_from and not resume_from:
         load_backbone(
             model, train_cfg.init_backbone_from, data, config.privacy, config.data
         )

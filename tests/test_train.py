@@ -574,6 +574,36 @@ class TestFitForecast:
         out, _ = model(torch.randn(2, 20, r.meta.input_size))
         assert out.shape == (2, cfg.model.horizon)
 
+    def test_forecast_warm_start_copies_only_backbone_tensors(
+        self, tiny_split, forecast_fit_config, tmp_path
+    ):
+        cfg = forecast_fit_config
+        cfg.model.task = "risk"
+        cfg.train.epochs = 1
+        risk = fit(cfg, tiny_split, seed=0, run_dir=str(tmp_path / "risk"))
+        cfg.model.task = "forecast"
+        # lr 0 so that training cannot move a weight away from its start
+        cfg.train.lr = 0.0
+        cfg.train.init_backbone_from = risk.best_path
+        fc = fit(cfg, tiny_split, seed=0, run_dir=str(tmp_path / "forecast"))
+        rs = load_checkpoint(risk.best_path)["model_state"]
+        fs = load_checkpoint(fc.best_path)["model_state"]
+        backbone = [k for k in fs if k.startswith("backbone.")]
+        assert backbone
+        for k in backbone:
+            assert k in rs and torch.equal(fs[k], rs[k]), k
+        last = [k for k in fs if k.startswith("head.") and k.endswith(".weight")][-1]
+        last_risk = [k for k in rs if k.startswith("head.") and k.endswith(".weight")]
+        assert fs[last].shape[0] == 10 and rs[last_risk[-1]].shape[0] == 1
+        shared = [
+            k
+            for k in fs
+            if k.startswith("head.") and k in rs and fs[k].shape == rs[k].shape
+        ]
+        assert shared
+        for k in shared:
+            assert not torch.equal(fs[k], rs[k]), k
+
     def test_forecast_pos_weight_refuses_a_train_split_without_onsets(
         self, tiny_split, forecast_fit_config, tmp_path
     ):
@@ -1152,27 +1182,32 @@ class TestLoadBackbone:
         )
         assert calls == [] and [h["epoch"] for h in resumed.history] == [2]
 
-    def test_only_a_policy_fit_with_a_configured_path_warm_starts(
+    def test_only_policy_and_forecast_fits_with_a_configured_path_warm_start(
         self, tiny_split, tiny_fit_config, tmp_path, monkeypatch
     ):
         calls = []
         monkeypatch.setattr("train.loop.load_backbone", lambda *a: calls.append(a))
         tiny_fit_config.train.epochs = 1
         tiny_fit_config.train.init_backbone_from = "risk.pt"
-        for task in ("risk", "forecast"):
-            tiny_fit_config.model.task = task
-            fit(tiny_fit_config, tiny_split, 0, str(tmp_path / task))
+        tiny_fit_config.model.task = "risk"
+        fit(tiny_fit_config, tiny_split, 0, str(tmp_path / "risk"))
         assert calls == []
+
+        # a stubbed warm start leaves a tiny random model: no eligibility gate here
+        tiny_fit_config.model.task = "forecast"
+        tiny_fit_config.train.forecast_eligibility = False
+        fit(tiny_fit_config, tiny_split, 0, str(tmp_path / "forecast"))
+        assert len(calls) == 1 and calls[0][0].task == "forecast"
 
         tiny_fit_config.model.task = "policy"
         tiny_fit_config.train.init_backbone_from = None
         fit(tiny_fit_config, tiny_split, 0, str(tmp_path / "cold"))
-        assert calls == []
+        assert len(calls) == 1
 
         tiny_fit_config.train.init_backbone_from = "risk.pt"
         fit(tiny_fit_config, tiny_split, 0, str(tmp_path / "warm"))
-        assert len(calls) == 1
-        model, path, data, privacy, data_cfg = calls[0]
+        assert len(calls) == 2
+        model, path, data, privacy, data_cfg = calls[1]
         assert model.task == "policy" and path == "risk.pt"
         assert data is tiny_split and privacy is None
         assert data_cfg == tiny_fit_config.data
