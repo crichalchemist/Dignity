@@ -38,7 +38,7 @@ data:
     benign_spike_rate: 0.0
     label_noise: 0.0
     regime_switch_prob: 0.0
-    precursor_strength: 0.8       # build-up strength before four anomaly types (provisional)
+    precursor_strength: 1.0       # build-up strength: hard plus 0.2, capped at 1.0
     precursor_len_range: [10, 30]  # rows a build-up spans before its anomaly
     decoy_rate: 0.2             # P(a block holds one build-up that nothing follows)
 

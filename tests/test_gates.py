@@ -1,6 +1,7 @@
 """Tests for the difficulty gate and its baselines."""
 
 import json
+import re
 import time
 from dataclasses import replace
 from pathlib import Path
@@ -13,7 +14,7 @@ from sklearn.metrics import roc_auc_score
 from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import StandardScaler
 
-from core.config import TUNING_SEEDS, DignityConfig
+from core.config import SELECTION_SEEDS, TUNING_SEEDS, DignityConfig
 from data.pipeline import TransactionPipeline, WindowSet
 from data.source.synthetic import RAW_COLUMNS, SyntheticGenerator
 from eval import gates
@@ -24,7 +25,13 @@ from eval.baselines import (
     window_logistic,
     window_logistic_forecast,
 )
-from eval.gates import DEFAULT_PRESETS, data_gate, onset_bucket_recall
+from eval.gates import (
+    DEFAULT_PRESETS,
+    STRENGTH_GRID,
+    data_gate,
+    onset_bucket_recall,
+    preset_config_hash,
+)
 
 
 def _windowset(**fields) -> WindowSet:
@@ -475,15 +482,33 @@ class TestDataGate:
             0.6,
         )
 
+    def test_the_top_grid_strength_keeps_easy_at_the_cap_and_medium_between(
+        self, monkeypatch
+    ):
+        # 0.9 + 0.2 would exceed the generator's cap of 1.0: easy stays at the
+        # cap and medium sits halfway, so the three strengths still fall in order.
+        seen: list = []
+        _fake_score_preset(monkeypatch, seen=seen)
+        result = data_gate(DEFAULT_PRESETS, [1000], strength=0.9)
+        strengths = {preset: s for preset, _, _, s in seen}
+        assert (strengths["easy"], strengths["medium"], strengths["hard"]) == (
+            1.0,
+            0.95,
+            0.9,
+        )
+        assert result["checks"]["monotone"] is True
+        assert max(gates.STRENGTH_GRID) == 0.9
+
     def test_monotone_fails_when_the_presets_do_not_order_their_strengths(
         self, monkeypatch, tmp_path
     ):
         flat = tmp_path / "medium.yaml"
         text = (ROOT / "config" / "synthetic_medium.yaml").read_text()
-        assert "precursor_strength: 0.7" in text
-        flat.write_text(
-            text.replace("precursor_strength: 0.7", "precursor_strength: 0.5")
+        lowered, n = re.subn(
+            r"precursor_strength: [0-9.]+", "precursor_strength: 0.5", text
         )
+        assert n == 1
+        flat.write_text(lowered)
         _fake_score_preset(monkeypatch, extra={str(flat): "medium"})
         result = data_gate({**DEFAULT_PRESETS, "medium": str(flat)}, [1000])
         failing = [k for k, v in result["checks"].items() if not v]
@@ -818,3 +843,46 @@ class TestForecastHeadroom:
         assert ap["probe_risk_aware"]["h10"] > 1.5 * rival
         assert result["lift_h10"] > 1.5
         assert time.monotonic() - started < 300
+
+
+class TestCommittedGateResult:
+    def test_committed_gate_result_matches_the_presets(self):
+        gate = json.loads((ROOT / "results/v1.0/data_gate.json").read_text())
+        assert gate["seeds"] == list(TUNING_SEEDS)
+        assert gate["strength_override"] is None
+        assert gate["passed"] is True and all(gate["checks"].values())
+        assert gate["n_blocks"] == 3600
+        assert gate["preset_config_hash"] == preset_config_hash(DEFAULT_PRESETS)
+
+    def test_the_chosen_strength_is_the_first_grid_value_that_passed_both_gates(self):
+        # The rule: the smallest grid strength whose headroom check passes on the
+        # selection seeds and whose ten-seed gate then passes. A strength that
+        # passed the first and missed the second leaves its ten-seed record.
+        hard = DignityConfig.from_yaml(DEFAULT_PRESETS["hard"]).data.synthetic
+        chosen = hard.precursor_strength
+        assert chosen in STRENGTH_GRID
+        search = ROOT / "results/strength-search"
+        for s in STRENGTH_GRID:
+            path = search / f"strength_{s}.json"
+            if s > chosen:
+                assert not path.exists(), s
+                continue
+            run = json.loads(path.read_text())
+            assert run["seeds"] == list(SELECTION_SEEDS)
+            assert run["strength_override"] == s
+            assert run["n_blocks"] == 3600
+            if s == chosen:
+                assert run["checks"]["forecast_headroom"] is True
+            elif run["checks"]["forecast_headroom"]:
+                ten = json.loads((search / f"ten_seed_gate_{s}.json").read_text())
+                assert ten["seeds"] == list(TUNING_SEEDS)
+                assert ten["strength_override"] == s
+                assert ten["n_blocks"] == 3600
+                assert ten["passed"] is False
+        shipped = {
+            name: DignityConfig.from_yaml(
+                DEFAULT_PRESETS[name]
+            ).data.synthetic.precursor_strength
+            for name in ("hard", "medium", "easy")
+        }
+        assert shipped == gates._preset_strengths(DEFAULT_PRESETS, chosen)

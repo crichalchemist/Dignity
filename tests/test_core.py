@@ -368,13 +368,16 @@ def _write(tmp_path, **sections):
 
 
 class TestSyntheticConfig:
-    def test_smoke_preset_keeps_build_ups_off_until_the_strength_is_committed(self):
+    def test_smoke_preset_exercises_build_ups_and_decoys(self):
+        # CI smoke trains on build-up data only now that the strength is committed:
+        # it carries the hard preset's strength and holds true build-ups and decoys.
         cfg = DignityConfig.from_yaml(str(ROOT / "config/smoke.yaml"))
         synthetic = cfg.data.synthetic
-        assert synthetic.precursor_strength == 0.0
-        assert synthetic.decoy_rate == 0.0
+        hard = DignityConfig.from_yaml(str(ROOT / "config/synthetic_hard.yaml"))
+        assert synthetic.precursor_strength == hard.data.synthetic.precursor_strength
+        assert synthetic.decoy_rate == hard.data.synthetic.decoy_rate
         frame = SyntheticGenerator(synthetic).generate()
-        assert set(frame["build_up"]) == {0}
+        assert set(frame["build_up"]) == {0, 1, 2}
 
     def test_smoke_preset_val_and_test_each_hold_both_classes(self):
         # risk_metrics raises on a single-class split (M3.2); CI must never hit that.

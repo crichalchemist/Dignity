@@ -33,7 +33,7 @@ DEFAULT_PRESETS = {
 
 AUROC_BAND = (0.55, 0.80)
 FLATNESS_MAX_SPREAD = 0.15
-STRENGTH_GRID = (0.6, 0.7, 0.8)
+STRENGTH_GRID = (0.6, 0.7, 0.8, 0.9)
 HEADROOM_HORIZONS = (1, 5, 10)
 HEADROOM_LIFT_RANGE = (3.0, 15.0)
 HEADROOM_MIN_SEED_LIFT = 1.5
@@ -397,12 +397,18 @@ def _check_request(seeds: Sequence[int], strength: float | None) -> None:
 def _preset_strengths(
     config_paths: dict[str, str], strength: float | None
 ) -> dict[str, float]:
-    """Build-up strength per preset: hard S, medium S + 0.1, easy S + 0.2."""
+    """Build-up strength per preset from the hard preset's S.
+
+    Easy is S + 0.2, capped at 1.0 (the largest strength the generator accepts);
+    medium sits halfway between hard and easy. Up to S = 0.8 that is S + 0.1 and
+    S + 0.2.
+    """
     if strength is not None:
+        easy = min(round(strength + 0.2, 2), 1.0)
         return {
             "hard": strength,
-            "medium": round(strength + 0.1, 2),
-            "easy": round(strength + 0.2, 2),
+            "medium": round((strength + easy) / 2, 2),
+            "easy": easy,
         }
     return {
         name: DignityConfig.from_yaml(
