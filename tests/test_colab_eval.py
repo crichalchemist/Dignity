@@ -47,6 +47,7 @@ class TestColabEvalScript:
         data_seed=None,
         rehearsal=None,
         rehearse_exit=0,
+        dirty=(),
     ):
         events = [] if events is None else events
         monkeypatch.setenv("DIGNITY_SHA", "abc123")
@@ -70,6 +71,7 @@ class TestColabEvalScript:
 
         fake_module = types.ModuleType("eval.run")
         fake_module.main = fake_main
+        fake_module._dirty_frozen_paths = lambda root: list(dirty)
         monkeypatch.setitem(sys.modules, "eval.run", fake_module)
 
         def fake_rehearse(argv):
@@ -95,10 +97,25 @@ class TestColabEvalScript:
     def test_result_records_the_commit_that_ran_not_the_clone_head(self, monkeypatch):
         events = self._run(monkeypatch, clone_exists=True)
         cmds = [e[1] for e in events if e[0] == "run"]
-        fetch = ["git", "-C", "/content/Dignity", "fetch", "origin"]
+        fetch = ["git", "-C", "/content/Dignity", "fetch", "--tags", "origin"]
         checkout = ["git", "-C", "/content/Dignity", "checkout", "abc123"]
         assert cmds.index(fetch) < cmds.index(checkout)
         assert not any(c[:2] == ["git", "clone"] for c in cmds)
+
+    def test_tags_are_fetched_before_the_checkout(self, monkeypatch):
+        events = self._run(monkeypatch, clone_exists=True)
+        cmds = [e[1] for e in events if e[0] == "run"]
+        fetch = ["git", "-C", "/content/Dignity", "fetch", "--tags", "origin"]
+        checkout = ["git", "-C", "/content/Dignity", "checkout", "abc123"]
+        assert cmds.index(fetch) < cmds.index(checkout)
+
+    def test_the_log_shows_whether_the_frozen_tree_is_clean_without_changing_the_exit(
+        self, monkeypatch, capsys
+    ):
+        self._run(monkeypatch, clone_exists=True)
+        assert "FROZEN_DIRTY=none" in capsys.readouterr().out
+        self._run(monkeypatch, clone_exists=True, dirty=["core/x.py", "eval/y.py"])
+        assert "FROZEN_DIRTY=core/x.py,eval/y.py" in capsys.readouterr().out
 
     def test_fresh_vm_clones_before_fetching(self, monkeypatch):
         events = self._run(monkeypatch, clone_exists=False)

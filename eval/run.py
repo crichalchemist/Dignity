@@ -59,6 +59,18 @@ from train.loop import (
 
 _ROOT = Path(__file__).resolve().parent.parent
 PRIVACY_TEMPLATE = _ROOT / "config" / "train_risk.yaml"
+FINAL_FREEZE_TAG = "v1.0-freeze-2027"
+FROZEN_PATHS = (
+    "config",
+    "data",
+    "models",
+    "train",
+    "eval",
+    "core",
+    "export",
+    "notebooks",
+    "scripts",
+)
 _PRINTED_METRICS = ("auroc", "pr_auc", "recall_at_1pct_fpr", "brier")
 
 
@@ -75,6 +87,25 @@ def _git_sha() -> str:
         text=True,
         check=True,
     ).stdout.strip()
+
+
+def _head_tags(root: Path) -> list[str]:
+    return subprocess.run(
+        ["git", "-C", str(root), "tag", "--points-at", "HEAD"],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.split()
+
+
+def _dirty_frozen_paths(root: Path) -> list[str]:
+    out = subprocess.run(
+        ["git", "-C", str(root), "status", "--porcelain", "--", *FROZEN_PATHS],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+    return [line[3:] for line in out.splitlines() if line.strip()]
 
 
 def _train_seeds(
@@ -646,6 +677,17 @@ def main(argv: list[str] | None = None) -> int:
         parser.error(
             f"--data-seed must be a tuning seed ({TUNING_SEEDS[0]}-{TUNING_SEEDS[-1]})"
         )
+    if args.seed == "eval":
+        if FINAL_FREEZE_TAG not in _head_tags(_ROOT):
+            parser.error(
+                f"--seed eval runs only at the commit tagged {FINAL_FREEZE_TAG}"
+            )
+        dirty = _dirty_frozen_paths(_ROOT)
+        if dirty:
+            parser.error(
+                "--seed eval needs a clean tree under the frozen paths; "
+                f"modified: {', '.join(dirty)}"
+            )
 
     config = DignityConfig.from_yaml(
         str(_ROOT / "config" / "smoke.yaml") if args.smoke else args.config

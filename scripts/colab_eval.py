@@ -11,6 +11,7 @@ import os
 import shlex
 import subprocess
 import sys
+from pathlib import Path
 
 REPO_URL = "https://github.com/crichalchemist/Dignity"
 REPO_DIR = "/content/Dignity"
@@ -26,7 +27,7 @@ def main():
 
     if not os.path.isdir(REPO_DIR):
         subprocess.run(["git", "clone", REPO_URL, REPO_DIR], check=True)
-    subprocess.run(["git", "-C", REPO_DIR, "fetch", "origin"], check=True)
+    subprocess.run(["git", "-C", REPO_DIR, "fetch", "--tags", "origin"], check=True)
     subprocess.run(["git", "-C", REPO_DIR, "checkout", sha], check=True)
 
     for module, package in MISSING_MODULE_PACKAGES.items():
@@ -42,6 +43,7 @@ def main():
     import pandas
     import torch
 
+    from eval.run import _dirty_frozen_paths
     from eval.run import main as eval_main
 
     print(f"numpy {numpy.__version__}")
@@ -76,6 +78,9 @@ def main():
     finally:
         # results already on disk are kept even when the sweep (last) fails
         subprocess.run(["tar", "-czf", tarball, *paths], check=True)
+        # informational: would the final run's clean-tree check pass on this VM
+        dirty = _dirty_frozen_paths(Path(REPO_DIR))
+        print(f"FROZEN_DIRTY={','.join(dirty) or 'none'}")
 
 
 if __name__ == "__main__":
