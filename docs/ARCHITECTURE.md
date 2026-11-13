@@ -337,7 +337,7 @@ the backbone with one head, and `Dignity.forward` returns
 | Task | Head | `predictions` | Training loss |
 | --- | --- | --- | --- |
 | `risk` | `models/head/risk.py::RiskHead` | Sigmoid probabilities `[B, 1]` | `train/losses.py::risk_loss`: binary cross-entropy with `train.pos_weight` (default: train negatives over positives) |
-| `forecast` | `models/head/forecast.py::ForecastHead` | Onset probabilities `[B, horizon]`, `P(onset within h rows)` for h = 1..H, never decreasing in h by construction | `train/losses.py::forecast_loss`: masked per-horizon binary cross-entropy with `train.pos_weight` (default: negatives over positives among the unmasked train labels) |
+| `forecast` | `models/head/forecast.py::ForecastHead` | Onset probabilities `[B, horizon]`, `P(onset within h rows)` for h = 1..H, never decreasing in h by construction | `train/losses.py::forecast_loss`: masked per-horizon binary cross-entropy with `train.pos_weight` (default: negatives over positives among the unmasked train labels, at most `train.forecast_pos_weight_cap` when that is set) |
 | `policy` | `models/head/policy.py::PolicyHead` | Logits `[B, 3]` over `models.head.policy.ACTIONS` = `allow`, `review`, `block` | `train/losses.py::expected_cost_loss`: softmax-weighted cost table |
 
 Pinned by `tests/test_models.py::TestTaskHeads::test_forecast_probabilities_never_decrease_with_horizon`

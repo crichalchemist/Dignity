@@ -1177,6 +1177,35 @@ class TestPosWeight:
         with pytest.raises(ValueError, match="no positive"):
             resolve_pos_weight(None, np.zeros(4))
 
+    def test_forecast_positive_weight_is_capped_at_the_configured_ceiling(self):
+        y = np.array([0] * 52 + [1])
+        assert resolve_pos_weight(None, y) == 52.0
+        assert resolve_pos_weight(None, y, cap=10.0) == 10.0
+        assert resolve_pos_weight(None, y, cap=100.0) == 52.0
+        # an explicit weight is the owner's choice, never capped
+        assert resolve_pos_weight(2.5, y, cap=1.0) == 2.5
+
+    def test_the_forecast_loss_is_built_with_the_capped_weight(
+        self, tiny_split, forecast_fit_config
+    ):
+        cfg = forecast_fit_config
+        train = tiny_split.train
+        train.y_forecast[:] = 0
+        train.y_forecast[np.flatnonzero(train.forecast_mask)[0], 0] = 1
+        derived = resolve_pos_weight(None, train.y_forecast[train.forecast_mask])
+        assert derived > 10.0
+        batch = {
+            "y": torch.tensor([[1.0] + [0.0] * 9]),
+            "mask": torch.tensor([True]),
+        }
+        p = torch.full((1, 10), 0.5)
+        capped_loss = forecast_loss(10.0)(p, batch).item()
+
+        cfg.train.forecast_pos_weight_cap = 10.0
+        assert _task_loss(cfg, train)(p, batch).item() == capped_loss
+        cfg.train.forecast_pos_weight_cap = None
+        assert _task_loss(cfg, train)(p, batch).item() != capped_loss
+
 
 class TestNotebook:
     def test_notebook_trains_through_shared_fit_and_keeps_colab_badge(self):

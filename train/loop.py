@@ -54,15 +54,21 @@ class FitResult:
     best_epoch: int | None = None
 
 
-def resolve_pos_weight(config_value: float | None, y_train: np.ndarray) -> float:
-    """The configured weight, else the train negative-to-positive ratio."""
+def resolve_pos_weight(
+    config_value: float | None, y_train: np.ndarray, cap: float | None = None
+) -> float:
+    """The configured weight, else the train negative-to-positive ratio.
+
+    ``cap`` limits the derived ratio only; a configured weight is never capped.
+    """
     if config_value is not None:
         return config_value
     y_train = np.asarray(y_train)
     n_pos = int((y_train == 1).sum())
     if n_pos == 0:
         raise ValueError("train split has no positive windows")
-    return float((y_train != 1).sum()) / n_pos
+    ratio = float((y_train != 1).sum()) / n_pos
+    return ratio if cap is None else min(ratio, cap)
 
 
 def prepare_data(
@@ -108,7 +114,13 @@ def _task_loss(config: DignityConfig, train_ws: WindowSet):
         return risk_loss(resolve_pos_weight(config.train.pos_weight, train_ws.y_risk))
     if task == "forecast":
         labels = train_ws.y_forecast[train_ws.forecast_mask].ravel()
-        return forecast_loss(resolve_pos_weight(config.train.pos_weight, labels))
+        return forecast_loss(
+            resolve_pos_weight(
+                config.train.pos_weight,
+                labels,
+                cap=config.train.forecast_pos_weight_cap,
+            )
+        )
     if task == "policy":
         return expected_cost_loss(torch.from_numpy(cost_matrix(config.policy.costs)))
     raise NotImplementedError(f"task={task!r} does not train end to end yet")
