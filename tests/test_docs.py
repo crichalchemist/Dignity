@@ -4944,10 +4944,12 @@ class TestResultsDoc:
             "The data-gate numbers in the Protocol are the exception",
             "Its output is `results/v1.0/data_gate_tuning.json`: validation scores "
             "that `eval.gates` writes",
-            "The data-gate numbers are validation scores that `eval.gates` writes "
-            "on the tuning seed",
+            "The ten-seed gate that `eval.gates` writes for the redesigned "
+            "generator is `results/v1.0/data_gate.json`",
+            "`git checkout v1.0-freeze`",
             "Each of the four `eval.run` results records `git_sha` and `config_hash`",
-            "`results/v1.0/data_gate_tuning.json` records neither",
+            "`results/v1.0/data_gate_tuning.json` is the first evaluation's "
+            "single-seed gate and records neither `git_sha` nor `config_hash`",
             "The four `eval.run` results were produced on a Colab L4",
             "The numbers of the four `eval.run` results above come from the full run",
         ):
@@ -4961,6 +4963,7 @@ class TestResultsDoc:
         for name in ("risk", "forecast", "policy", "privacy"):
             assert {"git_sha", "config_hash"} <= set(_results_json(name)), name
         assert not {"git_sha", "config_hash"} & set(_results_json("data_gate_tuning"))
+        assert not {"git_sha", "config_hash"} & set(_results_json("data_gate"))
 
     def test_the_reproduce_section_gives_the_command_that_writes_the_gate_file(
         self, text

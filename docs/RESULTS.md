@@ -196,7 +196,7 @@ python -m pytest tests/test_docs.py
 python scripts/refresh_doc_numbers.py README.md docs/RESULTS.md
 ```
 
-The data-gate numbers are validation scores that `eval.gates` writes on the tuning seed. It prints the result as JSON and, with `--out`, also writes it to that file:
+The ten-seed gate that `eval.gates` writes for the redesigned generator is `results/v1.0/data_gate.json`. It prints the result as JSON and, with `--out`, also writes it to that file. The single-seed gate of the first evaluation, `results/v1.0/data_gate_tuning.json`, cannot be written by this tree, which has no `--seed` option; to reproduce it, run `git checkout v1.0-freeze` and then `python -m eval.gates --seed 1000 --out results/v1.0/data_gate_tuning.json`. The command for the ten-seed gate is:
 
 ```bash
 python -m eval.gates --out results/v1.0/data_gate.json
@@ -226,6 +226,6 @@ Tested with google-colab-cli 0.7.2. `--timeout` is required, because the default
 
 The run executes `python -m eval.run --config config/synthetic_hard.yaml --seed <seed> --tasks risk,forecast,policy --privacy-sweep`. The sweep runs after the three tasks and writes `results/v1.0/privacy.json` beside the other results and `docs/img/privacy_curve.png` beside the other charts, in the downloaded archive.
 
-Each of the four `eval.run` results records `git_sha` and `config_hash`, so a reader can check which commit and config produced it; `results/v1.0/data_gate_tuning.json` records neither.
+Each of the four `eval.run` results records `git_sha` and `config_hash`, so a reader can check which commit and config produced it; `results/v1.0/data_gate_tuning.json` is the first evaluation's single-seed gate and records neither `git_sha` nor `config_hash`; the ten-seed gate `results/v1.0/data_gate.json` has neither key either.
 
 The four `eval.run` results were produced on a Colab L4, at the commit each of those files records in `git_sha`. The final run used `SEED=eval` and set `SHA` to the commit tagged `v1.0-freeze`. The doc tests then named what a person still had to rewrite: the banners, the `--seed` word of the Source cells and the sentences that held only on the tuning seed.

@@ -66,7 +66,7 @@ pre-commit run --all-files
 # The CI coverage gate — measures only core/privacy.py (pyproject [tool.coverage.run] include)
 pytest tests/ --cov --cov-fail-under=100
 
-python -m eval.gates --seeds 1000,1001 --n-blocks 400   # data gate; tuning seeds 1000-1009 only, refuses everything else
+python -m eval.gates --out results/v1.0/data_gate.json   # ten-seed data gate on the tuning seeds 1000-1009 (refuses everything else); the committed result passes every check at hard build-up strength 0.9 (presets 0.9/0.95/1.0); --seeds, --n-blocks and --strength are for rehearsals
 python scripts/refresh_doc_numbers.py README.md docs/RESULTS.md   # after any results change
 python scripts/verify_release.py   # v1.0 success criteria 2-5 on results/v1.0 (exit 1 = a criterion failed or a training raise was recorded, 2 = unusable results, including results not on the evaluation seed); results/v1.0 holds the first evaluation, which the restated criteria call unusable until it is replaced
 python scripts/verify_release.py --results DIR --seed tuning   # rehearsal on one tuning-seed run (seed read from DIR/risk.json, 1000-1009); prints a banner, not the evaluation

@@ -174,8 +174,9 @@ design (`tests/test_gates.py::TestForecastHeadroom`). The gate
 is a tuning tool: `eval/gates.py::main` refuses a seed outside the tuning seeds, a
 repeated seed and a strength off `eval.gates.STRENGTH_GRID` with exit code 2, before
 it generates anything (`tests/test_gates.py::TestDataGate`). The values the shipped
-presets reach are in
-[results/v1.0/data_gate_tuning.json](../results/v1.0/data_gate_tuning.json).
+presets reach are in [results/v1.0/data_gate.json](../results/v1.0/data_gate.json);
+[results/v1.0/data_gate_tuning.json](../results/v1.0/data_gate_tuning.json) is the
+first evaluation's single-seed gate for the earlier presets.
 
 `data/calibration/reference_stats.json` holds a band for each statistic in
 `data.stats.STAT_NAMES`; `scripts/calibrate.py` builds it from public hourly bars,
