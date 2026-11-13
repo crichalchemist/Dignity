@@ -55,7 +55,7 @@ train:
   chance_guard_auroc: 0.55  # ignored for task: policy (no AUROC for 3 actions)
   guard_epochs: 5
   patience: 10  # early stopping; null disables
-  # policy only: risk checkpoint whose backbone warm-starts this run; train risk first
+  # policy and forecast: risk checkpoint whose backbone warm-starts this run; train risk first
   init_backbone_from: ./runs/risk/best.pt
 
 eval:
