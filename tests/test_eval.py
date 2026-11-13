@@ -6,6 +6,7 @@ from types import SimpleNamespace
 import numpy as np
 import pandas as pd
 import pytest
+import yaml
 
 import eval.metrics as metrics_module
 from core.config import DignityConfig, PolicyConfig, PrivacyConfig
@@ -36,13 +37,14 @@ from eval.run import (
     _early_warning,
     _fit_risk,
     _spread,
+    _train_seeds,
     config_hash,
     main,
     run_policy,
 )
 from models.head.policy import cost_matrix
 from train.checkpoint import load_checkpoint
-from train.loop import prepare_data
+from train.loop import FitResult, ForecastNotEligibleError, prepare_data
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -860,16 +862,29 @@ class TestEvalRunForecast:
         import eval.run as run_module
 
         tmp = tmp_path_factory.mktemp("forecast_smoke")
-        fitted_tasks = []
-        real_fit = run_module.fit
+        fitted_tasks, fits = [], []
+        real_fit, real_fit_risk = run_module.fit, run_module._fit_risk
+        ns = SimpleNamespace()
 
         def spy(config, *args, **kwargs):
             fitted_tasks.append(config.model.task)
+            fits.append(
+                (
+                    config.model.task,
+                    config.train.init_backbone_from,
+                    kwargs.get("eligibility_floor"),
+                )
+            )
             return real_fit(config, *args, **kwargs)
+
+        def risk_spy(*args, **kwargs):
+            ns.risk = real_fit_risk(*args, **kwargs)  # the real fit, kept
+            return ns.risk
 
         cwd = os.getcwd()
         os.chdir(tmp)
         run_module.fit = spy
+        run_module._fit_risk = risk_spy
         try:
             assert main(["--smoke", "--seed", "tuning", "--tasks", "forecast"]) == 0
             forecast_only = list(fitted_tasks)
@@ -881,15 +896,44 @@ class TestEvalRunForecast:
                 main(["--smoke", "--seed", "tuning", "--tasks", "risk,forecast"]) == 0
             )
             both = list(fitted_tasks)
+            fits.clear()
+            assert (
+                main(["--smoke", "--seed", "tuning", "--tasks", "forecast,policy"]) == 0
+            )
+            warm_fits = list(fits)
+            smoke_cfg = DignityConfig.from_yaml(str(ROOT / "config/smoke.yaml"))
+            smoke_cfg.data.synthetic.seed = smoke_cfg.eval.tuning_seed
+            _, data = prepare_data(smoke_cfg)
+            cold = yaml.safe_load((ROOT / "config/smoke.yaml").read_text())
+            cold["train"]["forecast_warm_start"] = False
+            (tmp / "cold.yaml").write_text(yaml.safe_dump(cold))
+            fits.clear()
+            assert (
+                main(
+                    [
+                        "--config",
+                        str(tmp / "cold.yaml"),
+                        "--seed",
+                        "tuning",
+                        "--tasks",
+                        "forecast,policy",
+                    ]
+                )
+                == 0
+            )
+            cold_fits = list(fits)
         finally:
             run_module.fit = real_fit
+            run_module._fit_risk = real_fit_risk
             os.chdir(cwd)
-        return SimpleNamespace(
-            root=tmp,
-            forecast_only=forecast_only,
-            risk_json_after_forecast_only=risk_json_after_forecast_only,
-            both=both,
-        )
+        ns.root = tmp
+        ns.forecast_only = forecast_only
+        ns.risk_json_after_forecast_only = risk_json_after_forecast_only
+        ns.both = both
+        ns.fits = warm_fits
+        ns.cold_fits = cold_fits
+        ns.data = data
+        return ns
 
     def test_forecast_results_report_every_horizon_against_the_baseline(self, run):
         out = run.root / "runs/smoke/results"
@@ -964,6 +1008,119 @@ class TestEvalRunForecast:
                 "meta"
             ].task
         assert tasks == {"risk": "risk", "forecast": "forecast"}
+
+    def test_each_forecast_seed_warm_starts_from_its_own_risk_checkpoint(
+        self, monkeypatch, tmp_path
+    ):
+        import eval.run as run_module
+
+        seen = []
+
+        def fake_fit(config, data, seed, run_dir, **kwargs):
+            seen.append(
+                (run_dir, config.train.init_backbone_from, kwargs["eligibility_floor"])
+            )
+            return FitResult(run_dir + "/best.pt", [], 0.0, None)
+
+        monkeypatch.setattr(run_module, "fit", fake_fit)
+        cfg = DignityConfig.from_yaml(str(ROOT / "config/smoke.yaml"))
+        cfg.eval.n_train_seeds = 2
+        cfg.model.task = "forecast"
+        _train_seeds(cfg, SimpleNamespace(), "tuning", ["a.pt", "b.pt"], [1.2, 1.4])
+        assert [Path(d).name for d, _, _ in seen] == ["train_seed_42", "train_seed_43"]
+        assert [w for _, w, _ in seen] == ["a.pt", "b.pt"]
+        assert [f for _, _, f in seen] == [1.2, 1.4]
+
+        seen.clear()
+        _train_seeds(cfg, SimpleNamespace(), "tuning")
+        assert [(w, f) for _, w, f in seen] == [(None, None), (None, None)]
+        assert cfg.train.init_backbone_from is None  # the caller's config is intact
+
+    def test_the_smoke_run_warm_starts_forecast_and_floors_it_at_the_risk_score(
+        self, run
+    ):
+        horizon = DignityConfig.from_yaml(str(ROOT / "config/smoke.yaml")).model.horizon
+        data = run.data
+        floor = lift_upper(
+            data.val.y_forecast,
+            risk_score_forecast(run.risk[1][0], horizon),
+            data.val.forecast_mask,
+        )
+        by_task = {task: (warm, f) for task, warm, f in run.fits}
+        warm, got_floor = by_task["forecast"]
+        assert warm.replace("\\", "/").endswith(
+            "eval_tuning/risk/train_seed_42/best.pt"
+        )
+        assert got_floor == pytest.approx(1.0 if floor is None else floor)
+        assert by_task["policy"][0] == warm
+
+    def test_forecast_results_carry_the_kept_epoch_of_every_seed(self, run):
+        r = json.loads((run.root / "runs/smoke/results/forecast.json").read_text())
+        spread = r["metrics"]["seed_spread"]
+        for key in ("best_epoch", "val_lift_upper", "risk_val_lift_upper"):
+            assert set(spread[key]) == {"values", "mean", "std"}
+            assert len(spread[key]["values"]) == 1
+        ckpt = load_checkpoint(
+            str(
+                run.root / "runs/smoke/train/eval_tuning/forecast/train_seed_42/best.pt"
+            )
+        )
+        assert spread["best_epoch"]["values"][0] == ckpt["epoch"]
+        assert r["metrics"]["forecast_eligibility"] is False  # the smoke preset
+
+    def test_a_cold_forecast_fit_is_what_forecast_warm_start_false_asks_for(self, run):
+        by_task = {task: warm for task, warm, _ in run.cold_fits}
+        assert by_task["forecast"] is None
+        assert (
+            by_task["policy"]
+            .replace("\\", "/")
+            .endswith("eval_tuning/risk/train_seed_42/best.pt")
+        )
+
+    def _raise_for_forecast(self, monkeypatch):
+        import eval.run as run_module
+
+        real_fit = run_module.fit
+
+        def wrapped(config, *args, **kwargs):
+            if config.model.task == "forecast":
+                raise ForecastNotEligibleError(
+                    "rd", 42, "no forecast epoch beat the eligibility floor"
+                )
+            return real_fit(config, *args, **kwargs)
+
+        monkeypatch.setattr(run_module, "fit", wrapped)
+
+    def test_a_raised_forecast_fit_is_recorded_and_policy_still_runs(
+        self, monkeypatch, tmp_path
+    ):
+        monkeypatch.chdir(tmp_path)
+        self._raise_for_forecast(monkeypatch)
+        status = main(["--smoke", "--seed", "tuning", "--tasks", "forecast,policy"])
+        assert status == 1
+        out = tmp_path / "runs/smoke/results"
+        r = json.loads((out / "forecast.json").read_text())
+        assert r["metrics"] == {
+            "raised": {
+                "error": "ForecastNotEligibleError",
+                "message": "no forecast epoch beat the eligibility floor",
+                "train_seed": 42,
+            }
+        }
+        assert r["baselines"] == {}
+        assert (out / "policy.json").exists()
+        assert not (tmp_path / "runs/smoke/img/forecast_pr_auc_by_horizon.png").exists()
+
+    def test_a_recorded_raise_prints_the_stable_line_the_runner_never_retries(
+        self, monkeypatch, tmp_path, capsys
+    ):
+        monkeypatch.chdir(tmp_path)
+        self._raise_for_forecast(monkeypatch)
+        assert main(["--smoke", "--seed", "tuning", "--tasks", "forecast"]) == 1
+        lines = capsys.readouterr().out.splitlines()
+        stable = "TRAINING_RAISED ForecastNotEligibleError task=forecast train_seed=42"
+        assert lines.count(stable) == 1
+        assert "forecast raised: no forecast epoch beat the eligibility floor" in lines
 
 
 class TestPolicyMetrics:
@@ -1240,7 +1397,15 @@ class TestEvalRunSeedPairing:
 
         risk_val = [risk(val, k) for k in range(self.K)]
         risk_test = [risk(test, k) for k in range(self.K)]
-        runs = [(42 + k, SimpleNamespace(tag=k)) for k in range(self.K)]
+        runs = [
+            (
+                42 + k,
+                SimpleNamespace(
+                    tag=k, best_path=f"risk{k}.pt", best_epoch=k + 1, best_metric=1.0
+                ),
+            )
+            for k in range(self.K)
+        ]
         monkeypatch.setattr(run_module, "_train_seeds", lambda *a, **kw: runs)
         monkeypatch.setattr(
             run_module,

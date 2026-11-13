@@ -31,6 +31,7 @@ from eval.metrics import (
     detection_gain,
     forecast_metrics,
     lead_times,
+    lift_upper,
     model_gate,
     paired_forecast_gain,
     policy_metrics,
@@ -48,7 +49,7 @@ from eval.plots import (
 from models.head.policy import ACTIONS, cost_matrix, decide_actions
 from train.checkpoint import build_model_from_meta, load_checkpoint
 from train.engine import predict
-from train.loop import FitResult, fit, prepare_data
+from train.loop import FitResult, ForecastNotEligibleError, fit, prepare_data
 
 _ROOT = Path(__file__).resolve().parent.parent
 PRIVACY_TEMPLATE = _ROOT / "config" / "train_risk.yaml"
@@ -75,11 +76,13 @@ def _train_seeds(
     data,
     seed_name: str,
     init_backbones: list[str] | None = None,
+    eligibility_floors: list[float] | None = None,
 ) -> list[tuple[int, FitResult]]:
     """Train one model per training seed; model init is independent of the data.
 
     The task is part of the run directory, so tasks never share a ``best.pt``.
-    ``init_backbones[k]`` warm-starts the k-th seed's backbone (policy only).
+    ``init_backbones[k]`` warm-starts the k-th seed's backbone (policy and
+    forecast); ``eligibility_floors[k]`` is the k-th seed's forecast floor.
     """
     runs = []
     for k in range(config.eval.n_train_seeds):
@@ -90,7 +93,10 @@ def _train_seeds(
         if init_backbones is not None:
             seed_config = copy.deepcopy(config)
             seed_config.train.init_backbone_from = init_backbones[k]
-        runs.append((s, fit(seed_config, data, s, str(run_dir))))
+        floor = None if eligibility_floors is None else eligibility_floors[k]
+        runs.append(
+            (s, fit(seed_config, data, s, str(run_dir), eligibility_floor=floor))
+        )
     return runs
 
 
@@ -169,6 +175,15 @@ def _fmt_ci(entry: dict) -> str:
     if low is None or high is None:
         return f"{_fmt(entry)} [n/a]"
     return f"{_fmt(entry)} [{low:.4f}, {high:.4f}]"
+
+
+def _raised_payload(error: RuntimeError) -> dict:
+    """The ``metrics.raised`` record of a fit that raised; it names the seed."""
+    return {
+        "error": type(error).__name__,
+        "message": str(error),
+        "train_seed": error.seed,
+    }
 
 
 def _spread(values: list[float | None]) -> dict:
@@ -373,8 +388,21 @@ def run_forecast(
     n_boot = config.eval.n_bootstrap
     horizon = config.model.horizon
     forecast_config = _task_config(config, "forecast")
-    runs = _train_seeds(forecast_config, data, seed_name)
-    _, risk_val, risk_test = risk
+    risk_runs, risk_val, risk_test = risk
+    # each seed must beat its own risk score on val; no signal at all is 1.0
+    floors = [
+        lift_upper(
+            data.val.y_forecast, risk_score_forecast(v, horizon), data.val.forecast_mask
+        )
+        for v in risk_val
+    ]
+    floors = [1.0 if f is None else f for f in floors]
+    init = (
+        [r.best_path for _, r in risk_runs]
+        if forecast_config.train.forecast_warm_start
+        else None
+    )
+    runs = _train_seeds(forecast_config, data, seed_name, init, floors)
 
     model_sides, val_scores, test_scores = [], [], []
     for k, (_, result) in enumerate(runs):
@@ -401,7 +429,11 @@ def run_forecast(
         "train_seeds": [s for s, _ in runs],
         "mean_pr_auc": _spread([_mean_pr_auc(m) for m in model_sides]),
         "lead_time_median": _spread([m["lead_time"]["median"] for m in model_sides]),
+        "best_epoch": _spread([r.best_epoch for _, r in runs]),
+        "val_lift_upper": _spread([r.best_metric for _, r in runs]),
+        "risk_val_lift_upper": _spread(floors),
     }
+    metrics["forecast_eligibility"] = forecast_config.train.forecast_eligibility
     # seed-matched gain: training seed k's forecast against seed k's risk score
     metrics["gain_by_horizon"] = paired_forecast_gain(
         data.test.y_forecast,
@@ -624,13 +656,24 @@ def main(argv: list[str] | None = None) -> int:
     risk = _fit_risk(config, data, seed_name)
     if "risk" in tasks:
         run_risk(config, seed_name, run_ctx, df, data, risk)
+    status = 0
     if "forecast" in tasks:
-        run_forecast(config, seed_name, data, risk, run_ctx)
+        try:
+            run_forecast(config, seed_name, data, risk, run_ctx)
+        except ForecastNotEligibleError as err:
+            _write_result(
+                config, "forecast", {"raised": _raised_payload(err)}, {}, run_ctx
+            )
+            print(f"forecast raised: {err}")
+            print(
+                f"TRAINING_RAISED {type(err).__name__} task=forecast train_seed={err.seed}"
+            )
+            status = 1
     if "policy" in tasks:
         run_policy(config, seed_name, data, risk, run_ctx)
     if args.privacy_sweep:
         run_privacy_sweep(config, run_ctx)
-    return 0
+    return status
 
 
 if __name__ == "__main__":

@@ -45,9 +45,9 @@ format that export no longer supports (DGNTY-3, DGNTY-35). No shipped config wri
 ## Commands
 
 ```bash
-# Tests (1549 collected: test_core 85, test_data 169, test_models 23, test_privacy 42,
+# Tests (1555 collected: test_core 85, test_data 169, test_models 23, test_privacy 42,
 # test_operator 4, test_docs 769, test_train 88, test_checkpoint 3, test_export 9,
-# test_calibration 3, test_labels 7, test_gates 74, test_ci 4, test_eval 108,
+# test_calibration 3, test_labels 7, test_gates 74, test_ci 4, test_eval 114,
 # test_colab_eval 13, test_scripts 19, test_release 129 — one skips without CUDA)
 # every test is limited to 300 s (pytest.ini; pytest-timeout), except the README quickstart
 # test, which carries its own 900 s limit (three subprocesses, each capped at 300 s)
@@ -184,9 +184,12 @@ a mechanism, it needs a test in `tests/test_privacy.py` or CI's 100% gate on tha
 - **Forecast is early warning, and `eval.run` fits risk for it.** Forecast windows with an
   anomaly active at their last row are masked out of the loss, the metrics and lead time
   (`forecast_mask`). `--tasks forecast` and `--tasks policy` also fit risk once per training
-  seed (their baseline is today's risk score, and each policy seed warm-starts its backbone
-  from the same seed's risk `best.pt`), but write `risk.json` only when `risk`
-  is in `--tasks`. Each task trains under its own `eval_<seed>/<task>/train_seed_<s>/` directory.
+  seed (their baseline is today's risk score, and each forecast and policy seed warm-starts its
+  backbone from the same seed's risk `best.pt`; a forecast epoch is kept only when its val
+  `lift_upper` beats the same seed's risk score, else `fit` raises `ForecastNotEligibleError`
+  (`train.forecast_eligibility: false` only in `config/smoke.yaml`), which `eval.run` records
+  as `metrics.raised`, prints as a `TRAINING_RAISED` line and exits 1 on), but write `risk.json`
+  only when `risk` is in `--tasks`. Each task trains under its own `eval_<seed>/<task>/train_seed_<s>/` directory.
 - **Timestamps are milliseconds everywhere.** `CryptoSource._normalize_timestamp` auto-detects
   seconds (`< 2e10`), ms (`2e10–3e13`), ns (`> 3e13`), and datetime strings, normalizing all to ms
   to match CCXT's native format. Any new data source must emit ms or a join against crypto data
