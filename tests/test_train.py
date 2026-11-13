@@ -693,14 +693,24 @@ class TestFitForecast:
         assert load_checkpoint(r.best_path)["epoch"] == 2
         assert r.best_epoch == 2
 
-    def test_without_a_risk_checkpoint_the_floor_is_chance_lift(
+    def test_without_a_risk_checkpoint_chance_lift_is_not_eligible(
         self, tiny_split, forecast_fit_config, tmp_path, monkeypatch
     ):
         forecast_fit_config.train.forecast_eligibility = True
-        _script_lift(monkeypatch, [0.9, 1.0, 1.1])
+        _script_lift(monkeypatch, [1.0, 1.0, 1.0])
+        # 1.0 is chance, not above the default floor of 1.0
+        with pytest.raises(ForecastNotEligibleError):
+            fit(forecast_fit_config, tiny_split, seed=0, run_dir=str(tmp_path))
+        assert not (tmp_path / "best.pt").exists()
+
+    def test_without_a_risk_checkpoint_the_first_epoch_above_chance_is_kept(
+        self, tiny_split, forecast_fit_config, tmp_path, monkeypatch
+    ):
+        forecast_fit_config.train.forecast_eligibility = True
+        forecast_fit_config.train.epochs = 2
+        _script_lift(monkeypatch, [0.9, 1.05])
         r = fit(forecast_fit_config, tiny_split, seed=0, run_dir=str(tmp_path))
-        # 1.0 is not above 1.0
-        assert r.best_epoch == 3
+        assert r.best_epoch == 2
 
     def test_fit_fails_loudly_when_no_epoch_is_eligible(
         self, tiny_split, forecast_fit_config, tmp_path, monkeypatch
