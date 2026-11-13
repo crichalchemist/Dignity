@@ -37,11 +37,26 @@ def _load_script():
 
 class TestColabEvalScript:
     def _run(
-        self, monkeypatch, *, clone_exists, missing_yaml=False, eval_exit=0, events=None
+        self,
+        monkeypatch,
+        *,
+        clone_exists,
+        missing_yaml=False,
+        eval_exit=0,
+        events=None,
+        data_seed=None,
+        rehearsal=None,
+        rehearse_exit=0,
     ):
         events = [] if events is None else events
         monkeypatch.setenv("DIGNITY_SHA", "abc123")
-        monkeypatch.setenv("DIGNITY_SEED", "tuning")
+        if rehearsal is None:
+            monkeypatch.setenv("DIGNITY_SEED", "tuning")
+        else:
+            monkeypatch.delenv("DIGNITY_SEED", raising=False)
+            monkeypatch.setenv("DIGNITY_REHEARSAL", rehearsal)
+        if data_seed is not None:
+            monkeypatch.setenv("DIGNITY_DATA_SEED", data_seed)
 
         def fake_run(cmd, **kwargs):
             events.append(("run", list(cmd), kwargs))
@@ -56,6 +71,14 @@ class TestColabEvalScript:
         fake_module = types.ModuleType("eval.run")
         fake_module.main = fake_main
         monkeypatch.setitem(sys.modules, "eval.run", fake_module)
+
+        def fake_rehearse(argv):
+            events.append(("rehearse", argv))
+            return rehearse_exit
+
+        fake_rehearse_module = types.ModuleType("scripts.rehearse")
+        fake_rehearse_module.main = fake_rehearse
+        monkeypatch.setitem(sys.modules, "scripts.rehearse", fake_rehearse_module)
         script = _load_script()
         monkeypatch.setattr(script.subprocess, "run", fake_run)
         monkeypatch.setattr(script.os.path, "isdir", lambda p: clone_exists)
@@ -133,7 +156,7 @@ class TestColabEvalScript:
 
     def test_results_on_disk_are_tarred_even_when_the_eval_fails(self, monkeypatch):
         # the sweep runs last; its failure must not lose the three task results
-        for eval_exit, error in (("raise", RuntimeError), (1, AssertionError)):
+        for eval_exit, error in (("raise", RuntimeError), (2, AssertionError)):
             events = []
             with pytest.raises(error):
                 self._run(
@@ -141,6 +164,69 @@ class TestColabEvalScript:
                 )
             assert events[-1][0] == "run"
             assert events[-1][1][:2] == ["tar", "-czf"]
+
+    def test_data_seed_is_forwarded_and_names_the_tarball(self, monkeypatch):
+        events = self._run(monkeypatch, clone_exists=True, data_seed="1004")
+        main = next(e for e in events if e[0] == "main")
+        assert main[1] == [
+            "--config",
+            "config/synthetic_hard.yaml",
+            "--seed",
+            "tuning",
+            "--data-seed",
+            "1004",
+            "--tasks",
+            "risk,forecast,policy",
+            "--privacy-sweep",
+        ]
+        assert events[-1][1] == [
+            "tar",
+            "-czf",
+            "/content/dignity_results_tuning_1004.tar.gz",
+            "results/v1.0",
+            "docs/img",
+        ]
+
+    def test_a_rehearsal_runs_rehearse_instead_of_the_final_command_and_tars_its_runs(
+        self, monkeypatch
+    ):
+        events = self._run(
+            monkeypatch,
+            clone_exists=True,
+            rehearsal="--stage variants --variant cold --seeds 1000,1001",
+        )
+        assert (
+            "rehearse",
+            ["--stage", "variants", "--variant", "cold", "--seeds", "1000,1001"],
+        ) in events
+        assert not any(e[0] == "main" for e in events)
+        assert events[-1][1] == [
+            "tar",
+            "-czf",
+            "/content/dignity_rehearsal.tar.gz",
+            "runs/rehearsal",
+        ]
+
+    def test_a_rehearsal_that_exits_nonzero_still_tars_and_fails_loud(
+        self, monkeypatch
+    ):
+        events = []
+        with pytest.raises(AssertionError):
+            self._run(
+                monkeypatch,
+                clone_exists=True,
+                rehearsal="--stage variants",
+                rehearse_exit=2,
+                events=events,
+            )
+        assert events[-1][1][:2] == ["tar", "-czf"]
+
+    def test_a_recorded_training_raise_is_reported_and_does_not_hide_the_tarball(
+        self, monkeypatch, capsys
+    ):
+        events = self._run(monkeypatch, clone_exists=True, eval_exit=1)
+        assert "EVAL_EXIT=1" in capsys.readouterr().out
+        assert events[-1][1][:2] == ["tar", "-czf"]
 
     def test_stack_versions_are_printed_before_the_eval(self, monkeypatch, capsys):
         events = self._run(monkeypatch, clone_exists=True)
