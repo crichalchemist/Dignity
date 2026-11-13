@@ -1369,6 +1369,64 @@ class TestEvalRunSeedPairing:
         out[:, -1] = last
         return out.astype(np.float32)
 
+    def test_each_forecast_seed_starts_from_its_own_risk_checkpoint_and_floor(
+        self, monkeypatch, tmp_path
+    ):
+        import eval.run as run_module
+
+        config = self._config(tmp_path)
+        val, test = self._windows(8), self._windows(6)
+        data = SimpleNamespace(val=val, test=test)
+        assert config.train.forecast_warm_start
+
+        def risk(split, k):
+            # seed k's risk score gets noisier with k, so the floors differ
+            right = 0.1 + 0.8 * split.y_forecast[:, 2]
+            noise = np.random.default_rng(k).random(len(right)) * 0.3 * k
+            return right + noise
+
+        risk_val = [risk(val, k) for k in range(self.K)]
+        risk_test = [risk(test, k) for k in range(self.K)]
+        risk_runs = [
+            (42 + k, SimpleNamespace(best_path=f"risk{k}.pt")) for k in range(self.K)
+        ]
+        floors = [
+            lift_upper(
+                val.y_forecast,
+                risk_score_forecast(v, self.H),
+                val.forecast_mask,
+            )
+            for v in risk_val
+        ]
+        floors = [1.0 if f is None else f for f in floors]
+        assert len(set(floors)) > 1  # seed 0's floor is not every seed's floor
+
+        seen = {}
+        fit_runs = [
+            (
+                42 + k,
+                SimpleNamespace(tag=k, best_epoch=1, best_metric=1.0),
+            )
+            for k in range(self.K)
+        ]
+
+        def fake_train_seeds(cfg, d, seed_name, init=None, floors=None):
+            seen["init"], seen["floors"] = init, floors
+            return fit_runs
+
+        monkeypatch.setattr(run_module, "_train_seeds", fake_train_seeds)
+        monkeypatch.setattr(
+            run_module,
+            "_predict",
+            lambda cfg, res, X: {"score": self._scores(val, 0.9, 0.1)[: len(X)]},
+        )
+        run_module.run_forecast(
+            config, "tuning", data, (risk_runs, risk_val, risk_test)
+        )
+
+        assert seen["init"] == [f"risk{k}.pt" for k in range(self.K)]
+        assert seen["floors"] == pytest.approx(floors)
+
     def test_each_forecast_seed_is_judged_against_its_own_risk_score_and_threshold(
         self, monkeypatch, tmp_path
     ):
