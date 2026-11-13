@@ -171,6 +171,7 @@ class TrainConfig:
 
 TUNING_SEEDS: tuple[int, ...] = tuple(range(1000, 1010))
 SELECTION_SEEDS: tuple[int, ...] = tuple(range(1000, 1008))
+SPENT_EVAL_SEEDS: tuple[int, ...] = ()
 CONFIRMATION_SEEDS: tuple[int, ...] = (1008, 1009)
 
 
@@ -187,6 +188,13 @@ class EvalConfig:
     )
     out_dir: str = "results/v1.0"
     img_dir: str = "docs/img"
+
+    def __post_init__(self):
+        if self.eval_seed in SPENT_EVAL_SEEDS:
+            raise ValueError(
+                f"eval_seed {self.eval_seed} is spent: a first evaluation already "
+                "ran on it"
+            )
 
 
 _MECHANISMS = ("laplace", "generalize")
