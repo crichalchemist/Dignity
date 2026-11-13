@@ -355,10 +355,10 @@ review-likely windows keep `review`; the others go to their next-best action,
 
 ## Training and evaluation
 
-`train/loop.py::fit(config, data, seed, run_dir, resume_from=None)` is the one
+`train/loop.py::fit(config, data, seed, run_dir, resume_from=None, eligibility_floor=None)` is the one
 training loop; `dignity-train` (`train/cli.py::main`), the notebook and `eval.run`
 all call it. It returns a `train.loop.FitResult`: `best_path`, `history`,
-`best_metric` and `meta`.
+`best_metric`, `meta` and `best_epoch`.
 
 - **Optimizer.** AdamW with a cosine schedule over `train.epochs`; gradient clipping
   at `train.gradient_clip`. `train.use_amp` only takes effect on CUDA.
@@ -370,8 +370,15 @@ all call it. It returns a `train.loop.FitResult`: `best_path`, `history`,
 - **Selection.** `best.pt` is the epoch with the highest validation value of
   `train.select_metric` (`pr_auc`, `auroc` or `recall_at_1pct_fpr`), on a strict
   improvement (`tests/test_train.py::TestFit::test_best_checkpoint_is_the_epoch_with_highest_val_pr_auc`).
-  For forecast the validation metric is the mean over the horizons that hold both
-  classes. Policy ignores `train.select_metric`, `train.pos_weight` and the chance
+  Forecast ignores `train.select_metric`: it selects on validation `lift_upper`
+  (`eval.metrics.lift_upper`), the mean over the upper half of the horizons of
+  PR-AUC divided by prevalence on the masked validation windows. With
+  `train.forecast_eligibility` an epoch is kept only when its `lift_upper` is
+  above the floor (1.0, chance, unless the caller passes a floor). Patience
+  counts only after the first kept epoch, and `fit` raises
+  `train.loop.ForecastNotEligibleError` when no epoch is kept
+  (`tests/test_train.py::TestFitForecast::test_an_epoch_that_does_not_beat_the_risk_score_on_val_is_never_kept`).
+  Policy ignores `train.select_metric`, `train.pos_weight` and the chance
   guard: it selects on validation `neg_cost`, the negative mean cost of the capped
   decisions.
 - **Chance guard.** At `train.guard_epochs`, if validation AUROC is below
