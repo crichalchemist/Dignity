@@ -1,9 +1,14 @@
 """scripts/refresh_doc_numbers.py: the one place that rewrites quoted numbers."""
 
+import importlib.util
 import json
+from dataclasses import asdict
+from pathlib import Path
 
 import pytest
+import yaml
 
+from core.config import DignityConfig
 from tests.test_docs import NUM_RE, _refresh, check_numbers
 
 refresh = _refresh.refresh
@@ -190,3 +195,118 @@ class TestRefreshDocNumbers:
         with pytest.raises(ValueError) as error:
             refresh(md, tmp_path)
         assert "m.nope" in str(error.value) and "m.nada" in str(error.value)
+
+
+REHEARSE = Path(__file__).resolve().parent.parent / "scripts" / "rehearse.py"
+
+
+def _load_rehearse():
+    spec = importlib.util.spec_from_file_location("rehearse", REHEARSE)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _no_generation(monkeypatch):
+    import eval.run
+
+    def boom(*a, **k):
+        raise AssertionError("data was generated for a refused rehearsal")
+
+    monkeypatch.setattr(eval.run, "main", boom)
+
+
+def _rehearse(monkeypatch, tmp_path):
+    module = _load_rehearse()
+    monkeypatch.setattr(module, "ROOT", tmp_path)
+    return module
+
+
+class TestRehearse:
+    @pytest.mark.parametrize("seeds", ["1008", "2026", "2027", "999"])
+    def test_a_seed_outside_the_selection_seeds_is_refused_before_any_data_is_generated(  # noqa: E501
+        self, monkeypatch, tmp_path, seeds
+    ):
+        rehearse = _rehearse(monkeypatch, tmp_path)
+        _no_generation(monkeypatch)
+        argv = ["--stage", "variants", "--variant", "base", "--seeds", seeds]
+        assert rehearse.main(argv) == 2
+        assert not (tmp_path / "runs" / "rehearsal").exists()
+
+    @pytest.mark.parametrize("seeds", ["1000,1000", "1000,1001,1000"])
+    def test_duplicate_seeds_are_refused_before_any_data_is_generated(
+        self, monkeypatch, tmp_path, seeds
+    ):
+        rehearse = _rehearse(monkeypatch, tmp_path)
+        _no_generation(monkeypatch)
+        argv = ["--stage", "variants", "--variant", "base", "--seeds", seeds]
+        assert rehearse.main(argv) == 2
+        assert not (tmp_path / "runs" / "rehearsal").exists()
+
+    def test_an_unknown_variant_exits_2(self, monkeypatch, tmp_path):
+        rehearse = _rehearse(monkeypatch, tmp_path)
+        _no_generation(monkeypatch)
+        argv = ["--stage", "variants", "--variant", "wide", "--seeds", "1000"]
+        assert rehearse.main(argv) == 2
+        assert not (tmp_path / "runs" / "rehearsal").exists()
+
+    def test_the_base_variant_has_no_overrides(self):
+        assert _load_rehearse().VARIANTS["base"] == {}
+
+    def test_every_write_lands_under_runs_rehearsal(self, monkeypatch, tmp_path):
+        rehearse = _rehearse(monkeypatch, tmp_path)
+        path = rehearse.write_seed_config("variants", "cap10", 1000)
+        root = tmp_path / "runs" / "rehearsal"
+        assert root in path.parents
+        folder = rehearse.seed_dir("variants", "cap10", 1000)
+        assert folder == root / "variants" / "cap10" / "seed_1000"
+        written = yaml.safe_load(path.read_text())
+        assert written["eval"]["out_dir"] == str(folder / "results")
+        assert written["eval"]["img_dir"] == str(folder / "img")
+        assert written["train"]["checkpoint_dir"] == str(folder / "ckpt")
+        for key in (
+            written["eval"]["out_dir"],
+            written["eval"]["img_dir"],
+            written["train"]["checkpoint_dir"],
+        ):
+            assert not key.startswith(("results/", "docs/img", "checkpoints"))
+        files = {p for p in tmp_path.rglob("*") if p.is_file()}
+        assert all(root in p.parents for p in files)
+
+    def test_each_variant_changes_at_most_one_forecast_or_shared_factor_and_one_policy_step(  # noqa: E501
+        self,
+    ):
+        variants = _load_rehearse().VARIANTS
+        assert set(variants) == {"base", "cold", "cap10", "cap3", "narrow", "lr1e-3"}
+        allowed = {
+            "train.forecast_warm_start",
+            "train.forecast_pos_weight_cap",
+            "model.hidden_size",
+            "train.lr",
+        }
+        for name, overrides in variants.items():
+            factors = set(overrides) - {"policy.multiplier_lr"}
+            assert len(factors) <= 1, name
+            assert factors <= allowed, name
+
+    def test_the_rehearsal_config_is_the_hard_preset_plus_the_overrides_only(
+        self, monkeypatch, tmp_path
+    ):
+        rehearse = _rehearse(monkeypatch, tmp_path)
+        preset = DignityConfig.from_yaml(str(rehearse.PRESET))
+
+        def written(variant):
+            path = rehearse.write_seed_config("variants", variant, 1000)
+            return DignityConfig.from_yaml(str(path))
+
+        cold = written("cold")
+        assert cold.data == preset.data
+        assert cold.policy.multiplier_lr == 0.05
+        assert cold.train.forecast_warm_start is False
+        base = written("base")
+        for block in ("model", "train", "policy"):
+            a, b = asdict(getattr(base, block)), asdict(getattr(preset, block))
+            if block == "train":
+                a.pop("checkpoint_dir"), b.pop("checkpoint_dir")
+            assert a == b, block
+        assert written("cap3").policy.multiplier_lr == preset.policy.multiplier_lr
