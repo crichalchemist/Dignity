@@ -45,9 +45,9 @@ format that export no longer supports (DGNTY-3, DGNTY-35). No shipped config wri
 ## Commands
 
 ```bash
-# Tests (1590 collected: test_core 87, test_data 169, test_models 23, test_privacy 42,
+# Tests (1596 collected: test_core 87, test_data 169, test_models 23, test_privacy 42,
 # test_operator 4, test_docs 769, test_train 114, test_checkpoint 4, test_export 9,
-# test_calibration 3, test_labels 7, test_gates 74, test_ci 4, test_eval 120,
+# test_calibration 3, test_labels 7, test_gates 74, test_ci 4, test_eval 126,
 # test_colab_eval 13, test_scripts 19, test_release 129 — one skips without CUDA)
 # every test is limited to 300 s (pytest.ini; pytest-timeout), except the README quickstart
 # test, which carries its own 900 s limit (three subprocesses, each capped at 300 s)
@@ -112,7 +112,7 @@ train/engine.py                     →  train_epoch / predict
 train/loop.py fit                  →  shared loop (cli, notebook, eval.run); best.pt on val PR-AUC (policy: val neg_cost under the review cap; forecast: val lift_upper above the eligibility floor)
 train/checkpoint.py                 →  self-describing checkpoints (FORMAT_VERSION 2) / build_model_from_meta
 train/losses.py                     →  risk_loss, forecast_loss (masked per-horizon BCE),
-                                       expected_cost_loss (policy: softmax-weighted cost table)
+                                       expected_cost_loss (policy: softmax-weighted cost table + review multiplier)
 eval/{metrics,baselines,plots,run,privacy_sweep}.py → risk.json, forecast.json, policy.json (+ privacy.json with --privacy-sweep) + charts; CIs bootstrap blocks, not windows
 export/to_onnx.py                   →  export + verify + benchmark
 ```
@@ -181,6 +181,13 @@ a mechanism, it needs a test in `tests/test_privacy.py` or CI's 100% gate on tha
   the key only for `task: policy` and `task: forecast`. Policy selects `best.pt` on val `neg_cost` under the review
   cap and ignores `select_metric`, `pos_weight` and the chance guard; resuming across metrics
   raises `ValueError`.
+  The policy loss carries a review multiplier (`policy.multiplier_lr`, `policy.multiplier_floor`,
+  updated on train batches only, stored as `loss_state` in the checkpoint and in
+  `FitResult.loss_state`); `fit` records `val_review_share` per epoch and raises
+  `train.loop.PolicyCollapseError` after `policy.collapse_epochs` epochs above
+  `policy.collapse_review_factor` times the budget (a resume counts only its own epochs but
+  refuses a run directory whose history already holds that streak), and `eval.run` records the
+  raise in `policy.json`; `best.pt` selection is unchanged.
 - **Forecast is early warning, and `eval.run` fits risk for it.** Forecast windows with an
   anomaly active at their last row are masked out of the loss, the metrics and lead time
   (`forecast_mask`). `--tasks forecast` and `--tasks policy` also fit risk once per training

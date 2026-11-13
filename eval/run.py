@@ -49,7 +49,13 @@ from eval.plots import (
 from models.head.policy import ACTIONS, cost_matrix, decide_actions
 from train.checkpoint import build_model_from_meta, load_checkpoint
 from train.engine import predict
-from train.loop import FitResult, ForecastNotEligibleError, fit, prepare_data
+from train.loop import (
+    FitResult,
+    ForecastNotEligibleError,
+    PolicyCollapseError,
+    fit,
+    prepare_data,
+)
 
 _ROOT = Path(__file__).resolve().parent.parent
 PRIVACY_TEMPLATE = _ROOT / "config" / "train_risk.yaml"
@@ -554,6 +560,8 @@ def run_policy(
             [m["review_rate"]["value"] for m in baseline_sides]
         ),
         "uncapped_review_share": _spread(uncapped),
+        "review_multiplier": _spread([r.loss_state["multiplier"] for _, r in runs]),
+        "val_neg_cost": _spread([r.best_metric for _, r in runs]),
     }
     baselines = {"threshold_policy": baseline_sides[0]}
 
@@ -673,7 +681,19 @@ def main(argv: list[str] | None = None) -> int:
             )
             status = 1
     if "policy" in tasks:
-        run_policy(config, seed_name, data, risk, run_ctx)
+        try:
+            run_policy(config, seed_name, data, risk, run_ctx)
+        except PolicyCollapseError as err:
+            _write_result(
+                config, "policy", {"raised": _raised_payload(err)}, {}, run_ctx
+            )
+            # a raised task has no chart; an earlier run's must not stand in for it
+            (Path(config.eval.img_dir) / "policy_cost.png").unlink(missing_ok=True)
+            print(f"policy raised: {err}")
+            print(
+                f"TRAINING_RAISED {type(err).__name__} task=policy train_seed={err.seed}"
+            )
+            status = 1
     if args.privacy_sweep:
         run_privacy_sweep(config, run_ctx)
     return status
