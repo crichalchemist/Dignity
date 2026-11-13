@@ -201,6 +201,78 @@ class TestExpectedCostLoss:
         z = torch.tensor([[50.0, 0.0, 0.0], [0.0, 0.0, 50.0]])  # allow, block
         assert loss(z, {"y": torch.tensor([0, 1])}).item() == pytest.approx(0.25)
 
+    def test_without_a_budget_the_multiplier_never_moves(self):
+        loss = expected_cost_loss(torch.from_numpy(cost_matrix(PolicyConfig().costs)))
+        z = torch.tensor([[0.0, 5.0, 0.0]])
+        for _ in range(5):
+            loss(z, {"y": torch.tensor([0])})
+        assert loss.multiplier == 0.0 and loss.state_dict()["multiplier"] == 0.0
+
+    def test_the_multiplier_rises_while_the_head_reviews_more_than_the_budget(self):
+        C = torch.from_numpy(cost_matrix(PolicyConfig().costs))
+        loss = expected_cost_loss(C, review_budget=0.05, multiplier_lr=0.1)
+        z = torch.tensor([[0.0, 5.0, 0.0]])
+        p1 = torch.softmax(z, -1)[0, 1].item()
+        loss(z, {"y": torch.tensor([0])})
+        ema = 0.95 * 0.05 + 0.05 * p1  # share_ema starts at the budget
+        assert loss.share_ema == pytest.approx(ema)
+        assert loss.multiplier == pytest.approx(0.1 * (ema - 0.05))
+        assert loss.multiplier > 0
+
+    def test_the_multiplier_is_bounded_below_by_the_floor(self):
+        C = torch.from_numpy(cost_matrix(PolicyConfig().costs))
+        loss = expected_cost_loss(C, review_budget=0.5, multiplier_lr=1.0)
+        z = torch.tensor([[50.0, 0.0, 0.0]])  # never reviews, far under the budget
+        for _ in range(50):
+            loss(z, {"y": torch.tensor([0])})
+        assert loss.multiplier == -0.5
+
+    def test_the_reported_loss_is_the_plain_cost_while_the_gradient_feels_the_multiplier(
+        self,
+    ):
+        C = torch.from_numpy(cost_matrix(PolicyConfig().costs))
+        batch = {"y": torch.tensor([0, 1])}
+        plain = expected_cost_loss(C)
+        budgeted = expected_cost_loss(C, review_budget=0.05)
+        budgeted.multiplier = 2.0
+        grads, values = [], []
+        for loss in (plain, budgeted):
+            z = torch.zeros(2, 3, requires_grad=True)
+            out = loss(z, batch)
+            out.backward()
+            values.append(out.item())
+            grads.append(z.grad[:, 1].clone())
+        assert values[1] == pytest.approx(values[0])  # train_loss stays comparable
+        assert (grads[1] > grads[0]).all()  # review is penalised: its logit goes down
+
+    def test_a_head_stuck_on_review_is_pushed_off_it(self):
+        # 30% anomalies: review (cost 1) is the plain optimum, the attractor
+        C = torch.from_numpy(cost_matrix(PolicyConfig().costs))
+        batch = {"y": torch.tensor([1] * 30 + [0] * 70)}
+
+        def train(budget):
+            logits = torch.nn.Parameter(torch.tensor([[0.0, 6.0, 0.0]]))
+            opt = torch.optim.Adam([logits], lr=0.1)
+            loss = expected_cost_loss(C, review_budget=budget, multiplier_lr=0.1)
+            for _ in range(400):
+                opt.zero_grad()
+                loss(logits.expand(100, 3), batch).backward()
+                opt.step()
+            return loss, torch.softmax(logits, -1)[0, 1].item()
+
+        _, control_share = train(None)
+        controlled, _ = train(0.05)
+        assert control_share > 0.99  # without a budget it stays on review
+        assert controlled.share_ema < 0.5 and controlled.multiplier > 0
+
+    def test_state_round_trips_so_a_resumed_run_continues_the_multiplier(self):
+        C = torch.from_numpy(cost_matrix(PolicyConfig().costs))
+        a = expected_cost_loss(C, review_budget=0.05)
+        a.multiplier, a.share_ema = 0.3, 0.2
+        b = expected_cost_loss(C, review_budget=0.05)
+        b.load_state_dict(a.state_dict())
+        assert (b.multiplier, b.share_ema) == (0.3, 0.2)
+
 
 class TestForecastLoss:
     def test_windows_with_an_active_anomaly_do_not_train_the_warning(self):
