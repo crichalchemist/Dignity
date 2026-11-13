@@ -11,6 +11,7 @@ import yaml
 from core.config import (
     CONFIRMATION_SEEDS,
     SELECTION_SEEDS,
+    SPENT_EVAL_SEEDS,
     TUNING_SEEDS,
     DataConfig,
     DignityConfig,
@@ -471,6 +472,30 @@ class TestEvalConfig:
         assert (len(SELECTION_SEEDS), CONFIRMATION_SEEDS) == (8, (1008, 1009))
         c = EvalConfig()  # the held-out seed can never be tuned on
         assert c.tuning_seed in TUNING_SEEDS and c.eval_seed not in TUNING_SEEDS
+
+    def test_a_spent_evaluation_seed_cannot_be_configured_again(
+        self, monkeypatch, tmp_path
+    ):
+        monkeypatch.setattr("core.config.SPENT_EVAL_SEEDS", (2031,))
+        with pytest.raises(
+            ValueError,
+            match="eval_seed 2031 is spent: a first evaluation already ran on it",
+        ):
+            EvalConfig(eval_seed=2031)
+        p = tmp_path / "c.yaml"
+        p.write_text("eval:\n  eval_seed: 2031\n")
+        with pytest.raises(ValueError, match="spent"):
+            DignityConfig.from_yaml(str(p))
+
+    def test_an_unspent_evaluation_seed_is_still_accepted(self, monkeypatch):
+        monkeypatch.setattr("core.config.SPENT_EVAL_SEEDS", (2031,))
+        assert EvalConfig(eval_seed=2032).eval_seed == 2032
+        assert EvalConfig().eval_seed not in (2031,)
+
+    def test_no_tuning_seed_is_a_spent_evaluation_seed(self):
+        # eval.gates refuses every seed outside TUNING_SEEDS; that covers the
+        # spent seeds only while the two sets stay disjoint
+        assert set(TUNING_SEEDS).isdisjoint(SPENT_EVAL_SEEDS)
 
     def test_eval_seeds_default_to_frozen_tuning_and_evaluation_values(self):
         # The tuning and evaluation seeds must differ, or the generator gets tuned

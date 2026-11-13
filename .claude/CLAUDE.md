@@ -45,10 +45,10 @@ format that export no longer supports (DGNTY-3, DGNTY-35). No shipped config wri
 ## Commands
 
 ```bash
-# Tests (1618 collected: test_core 87, test_data 169, test_models 23, test_privacy 42,
+# Tests (1697 collected: test_core 90, test_data 169, test_models 23, test_privacy 42,
 # test_operator 4, test_docs 769, test_train 135, test_checkpoint 4, test_export 9,
-# test_calibration 3, test_labels 7, test_gates 74, test_ci 4, test_eval 127,
-# test_colab_eval 13, test_scripts 19, test_release 129 — one skips without CUDA)
+# test_calibration 3, test_labels 7, test_gates 74, test_ci 4, test_eval 151,
+# test_colab_eval 20, test_scripts 64, test_release 129 — one skips without CUDA)
 # every test is limited to 300 s (pytest.ini; pytest-timeout), except the README quickstart
 # test, which carries its own 900 s limit (three subprocesses, each capped at 300 s)
 pytest tests/ -v
@@ -71,10 +71,13 @@ python scripts/refresh_doc_numbers.py README.md docs/RESULTS.md   # after any re
 python scripts/verify_release.py   # v1.0 success criteria 2-5 on results/v1.0 (exit 1 = a criterion failed or a training raise was recorded, 2 = unusable results, including results not on the evaluation seed); results/v1.0 holds the first evaluation, which the restated criteria call unusable until it is replaced
 python scripts/verify_release.py --results DIR --seed tuning   # rehearsal on one tuning-seed run (seed read from DIR/risk.json, 1000-1009); prints a banner, not the evaluation
 python -m eval.run --smoke --seed tuning  # CI-sized, all three tasks (--tasks defaults to risk,forecast,policy); outputs under runs/smoke/
+python scripts/rehearse.py --stage candidate --variant base --seeds 1000,1001 --tasks risk,forecast,policy  # Colab rehearsal; writes only under runs/rehearsal/
 python -m eval.run --smoke --seed tuning --data-seed 1003  # any tuning seed (1000-1009), own run directory eval_tuning_<N>
 python -m eval.run --smoke --seed tuning --tasks risk,forecast  # --tasks forecast also fits risk (baseline) but writes only forecast.json; unknown names exit 2
 python -m eval.run --smoke --seed tuning --privacy-sweep  # also trains risk per epsilon on the config/train_risk.yaml privacy template (own models, so works without --tasks risk); writes privacy.json + privacy_curve.png
 python -m eval.run --config config/synthetic_hard.yaml --seed eval --tasks risk,forecast,policy --privacy-sweep  # full run on a Colab GPU; see docs/RESULTS.md
+# --seed eval exits 2 unless HEAD carries the tag v1.0-freeze-2027 and eval.run.FROZEN_PATHS is clean; core.config.SPENT_EVAL_SEEDS (empty until a later milestone) makes EvalConfig refuse a spent evaluation seed
+python scripts/rehearse.py --stage variants --variant base --seeds 1000  # paid rehearsal on tuning seeds only; on Colab set DIGNITY_REHEARSAL (rehearse arguments) and optionally DIGNITY_DATA_SEED for scripts/colab_eval.py; summary.json lands in runs/rehearsal/<stage>/<variant>/ and merges seeds run at the same commit
 
 # Train
 # checkpoints land in ./runs/<task>/ (gitignored); never in checkpoints/

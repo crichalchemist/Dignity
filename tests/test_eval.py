@@ -1,4 +1,5 @@
 import json
+import subprocess
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -9,6 +10,7 @@ import pytest
 import yaml
 
 import eval.metrics as metrics_module
+import eval.run as eval_run
 from core.config import DignityConfig, PolicyConfig, PrivacyConfig
 from eval.baselines import block_tree, risk_score_forecast, threshold_policy
 from eval.metrics import (
@@ -2165,3 +2167,163 @@ class TestPrivacyCurve:
         result["baselines"]["window_logistic"]["points"] = []
         plot_curve(result, str(tmp_path / "c.png"))
         assert (tmp_path / "c.png").read_bytes()[:8] == self.PNG
+
+
+FREEZE_TAG = "v1.0-freeze-2027"
+DOCUMENTED_FROZEN_PATHS = (
+    "config",
+    "data",
+    "models",
+    "train",
+    "eval",
+    "core",
+    "export",
+    "notebooks",
+    "scripts",
+)
+REAL_ROOT = eval_run._ROOT
+
+
+def _git(repo, *args):
+    # no signing: a developer's global tag.gpgsign would turn `git tag` into a
+    # signed, annotated tag that needs a message and a key
+    cmd = [
+        "git",
+        "-C",
+        str(repo),
+        "-c",
+        "user.name=t",
+        "-c",
+        "user.email=t@example.com",
+    ]
+    cmd += ["-c", "commit.gpgsign=false", "-c", "tag.gpgsign=false"]
+    subprocess.run([*cmd, *args], check=True, capture_output=True)
+
+
+def _commit(repo, message):
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-m", message)
+
+
+class TestFreezeTagGuard:
+    @pytest.fixture
+    def repo(self, tmp_path, monkeypatch):
+        repo = tmp_path / "repo"
+        (repo / "core").mkdir(parents=True)
+        (repo / "results" / "v1.0").mkdir(parents=True)
+        (repo / "core" / "x.py").write_text("x = 1\n")
+        (repo / "results" / "v1.0" / "risk.json").write_text("{}\n")
+        for name in DOCUMENTED_FROZEN_PATHS:
+            (repo / name).mkdir(exist_ok=True)
+            (repo / name / "f.py").write_text("f = 1\n")
+        subprocess.run(["git", "init", "-q", str(repo)], check=True)
+        _commit(repo, "first")
+        monkeypatch.setattr(eval_run, "_ROOT", repo)
+        monkeypatch.setattr(eval_run, "prepare_data", _generated)
+        return repo
+
+    @staticmethod
+    def _final(seed="eval"):
+        return main(
+            ["--config", str(REAL_ROOT / "config" / "smoke.yaml"), "--seed", seed]
+        )
+
+    def _refused(self, capsys):
+        with pytest.raises(SystemExit) as exc:
+            self._final()
+        assert exc.value.code == 2
+        return capsys.readouterr().err
+
+    def test_a_final_run_on_an_untagged_commit_is_refused_before_any_data_exists(
+        self, repo, capsys
+    ):
+        assert FREEZE_TAG in self._refused(capsys)
+
+    def test_a_final_run_on_a_commit_after_the_tag_is_refused(self, repo, capsys):
+        _git(repo, "tag", FREEZE_TAG)
+        (repo / "core" / "x.py").write_text("x = 2\n")
+        _commit(repo, "second")
+        assert FREEZE_TAG in self._refused(capsys)
+
+    def test_a_final_run_on_the_clean_tagged_commit_reaches_data_generation(self, repo):
+        _git(repo, "tag", FREEZE_TAG)
+        with pytest.raises(RuntimeError, match="generated"):
+            self._final()
+
+    def test_a_different_tag_does_not_unlock_the_final_run(self, repo, capsys):
+        _git(repo, "tag", "v1.0-freeze")
+        assert FREEZE_TAG in self._refused(capsys)
+
+    @pytest.mark.parametrize("dirt", ["edit", "staged", "untracked"])
+    def test_a_tagged_commit_with_a_modified_working_tree_is_refused(
+        self, repo, capsys, dirt
+    ):
+        _git(repo, "tag", FREEZE_TAG)
+        target = repo / "core" / ("new.py" if dirt == "untracked" else "x.py")
+        target.write_text("x = 3\n")
+        if dirt == "staged":
+            _git(repo, "add", "core/x.py")
+        assert target.name in self._refused(capsys)
+
+    def test_a_dirty_file_outside_the_frozen_paths_does_not_block_the_final_run(
+        self, repo
+    ):
+        _git(repo, "tag", FREEZE_TAG)
+        (repo / "results" / "v1.0" / "risk.json").write_text('{"a": 1}\n')
+        with pytest.raises(RuntimeError, match="generated"):
+            self._final()
+
+    def test_the_frozen_paths_are_the_documented_tuple(self):
+        assert eval_run.FROZEN_PATHS == DOCUMENTED_FROZEN_PATHS
+
+    @pytest.mark.parametrize("path", DOCUMENTED_FROZEN_PATHS)
+    def test_a_modified_file_under_any_frozen_path_refuses_the_final_run(
+        self, repo, capsys, path
+    ):
+        _git(repo, "tag", FREEZE_TAG)
+        (repo / path / "f.py").write_text("f = 2\n")
+        err = self._refused(capsys)
+        assert f"modified: {path}/f.py" in err
+        assert "clean tree" in err
+
+    def test_an_annotated_freeze_tag_unlocks_the_final_run(self, repo):
+        _git(repo, "tag", "-a", "-m", "freeze", FREEZE_TAG)
+        with pytest.raises(RuntimeError, match="generated"):
+            self._final()
+
+    def test_an_untagged_dirty_tree_is_refused_for_the_missing_tag_first(
+        self, repo, capsys
+    ):
+        (repo / "core" / "x.py").write_text("x = 4\n")
+        err = self._refused(capsys)
+        assert FREEZE_TAG in err
+        assert "modified" not in err
+
+    def test_the_guard_refuses_before_the_config_is_loaded(self, repo, tmp_path):
+        with pytest.raises(SystemExit) as exc:
+            main(["--config", str(tmp_path / "missing.yaml"), "--seed", "eval"])
+        assert exc.value.code == 2
+
+    def test_dirty_paths_are_reported_exactly_as_git_names_them(self, repo):
+        (repo / "core" / "x.py").write_text("x = 5\n")
+        (repo / "core" / "new.py").write_text("n = 1\n")
+        assert sorted(eval_run._dirty_frozen_paths(repo)) == [
+            "core/new.py",
+            "core/x.py",
+        ]
+
+    def test_a_failing_git_makes_the_clean_tree_check_raise_not_pass(self, tmp_path):
+        bare = tmp_path / "not_a_repo"
+        bare.mkdir()
+        with pytest.raises(subprocess.CalledProcessError):
+            eval_run._dirty_frozen_paths(bare)
+        with pytest.raises(subprocess.CalledProcessError):
+            eval_run._head_tags(bare)
+
+    def test_a_tuning_run_needs_no_tag(self, repo):
+        with pytest.raises(RuntimeError, match="generated"):
+            self._final("tuning")
+
+
+def _generated(*args, **kwargs):
+    raise RuntimeError("generated")
