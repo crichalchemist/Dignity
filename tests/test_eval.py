@@ -15,6 +15,7 @@ from eval.metrics import (
     detection_gain,
     forecast_metrics,
     lead_times,
+    lift_upper,
     model_gate,
     paired_forecast_gain,
     policy_metrics,
@@ -423,6 +424,41 @@ class TestForecastMetrics:
         )
         json.dumps(m, allow_nan=False)
         assert all(type(p) is float for p in m["prevalence_by_horizon"])
+
+
+class TestLiftUpper:
+    @staticmethod
+    def _y():
+        y = np.zeros((100, 10), np.float32)
+        y[:10, 5:] = 1
+        y[:3, 0] = 1
+        return y, np.ones(100, bool)
+
+    def test_a_perfect_score_lifts_by_the_inverse_prevalence(self):
+        y, mask = self._y()
+        assert lift_upper(y, y.copy(), mask) == pytest.approx(10.0)
+
+    def test_a_constant_score_is_chance_lift_one(self):
+        y, mask = self._y()
+        assert lift_upper(y, np.zeros_like(y), mask) == pytest.approx(1.0)
+
+    def test_low_horizon_columns_with_few_positives_do_not_move_it(self):
+        y, mask = self._y()
+        score = y.copy()
+        score[:, 0] = 1 - y[:, 0]
+        assert lift_upper(y, score, mask) == pytest.approx(10.0)
+
+    def test_windows_with_an_active_anomaly_are_left_out(self):
+        y, mask = self._y()
+        mask[50:] = False
+        score = y.copy()
+        score[50:] = 5.0
+        assert lift_upper(y, score, mask) == pytest.approx(5.0)
+
+    def test_it_is_none_when_no_upper_horizon_holds_both_classes(self):
+        y, mask = self._y()
+        y[:, 5:] = 0
+        assert lift_upper(y, y.copy(), mask) is None
 
 
 class TestLeadTimes:
