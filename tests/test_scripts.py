@@ -10,6 +10,7 @@ import yaml
 
 from core.config import DignityConfig
 from tests.test_docs import NUM_RE, _refresh, check_numbers
+from tests.test_release import _passing
 
 refresh = _refresh.refresh
 main = _refresh.main
@@ -310,3 +311,232 @@ class TestRehearse:
                 a.pop("checkpoint_dir"), b.pop("checkpoint_dir")
             assert a == b, block
         assert written("cap3").policy.multiplier_lr == preset.policy.multiplier_lr
+
+
+def _seed_fixtures(**over):
+    """The passing release fixtures plus the series rehearse.py reports."""
+    files = _passing()
+    files["forecast"]["metrics"]["seed_spread"].update(
+        val_lift_upper={"values": [1.2, 1.3, 1.4]},
+        risk_val_lift_upper={"values": [1.0, 1.1, 1.2]},
+        best_epoch={"values": [7, 8, 9]},
+    )
+    files["policy"]["metrics"]["seed_spread"].update(
+        val_neg_cost={"values": [-0.2, -0.21, -0.19]},
+        review_multiplier={"values": [1.0, 1.1, 1.2]},
+    )
+    for key, value in over.items():
+        name, _, path = key.partition("__")
+        node = files[name]
+        *parents, leaf = path.split("__")
+        for part in parents:
+            node = node[part]
+        node[leaf] = value
+    return files
+
+
+BEST_METRICS = (0.41, 0.43, 0.45)
+
+
+class _FakeEval:
+    """A boundary stand-in for eval.run.main: writes small result fixtures."""
+
+    def __init__(self, files=None, status=0):
+        self.files = files or {}
+        self.status = status
+        self.calls = []
+
+    def __call__(self, argv):
+        import torch
+
+        from train.checkpoint import CheckpointMeta, save_checkpoint
+
+        self.calls.append(list(argv))
+        config = yaml.safe_load(Path(argv[argv.index("--config") + 1]).read_text())
+        out = Path(config["eval"]["out_dir"])
+        out.mkdir(parents=True)
+        files = self.files or _seed_fixtures()
+        for name in ("risk", "forecast", "policy"):
+            if name in files:
+                (out / f"{name}.json").write_text(json.dumps(files[name]))
+        seed = argv[argv.index("--data-seed") + 1]
+        model = torch.nn.Linear(1, 1)
+        meta = CheckpointMeta(2, "risk", 1, ["volume"], {}, [0.0], [1.0], {})
+        for k, best in enumerate(BEST_METRICS):
+            run = Path(config["train"]["checkpoint_dir"]) / f"eval_tuning_{seed}"
+            path = run / "risk" / f"train_seed_{config['seed'] + k}" / "best.pt"
+            opt = torch.optim.SGD(model.parameters(), lr=0.1)
+            scaler = torch.amp.GradScaler("cpu", enabled=False)
+            save_checkpoint(path, model, opt, scaler, meta, 1, {}, best)
+        return self.status
+
+
+def _summary(monkeypatch, tmp_path, fake, variant="base", seeds="1000", extra=()):
+    rehearse = _rehearse(monkeypatch, tmp_path)
+    import eval.run
+
+    monkeypatch.setattr(eval.run, "main", fake)
+    argv = ["--stage", "variants", "--variant", variant, "--seeds", seeds, *extra]
+    code = rehearse.main(argv)
+    path = rehearse.seed_dir("variants", variant, 1000).parent / "summary.json"
+    return code, json.loads(path.read_text())
+
+
+class TestRehearseRun:
+    def test_c4_fails_when_a_seed_collapses_to_never_reviewing(
+        self, monkeypatch, tmp_path
+    ):
+        rates = {
+            "policy__metrics__seed_spread__review_rate": {"values": [0.01, 0.05, 0.05]}
+        }
+        code, summary = _summary(
+            monkeypatch, tmp_path, _FakeEval(_seed_fixtures(**rates))
+        )
+        assert code == 0
+        assert summary["seeds"]["1000"]["C4"] is False
+
+    def test_c4_passes_at_exactly_the_review_rate_bar(self, monkeypatch, tmp_path):
+        rates = {
+            "policy__metrics__seed_spread__review_rate": {"values": [0.02, 0.05, 0.05]}
+        }
+        _, summary = _summary(monkeypatch, tmp_path, _FakeEval(_seed_fixtures(**rates)))
+        assert summary["seeds"]["1000"]["C4"] is True
+        assert summary["seeds"]["1000"]["C2"] is True
+        assert summary["seeds"]["1000"]["C3"] is True
+
+    def test_the_summary_carries_each_training_seeds_risk_validation_score(
+        self, monkeypatch, tmp_path
+    ):
+        _, summary = _summary(monkeypatch, tmp_path, _FakeEval())
+        assert summary["seeds"]["1000"]["risk_val_pr_auc"] == pytest.approx(
+            BEST_METRICS
+        )
+
+    def test_the_summary_reports_the_forecast_and_policy_series_it_was_given(
+        self, monkeypatch, tmp_path
+    ):
+        _, summary = _summary(monkeypatch, tmp_path, _FakeEval())
+        entry = summary["seeds"]["1000"]
+        assert entry["forecast_val_lift_upper"] == [1.2, 1.3, 1.4]
+        assert entry["forecast_floor"] == [1.0, 1.1, 1.2]
+        assert entry["forecast_best_epoch"] == [7, 8, 9]
+        assert entry["review_multiplier"] == [1.0, 1.1, 1.2]
+        assert entry["policy_val_neg_cost"] == [-0.2, -0.21, -0.19]
+        assert entry["review_rate"] == [0.03, 0.04, 0.05]
+        assert entry["uncapped_review_share"] == [0.06, 0.08, 0.1]
+        assert entry["raised"] is None
+
+    def test_a_raised_forecast_fit_fails_c3_and_is_recorded_by_seed(
+        self, monkeypatch, tmp_path
+    ):
+        raised = {"error": "ForecastNotEligibleError", "message": "m", "train_seed": 2}
+        files = _seed_fixtures()
+        files["forecast"] = {"metrics": {"raised": raised}}
+        fake = _FakeEval(files, status=1)
+        code, summary = _summary(monkeypatch, tmp_path, fake, seeds="1000,1001")
+        assert code == 0
+        assert len(fake.calls) == 2
+        entry = summary["seeds"]["1000"]
+        assert entry["C3"] is False
+        assert entry["raised"]["forecast"]["train_seed"] == 2
+        assert entry["forecast_val_lift_upper"] is None
+        assert entry["forecast_floor"] is None
+        assert entry["C2"] is True
+        assert "1001" in summary["seeds"]
+
+    def test_a_raised_policy_fit_fails_c4_and_hides_its_series(
+        self, monkeypatch, tmp_path
+    ):
+        raised = {"error": "PolicyCollapseError", "message": "m", "train_seed": 1}
+        files = _seed_fixtures()
+        files["policy"] = {"metrics": {"raised": raised}}
+        _, summary = _summary(monkeypatch, tmp_path, _FakeEval(files, status=1))
+        entry = summary["seeds"]["1000"]
+        assert entry["C4"] is False
+        assert entry["raised"]["policy"]["error"] == "PolicyCollapseError"
+        assert entry["review_rate"] is None
+        assert entry["review_multiplier"] is None
+
+    def test_a_task_that_was_not_run_has_no_verdict_and_no_series(
+        self, monkeypatch, tmp_path
+    ):
+        files = {"risk": _seed_fixtures()["risk"]}
+        _, summary = _summary(
+            monkeypatch, tmp_path, _FakeEval(files), extra=("--tasks", "risk")
+        )
+        entry = summary["seeds"]["1000"]
+        assert (entry["C2"], entry["C3"], entry["C4"]) == (True, None, None)
+        assert entry["review_rate"] is None
+        assert entry["forecast_best_epoch"] is None
+
+    def test_a_refused_eval_run_is_an_error_entry_and_exit_1(
+        self, monkeypatch, tmp_path
+    ):
+        def refuses(argv):
+            raise SystemExit(2)
+
+        code, summary = _summary(monkeypatch, tmp_path, refuses, seeds="1000,1001")
+        assert code == 1
+        assert "error" in summary["seeds"]["1000"]
+        assert "error" in summary["seeds"]["1001"]
+
+    def test_an_exception_in_eval_run_is_an_error_entry_and_exit_1(
+        self, monkeypatch, tmp_path
+    ):
+        def crashes(argv):
+            raise RuntimeError("out of memory")
+
+        code, summary = _summary(monkeypatch, tmp_path, crashes)
+        assert code == 1
+        assert "out of memory" in summary["seeds"]["1000"]["error"]
+
+    def test_summary_carries_the_overrides_the_sha_and_the_per_seed_wall_time(
+        self, monkeypatch, tmp_path
+    ):
+        rehearse = _rehearse(monkeypatch, tmp_path)
+        monkeypatch.setattr(
+            rehearse.subprocess, "check_output", lambda *a, **k: "abc123\n"
+        )
+        import eval.run
+
+        monkeypatch.setattr(eval.run, "main", _FakeEval())
+        argv = ["--stage", "variants", "--variant", "cap10", "--seeds", "1000"]
+        assert rehearse.main(argv) == 0
+        path = rehearse.seed_dir("variants", "cap10", 1000).parent / "summary.json"
+        summary = json.loads(path.read_text())
+        assert summary["overrides"] == rehearse.VARIANTS["cap10"]
+        assert summary["git_sha"] == "abc123"
+        assert summary["stage"] == "variants"
+        assert summary["variant"] == "cap10"
+        assert summary["seeds"]["1000"]["wall_seconds"] > 0
+
+    def test_a_rehearsal_never_writes_outside_runs_rehearsal(
+        self, monkeypatch, tmp_path
+    ):
+        for folder in ("results", "docs/img", "checkpoints", "config"):
+            (tmp_path / folder).mkdir(parents=True)
+        before = set(tmp_path.rglob("*"))
+        _summary(monkeypatch, tmp_path, _FakeEval())
+        new = set(tmp_path.rglob("*")) - before
+        assert new
+        root = tmp_path / "runs" / "rehearsal"
+        assert all(p == tmp_path / "runs" or root in (p, *p.parents) for p in new)
+
+    def test_the_run_is_handed_its_own_config_and_the_stage_flags(
+        self, monkeypatch, tmp_path
+    ):
+        fake = _FakeEval()
+        _summary(
+            monkeypatch, tmp_path, fake, extra=("--tasks", "risk", "--privacy-sweep")
+        )
+        argv = fake.calls[0]
+        folder = tmp_path / "runs" / "rehearsal" / "variants" / "base" / "seed_1000"
+        assert argv[:6] == [
+            "--config",
+            str(folder / "config.yaml"),
+            "--seed",
+            "tuning",
+            "--data-seed",
+            "1000",
+        ]
+        assert argv[-3:] == ["--tasks", "risk", "--privacy-sweep"]

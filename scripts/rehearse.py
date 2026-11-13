@@ -10,18 +10,31 @@ generated.
 """
 
 import argparse
+import functools
+import importlib.util
+import json
+import subprocess
 import sys
+import time
 from pathlib import Path
 
 import yaml
 
-ROOT = Path(__file__).resolve().parent.parent  # where runs/rehearsal/ is written
+REPO = Path(__file__).resolve().parent.parent
+ROOT = REPO  # where runs/rehearsal/ is written
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from core.config import SELECTION_SEEDS, DignityConfig  # noqa: E402
+import eval.run  # noqa: E402
+from core.config import (  # noqa: E402
+    SELECTION_SEEDS,
+    DignityConfig,
+    EvalConfig,
+    PolicyConfig,
+)
+from train.checkpoint import load_checkpoint  # noqa: E402
 
-PRESET = Path(__file__).resolve().parent.parent / "config" / "synthetic_hard.yaml"
+PRESET = REPO / "config" / "synthetic_hard.yaml"
 REHEARSAL_MIN_REVIEW_RATE = 0.02  # a rehearsal bar; verify_release.py never applies it
 STAGES = ("timing", "variants", "candidate")
 VARIANTS: dict[str, dict[str, object]] = {
@@ -91,15 +104,156 @@ def _refusal(args: argparse.Namespace) -> str | None:
     return None
 
 
+@functools.cache
+def _release():
+    """scripts/verify_release.py, loaded by path: its criteria are never copied."""
+    path = Path(__file__).resolve().parent / "verify_release.py"
+    spec = importlib.util.spec_from_file_location("verify_release", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _dig(data: dict | None, dotted: str):
+    """Value at a dotted path, None when any step is missing (reporting only)."""
+    node = data
+    for key in dotted.split("."):
+        if not isinstance(node, dict) or key not in node:
+            return None
+        node = node[key]
+    return node
+
+
+def _read_result(results: Path, task: str) -> dict | None:
+    path = results / f"{task}.json"
+    return json.loads(path.read_text()) if path.exists() else None
+
+
+def _risk_val_pr_auc(ckpt: Path, data_seed: int, base_seed: int, n: int):
+    """Each training seed's best validation PR-AUC, None if any checkpoint is absent."""
+    run = ckpt / f"eval_tuning_{data_seed}" / "risk"
+    paths = [run / f"train_seed_{base_seed + k}" / "best.pt" for k in range(n)]
+    if not all(p.exists() for p in paths):
+        return None
+    return [load_checkpoint(p)["best_metric"] for p in paths]
+
+
+def _judge(results: dict[str, dict | None], n_train_seeds: int) -> dict:
+    """Criteria 2 to 4 of verify_release.py on one seed's results (None: not run)."""
+    release = _release()
+    policy_defaults = PolicyConfig()
+    verdict: dict[str, bool | None] = {"C2": None, "C3": None, "C4": None}
+    if results["risk"] is not None:
+        verdict["C2"] = release._criterion_2(results["risk"]).passed
+    if results["forecast"] is not None:
+        verdict["C3"] = release._criterion_3(results["forecast"], n_train_seeds).passed
+    policy = results["policy"]
+    if policy is not None:
+        c4 = release._criterion_4(
+            policy,
+            policy_defaults.review_budget,
+            n_train_seeds,
+            policy_defaults.collapse_review_factor,
+        )
+        rates = _dig(policy, "metrics.seed_spread.review_rate.values")
+        floor_met = isinstance(rates, list) and all(
+            r is not None and r >= REHEARSAL_MIN_REVIEW_RATE for r in rates
+        )
+        verdict["C4"] = c4.passed and floor_met
+    for name, task in (("C3", "forecast"), ("C4", "policy")):
+        if _dig(results[task], "metrics.raised") is not None:
+            verdict[name] = False
+    return verdict
+
+
+def _summarise(results: dict[str, dict | None], risk_val, wall: float, n: int):
+    """One seed's summary entry: verdicts, the raised payloads and the series."""
+    raised = {
+        task: _dig(results[task], "metrics.raised")
+        for task in ("forecast", "policy")
+        if _dig(results[task], "metrics.raised") is not None
+    }
+
+    def series(task, path):
+        if task in raised:
+            return None
+        return _dig(results[task], f"metrics.seed_spread.{path}.values")
+
+    return {
+        **_judge(results, n),
+        "raised": raised or None,
+        "forecast_val_lift_upper": series("forecast", "val_lift_upper"),
+        "forecast_floor": series("forecast", "risk_val_lift_upper"),
+        "forecast_best_epoch": series("forecast", "best_epoch"),
+        "policy_val_neg_cost": series("policy", "val_neg_cost"),
+        "review_rate": series("policy", "review_rate"),
+        "review_multiplier": series("policy", "review_multiplier"),
+        "uncapped_review_share": series("policy", "uncapped_review_share"),
+        "risk_val_pr_auc": risk_val,
+        "wall_seconds": wall,
+    }
+
+
+def _git_sha() -> str:
+    out = subprocess.check_output(["git", "-C", str(REPO), "rev-parse", "HEAD"])
+    return out.decode().strip() if isinstance(out, bytes) else out.strip()
+
+
+def _run_seed(args: argparse.Namespace, seed: int) -> tuple[dict, int]:
+    """Run eval.run on one seed; return its summary entry and 0, or 1 on an error."""
+    cfg_path = write_seed_config(args.stage, args.variant, seed)
+    config = DignityConfig.from_yaml(str(cfg_path))
+    argv = ["--config", str(cfg_path), "--seed", "tuning", "--data-seed", str(seed)]
+    argv += ["--tasks", args.tasks]
+    if args.privacy_sweep:
+        argv.append("--privacy-sweep")
+    start = time.perf_counter()
+    try:
+        status = eval.run.main(argv)
+        error = None if status in (0, 1) else f"eval.run exited {status}"
+    except SystemExit as err:
+        error = f"eval.run exited {err.code}"
+    except Exception as err:  # noqa: BLE001 - recorded in the summary, then exit 1
+        error = f"{type(err).__name__}: {err}"
+    wall = time.perf_counter() - start
+    if error is not None:
+        print(f"rehearse: seed {seed}: {error}", file=sys.stderr)
+        return {"error": error, "wall_seconds": wall}, 1
+    # a recorded raise (status 1) is data: eval.run already printed TRAINING_RAISED
+    results_dir = Path(config.eval.out_dir)
+    tasks = {t.strip() for t in args.tasks.split(",")}
+    results = {t: _read_result(results_dir, t) if t in tasks else None for t in tasks}
+    results = {t: results.get(t) for t in ("risk", "forecast", "policy")}
+    n = EvalConfig().n_train_seeds
+    risk_val = _risk_val_pr_auc(Path(config.train.checkpoint_dir), seed, config.seed, n)
+    try:
+        return _summarise(results, risk_val, wall, n), 0
+    except _release().ResultsError as err:
+        print(f"rehearse: seed {seed}: unusable results: {err}", file=sys.stderr)
+        return {"error": f"unusable results: {err}", "wall_seconds": wall}, 1
+
+
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     refusal = _refusal(args)
     if refusal is not None:
         print(f"rehearse: {refusal}", file=sys.stderr)
         return 2
+    summary = {
+        "stage": args.stage,
+        "variant": args.variant,
+        "overrides": VARIANTS[args.variant],
+        "git_sha": _git_sha(),
+        "seeds": {},
+    }
+    out = seed_dir(args.stage, args.variant, args.seeds[0]).parent / "summary.json"
+    exit_code = 0
     for seed in args.seeds:
-        write_seed_config(args.stage, args.variant, seed)
-    return 0
+        entry, failed = _run_seed(args, seed)
+        summary["seeds"][str(seed)] = entry
+        exit_code |= failed
+        out.write_text(json.dumps(summary, indent=2))
+    return exit_code
 
 
 if __name__ == "__main__":
