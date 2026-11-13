@@ -368,13 +368,16 @@ def _write(tmp_path, **sections):
 
 
 class TestSyntheticConfig:
-    def test_smoke_preset_keeps_build_ups_off_until_the_strength_is_committed(self):
+    def test_smoke_preset_exercises_build_ups_and_decoys(self):
+        # CI smoke trains on build-up data only now that the strength is committed:
+        # it carries the hard preset's strength and holds true build-ups and decoys.
         cfg = DignityConfig.from_yaml(str(ROOT / "config/smoke.yaml"))
         synthetic = cfg.data.synthetic
-        assert synthetic.precursor_strength == 0.0
-        assert synthetic.decoy_rate == 0.0
+        hard = DignityConfig.from_yaml(str(ROOT / "config/synthetic_hard.yaml"))
+        assert synthetic.precursor_strength == hard.data.synthetic.precursor_strength
+        assert synthetic.decoy_rate == hard.data.synthetic.decoy_rate
         frame = SyntheticGenerator(synthetic).generate()
-        assert set(frame["build_up"]) == {0}
+        assert set(frame["build_up"]) == {0, 1, 2}
 
     def test_smoke_preset_val_and_test_each_hold_both_classes(self):
         # risk_metrics raises on a single-class split (M3.2); CI must never hit that.
@@ -401,7 +404,7 @@ class TestSyntheticConfig:
         )
         assert isinstance(cfg.data.synthetic, SyntheticConfig)
         assert cfg.data.synthetic.duration_range == (5, 9)
-        assert cfg.data.split == (0.7, 0.15, 0.15)
+        assert cfg.data.split == (0.45, 0.15, 0.40)
 
     def test_unknown_synthetic_key_is_rejected(self, tmp_path):
         with pytest.raises(TypeError, match="nope"):
@@ -625,3 +628,19 @@ class TestPolicyConfig:
         mutate(d)
         with pytest.raises(ValueError, match=match):
             PolicyConfig(**d)
+
+
+class TestShippedEvaluationSize:
+    def test_every_shipped_config_splits_blocks_45_15_40(self):
+        for path in sorted((ROOT / "config").glob("*.yaml")):
+            split = DignityConfig.from_yaml(path).data.split
+            assert split == (0.45, 0.15, 0.40), path.name
+
+    def test_presets_hold_3600_blocks_so_every_tuning_seed_has_over_200_test_onsets(
+        self,
+    ):
+        for name in ("easy", "medium", "hard"):
+            path = ROOT / "config" / f"synthetic_{name}.yaml"
+            syn = DignityConfig.from_yaml(path).data.synthetic
+            assert (syn.n_blocks, syn.block_len) == (3600, 160), name
+            assert (syn.decoy_rate, syn.precursor_len_range) == (0.2, (10, 30)), name

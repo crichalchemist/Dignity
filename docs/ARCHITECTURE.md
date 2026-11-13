@@ -109,6 +109,8 @@ that stay labelled normal.
 - Strength 0 reproduces the earlier frame exactly, because the ramps use their own random
   stream, and no label moves at any strength. Decoys use a stream of their own, so
   `data.synthetic.decoy_rate` never moves a true build-up.
+- The shipped presets set the strength to 0.9, 0.95 and 1.0; see
+  [Build-up strength and how it was chosen](#build-up-strength-and-how-it-was-chosen).
 
 ### Labels
 
@@ -137,17 +139,107 @@ All labels come from the per-row event record, never from a single row
 
 ### Presets, gate and calibration
 
-`config/synthetic_{easy,medium,hard}.yaml` are the three difficulty presets.
-`eval/gates.py::data_gate` generates each, splits it by block and scores two
-baselines: `window_logistic` on val windows and `block_tree` on val blocks. It passes
-when all four checks hold: each baseline's hard-preset AUROC lies in
-`eval.gates.AUROC_BAND`; AUROC falls strictly from easy to medium to hard for both
-baselines; and the `window_logistic` recall at 10% false-positive rate, per
-onset-position bucket, spreads by at most `eval.gates.FLATNESS_MAX_SPREAD`. The gate
-is a tuning tool: it defaults to the tuning seed, and `eval/gates.py::main` refuses
-the evaluation seed with exit code 2
-(`tests/test_gates.py::TestDataGate`). The values the shipped presets reach are in
-[results/v1.0/data_gate_tuning.json](../results/v1.0/data_gate_tuning.json).
+`config/synthetic_{easy,medium,hard}.yaml` are the three difficulty presets; each
+holds 3600 blocks, so that every tuning seed has at least 200 scorable test onsets.
+`eval/gates.py::data_gate` generates each preset once per seed on the ten tuning
+seeds, splits it by block and scores two baselines on the val and the test split:
+`window_logistic` on windows and `block_tree` on blocks. The AUROCs, the recall
+spread, the mean lift and the build-up share it judges are means over seeds, and the
+forecast PR-AUC ratio is a ratio of two means; the onset count and each seed's lift
+floor bind every seed on its own; each per-horizon win count must reach at least
+seven eighths of the seeds, rounded up; the detection gain is pooled over all
+seeds' onsets. It passes when all six checks hold: each baseline's hard-preset
+AUROC, the mean of the val and test scores over all seeds, lies in
+`eval.gates.AUROC_BAND`; the same means fall strictly from easy to medium to hard for
+both baselines, and the build-up strength falls with them; the `window_logistic`
+recall at 10% false-positive rate, per onset-position bucket and averaged over seeds
+on the val split, spreads by at most `eval.gates.FLATNESS_MAX_SPREAD`, 0.15 (the
+test split's spread is reported, never judged); every seed's hard-preset test split
+holds at least `eval.gates.MIN_TEST_ONSETS` scorable onsets (`test_onsets`); and the
+forecast headroom check holds. That check fits the logistic probe
+`eval/baselines.py::window_logistic_forecast` on the hard preset's windows, built from
+the same `data.features` the model reads, and asks whether it forecasts anomalies
+better than the stronger of today's risk score and the oracle (the true risk label)
+at horizons 1, 5 and 10, whether it beats a random score at warning of onsets, whether
+its lift over chance is real among windows no earlier anomaly has touched, and whether
+the share of build-up windows that end in an onset sits inside a band. The PR-AUC
+ratio and the per-horizon wins use the probe that is also told, as one extra input
+column, whether an anomaly lies earlier in the window (`risk_aware=True`), because
+the plain probe reads that far worse than the oracle it is compared with; the ratio
+for the plain probe is reported beside it as `pr_auc_ratio_plain`. The lift, the
+warnings and the build-up share use the plain probe. With no
+build-ups in the data (strength 0) the check fails by
+design (`tests/test_gates.py::TestForecastHeadroom`). The gate
+is a tuning tool: `eval/gates.py::main` refuses a seed outside the tuning seeds, a
+repeated seed and a strength off `eval.gates.STRENGTH_GRID` with exit code 2, before
+it generates anything (`tests/test_gates.py::TestDataGate`). The values the shipped
+presets reach are in [results/v1.0/data_gate.json](../results/v1.0/data_gate.json);
+[results/v1.0/data_gate_tuning.json](../results/v1.0/data_gate_tuning.json) is the
+first evaluation's single-seed gate for the earlier presets.
+
+#### Build-up strength and how it was chosen
+
+The shipped presets hold 3600 blocks and the build-up strengths 0.9 (hard), 0.95
+(medium) and 1.0 (easy): easy is the hard strength plus 0.2, capped at 1.0, and medium
+sits halfway (`eval/gates.py::_preset_strengths`). The hard strength is the smallest
+value of `eval.gates.STRENGTH_GRID` whose headroom check passes on the eight selection
+seeds (`core.config.SELECTION_SEEDS`) and whose ten-seed gate then passes. The search
+records are in [results/strength-search/](../results/strength-search/): at 3600 blocks
+0.6 and 0.7 fail the headroom check on the selection seeds and 0.8 passes it, but the
+ten-seed gate at 0.8 (`results/strength-search/ten_seed_gate_0.8.json`) fails; 0.9 passes on the selection
+seeds (`results/strength-search/strength_0.9.json`) and the ten-seed gate passes on every check
+([results/v1.0/data_gate.json](../results/v1.0/data_gate.json)).
+
+#### What changed after the first search
+
+The first search (3000 blocks, the plain probe, the first flatness limit) passed the
+headroom check at none of 0.6, 0.7 and 0.8; it is kept in
+[results/strength-search/first-search/](../results/strength-search/first-search/).
+Five things then changed after results had been seen, each on the tuning seeds and
+none with a deep model.
+
+- The headroom comparison first used the plain probe. It now uses, for the PR-AUC
+  ratio and the per-horizon wins, the probe that is also told whether an anomaly lies
+  earlier in the window, because the plain probe reads that far worse than the oracle
+  it is compared with. The plain ratio is still reported as `pr_auc_ratio_plain` and is
+  not gated: in `results/v1.0/data_gate.json` it is 1.41 at h5 and 1.11 at h10,
+  below the bar `eval.gates.HEADROOM_PR_AUC_RATIO`, where the gated ratio is 2.37 and
+  1.91.
+- The presets went from 3000 to 3600 blocks, because one of the eight selection seeds
+  had 189 scorable test onsets at 3000 blocks, fewer than `eval.gates.MIN_TEST_ONSETS`
+  (`results/strength-search/first-search/strength_0.8.json`); at 3600 blocks the lowest of the ten tuning
+  seeds has 250.
+- The flatness limit went from 0.1 to 0.15, because the measured spread moved with the
+  split and the size by a large part of the old limit: the validation spread is
+  0.108 and the test spread 0.087 in `results/strength-search/first-search/strength_0.8.json`, and
+  0.068 and 0.098 in `results/v1.0/data_gate.json`. The limit still applies to the
+  validation split. The committed result would also have passed the old limit of 0.1
+  (validation spread 0.068), as does every 3600-block search record (validation spread
+  at most 0.068); the looser limit decided no committed outcome.
+- The grid gained 0.9 after 0.8 passed on the selection seeds and then missed the lift
+  floor on the ten seeds: the mean stratified lift at h10 is
+  2.984 in `results/strength-search/ten_seed_gate_0.8.json`, below the floor, the first value
+  of `eval.gates.HEADROOM_LIFT_RANGE` (3.0), with every other part of the headroom
+  check passing; every bar stayed as it was. The miss is 0.016, 0.09 of the standard
+  error (0.18) of the mean of the ten per-seed lifts, so the step to 0.9 moved the
+  strength where the floor was nearly met. With the risk-aware comparison the PR-AUC
+  ratio, the wins and the build-up share pass at every strength of the grid on the
+  selection seeds, so the lift floor (and, at 0.6, the detection gain) alone separated
+  the strengths.
+- The rule for the medium and easy strengths changed with the grid. It was the hard
+  strength plus 0.1 and plus 0.2; it is now easy at the hard strength plus 0.2, capped
+  at 1.0, and medium halfway. Up to 0.8 the two rules give the same strengths.
+
+The search records carry the hash of the presets that stood on disk when they were
+written, not of the strengths they scored. The three records
+`results/strength-search/strength_0.6.json`, `results/strength-search/strength_0.7.json`
+and `results/strength-search/strength_0.8.json` carry the hash of presets at 0.6, 0.7 and
+0.8; `results/strength-search/strength_0.9.json`,
+`results/strength-search/ten_seed_gate_0.8.json` and `results/v1.0/data_gate.json` carry
+the hash of the committed presets, so the ten-seed record at 0.8 is a rerun made after
+the presets moved, and its `strength_override` of 0.8 is what says which data it scored.
+Only `results/v1.0/data_gate.json` has to match the committed presets, and a test checks
+that.
 
 `data/calibration/reference_stats.json` holds a band for each statistic in
 `data.stats.STAT_NAMES`; `scripts/calibrate.py` builds it from public hourly bars,

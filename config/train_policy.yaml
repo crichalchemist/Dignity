@@ -15,7 +15,7 @@ data:
   source: synthetic  # only "synthetic" in v1.0; other sources are v1.1 (DGNTY-41)
   seq_len: 100
   batch_size: 64
-  split: [0.7, 0.15, 0.15]  # train / val / test blocks
+  split: [0.45, 0.15, 0.40]  # train / val / test blocks
   label_overlap: 0.0  # risk positive if anomaly overlap fraction > this
   num_workers: 4
   features:

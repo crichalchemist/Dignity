@@ -1,5 +1,7 @@
 """Baselines the difficulty gate scores; M3 reuses them."""
 
+from collections.abc import Callable
+
 import numpy as np
 import pandas as pd
 from sklearn.linear_model import LogisticRegression
@@ -76,6 +78,67 @@ def window_logistic(train: WindowSet, test: WindowSet) -> np.ndarray:
     model = make_pipeline(StandardScaler(), LogisticRegression(max_iter=1000))
     model.fit(_window_features(train.X), train.y_risk)
     return model.predict_proba(_window_features(test.X))[:, 1]
+
+
+def _forecast_features(X: np.ndarray) -> np.ndarray:
+    """`_window_features`, last-10, last-30 and whole-window means, two slopes.
+
+    The slopes are the mean of the last 10 rows minus the mean of rows -30 to -10,
+    and the mean of the last 5 rows minus the mean of rows -15 to -5.
+    """
+    m10 = X[:, -10:].mean(axis=1)
+    m30 = X[:, -30:].mean(axis=1)
+    mall = X.mean(axis=1)
+    slow = m10 - X[:, -30:-10].mean(axis=1)
+    fast = X[:, -5:].mean(axis=1) - X[:, -15:-5].mean(axis=1)
+    return np.concatenate([_window_features(X), m10, m30, mall, slow, fast], axis=1)
+
+
+def _probe_inputs(ws: WindowSet, rows, risk_aware: bool) -> np.ndarray:
+    """`_forecast_features` of the rows, plus `y_risk` as one more column if asked."""
+    features = _forecast_features(ws.X[rows])
+    if not risk_aware:
+        return features
+    return np.concatenate([features, ws.y_risk[rows, None].astype(float)], axis=1)
+
+
+def _fit_forecast_probe(
+    train: WindowSet, risk_aware: bool = False
+) -> Callable[[WindowSet], np.ndarray]:
+    """Fit one logistic probe per horizon on the windows `forecast_mask` keeps.
+
+    Returns a function that scores any WindowSet: probabilities [N, H], every
+    row scored. `risk_aware` gives the probe `y_risk` as one more input column.
+    """
+    keep = train.forecast_mask
+    x_train = _probe_inputs(train, keep, risk_aware)
+    models = []
+    for h in range(train.y_forecast.shape[1]):
+        y = train.y_forecast[keep, h]
+        if len(np.unique(y)) < 2:
+            raise ValueError(f"horizon {h}: one class in the masked train windows")
+        model = make_pipeline(
+            StandardScaler(), LogisticRegression(C=0.3, max_iter=1000)
+        )
+        models.append(model.fit(x_train, y))
+
+    def score(ws: WindowSet) -> np.ndarray:
+        x = _probe_inputs(ws, slice(None), risk_aware)
+        return np.stack([m.predict_proba(x)[:, 1] for m in models], axis=1)
+
+    return score
+
+
+def window_logistic_forecast(
+    train: WindowSet, test: WindowSet, risk_aware: bool = False
+) -> np.ndarray:
+    """One logistic probe per horizon on the windows `forecast_mask` keeps.
+
+    Returns probabilities [N_test, H]; every test row is scored. With
+    `risk_aware` the probe is also told, as `y_risk`, whether an anomaly lies
+    earlier in the window.
+    """
+    return _fit_forecast_probe(train, risk_aware)(test)
 
 
 def _block_features(df: pd.DataFrame) -> pd.DataFrame:

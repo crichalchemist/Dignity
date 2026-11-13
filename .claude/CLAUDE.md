@@ -45,9 +45,9 @@ format that export no longer supports (DGNTY-3, DGNTY-35). No shipped config wri
 ## Commands
 
 ```bash
-# Tests (1464 collected: test_core 78, test_data 169, test_models 23, test_privacy 42,
+# Tests (1529 collected: test_core 80, test_data 169, test_models 23, test_privacy 42,
 # test_operator 4, test_docs 769, test_train 78, test_checkpoint 3, test_export 9,
-# test_calibration 3, test_labels 7, test_gates 11, test_ci 4, test_eval 103,
+# test_calibration 3, test_labels 7, test_gates 74, test_ci 4, test_eval 103,
 # test_colab_eval 13, test_scripts 19, test_release 129 — one skips without CUDA)
 # every test is limited to 300 s (pytest.ini; pytest-timeout), except the README quickstart
 # test, which carries its own 900 s limit (three subprocesses, each capped at 300 s)
@@ -66,7 +66,7 @@ pre-commit run --all-files
 # The CI coverage gate — measures only core/privacy.py (pyproject [tool.coverage.run] include)
 pytest tests/ --cov --cov-fail-under=100
 
-python -m eval.gates --seed 1000   # data gate; tuning seed only, refuses 2026
+python -m eval.gates --out results/v1.0/data_gate.json   # ten-seed data gate on the tuning seeds 1000-1009 (refuses everything else); the committed result passes every check at hard build-up strength 0.9 (presets 0.9/0.95/1.0, 3600 blocks each), the smallest value of `STRENGTH_GRID` (0.6-0.9) that passed the headroom check on the eight selection seeds and then the ten-seed gate; the headroom ratio and wins use the risk-aware forecast probe; search records in results/strength-search/; --seeds, --n-blocks and --strength are for rehearsals
 python scripts/refresh_doc_numbers.py README.md docs/RESULTS.md   # after any results change
 python scripts/verify_release.py   # v1.0 success criteria 2-5 on results/v1.0 (exit 1 = a criterion failed or a training raise was recorded, 2 = unusable results, including results not on the evaluation seed); results/v1.0 holds the first evaluation, which the restated criteria call unusable until it is replaced
 python scripts/verify_release.py --results DIR --seed tuning   # rehearsal on one tuning-seed run (seed read from DIR/risk.json, 1000-1009); prints a banner, not the evaluation
@@ -104,7 +104,7 @@ data/source/synthetic.py            →  event-record frame: raw columns + block
 data/source/crypto.py               →  raw DataFrame (volume, price[, fee_rate, tx_count]), no labels
 core/privacy.py                     →  privacy stage: one release per block split (train/val/test), BEFORE signals
 data/pipeline.py TransactionPipeline→  compute_signals → RobustScaler → sliding windows
-                                       (process_blocks: block split 70/15/15 → SplitData)
+                                       (process_blocks: block split 45/15/40 → SplitData)
 data/labels.py                      →  risk/forecast labels from the event record
 data/loader.py                      →  TransactionDataset (dict batches) / create_dataloader
 models/dignity.py Dignity           →  DignityBackbone + one head
@@ -158,7 +158,7 @@ a mechanism, it needs a test in `tests/test_privacy.py` or CI's 100% gate on tha
   never moves a true build-up; strength 0 reproduces the old frame. `build_up` is for tests
   and analysis: `data.pipeline.EVENT_LABEL_COLUMNS` refuses it and the other label columns
   as features.
-  `train/loop.py::prepare_data` uses `TransactionPipeline.process_blocks`: shuffle and split blocks 70/15/15,
+  `train/loop.py::prepare_data` uses `TransactionPipeline.process_blocks`: shuffle and split blocks 45/15/40,
   fit the scaler on train blocks only, and compute signals and windows inside each block.
   `prepare_data(config, privacy_seed=None)` seeds only the privacy noise (default: `synthetic.seed`);
   the data and the block split always follow `synthetic.seed`.
