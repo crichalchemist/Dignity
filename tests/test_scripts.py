@@ -752,6 +752,29 @@ class TestRehearseSeeds:
         assert entry["C3"] is None
         assert entry["forecast_val_lift_upper"] is None
 
+    def test_cleanup_never_removes_a_directory_outside_the_rehearsal_root(
+        self, monkeypatch, tmp_path
+    ):
+        rehearse = _rehearse(monkeypatch, tmp_path)
+        path = rehearse.write_seed_config("variants", "base", 1000)
+        outside = tmp_path / "elsewhere"
+        outside.mkdir()
+        keep = outside / "keep.txt"
+        keep.write_text("not a rehearsal result")
+        config = yaml.safe_load(path.read_text())
+        config["eval"]["out_dir"] = str(outside)
+        path.write_text(yaml.safe_dump(config, sort_keys=False))
+        monkeypatch.setattr(rehearse, "write_seed_config", lambda *a: path)
+        import eval.run
+
+        monkeypatch.setattr(eval.run, "main", _FakeEval())
+        args = rehearse.argparse.Namespace(
+            stage="variants", variant="base", tasks="risk", privacy_sweep=False
+        )
+        with pytest.raises(RuntimeError, match="elsewhere"):
+            rehearse._run_seed(args, 1000)
+        assert keep.exists()
+
     def test_seeds_from_an_earlier_invocation_at_this_commit_stay_in_the_summary(
         self, monkeypatch, tmp_path
     ):

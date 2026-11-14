@@ -207,7 +207,15 @@ def _run_seed(args: argparse.Namespace, seed: int) -> tuple[dict, int]:
     cfg_path = write_seed_config(args.stage, args.variant, seed)
     config = DignityConfig.from_yaml(str(cfg_path))
     # a result file left by an earlier run of this seed must never be judged
-    for stale in (Path(config.eval.out_dir), Path(config.eval.img_dir)):
+    stale_dirs = (Path(config.eval.out_dir), Path(config.eval.img_dir))
+    rehearsal_root = (ROOT / "runs" / "rehearsal").resolve()
+    for stale in stale_dirs:
+        if not stale.resolve().is_relative_to(rehearsal_root):
+            raise RuntimeError(
+                f"refusing to remove {stale}: outside the rehearsal root "
+                f"{rehearsal_root}"
+            )
+    for stale in stale_dirs:
         shutil.rmtree(stale, ignore_errors=True)
     argv = ["--config", str(cfg_path), "--seed", "tuning", "--data-seed", str(seed)]
     argv += ["--tasks", args.tasks]
