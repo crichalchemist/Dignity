@@ -45,10 +45,10 @@ format that export no longer supports (DGNTY-3, DGNTY-35). No shipped config wri
 ## Commands
 
 ```bash
-# Tests (1697 collected: test_core 90, test_data 169, test_models 23, test_privacy 42,
+# Tests (1700 collected: test_core 92, test_data 169, test_models 23, test_privacy 42,
 # test_operator 4, test_docs 769, test_train 135, test_checkpoint 4, test_export 9,
 # test_calibration 3, test_labels 7, test_gates 74, test_ci 4, test_eval 151,
-# test_colab_eval 20, test_scripts 64, test_release 129 — one skips without CUDA)
+# test_colab_eval 20, test_scripts 65, test_release 129 — one skips without CUDA)
 # every test is limited to 300 s (pytest.ini; pytest-timeout), except the README quickstart
 # test, which carries its own 900 s limit (three subprocesses, each capped at 300 s)
 pytest tests/ -v
@@ -200,6 +200,7 @@ a mechanism, it needs a test in `tests/test_privacy.py` or CI's 100% gate on tha
   (`train.forecast_eligibility: false` only in `config/smoke.yaml`), which `eval.run` records
   as `metrics.raised`, prints as a `TRAINING_RAISED` line and exits 1 on), but write `risk.json`
   only when `risk` is in `--tasks`. Each task trains under its own `eval_<seed>/<task>/train_seed_<s>/` directory.
+  The hard preset caps the forecast positive weight at 3.0 (`train.forecast_pos_weight_cap`), chosen in the rehearsal.
 - **Timestamps are milliseconds everywhere.** `CryptoSource._normalize_timestamp` auto-detects
   seconds (`< 2e10`), ms (`2e10–3e13`), ns (`> 3e13`), and datetime strings, normalizing all to ms
   to match CCXT's native format. Any new data source must emit ms or a join against crypto data

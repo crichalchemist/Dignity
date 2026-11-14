@@ -50,6 +50,7 @@ train:
   gradient_clip: 1.0
   checkpoint_dir: ./runs/hard
   save_interval: 5
+  forecast_pos_weight_cap: 3.0  # upper limit of the forecast positive weight, chosen on the selection seeds
 
 device: cuda
 seed: 42
