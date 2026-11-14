@@ -1,6 +1,7 @@
 """Test core utilities."""
 
 import dataclasses
+import json
 from pathlib import Path
 
 import numpy as np
@@ -728,3 +729,21 @@ class TestShippedEvaluationSize:
             syn = DignityConfig.from_yaml(path).data.synthetic
             assert (syn.n_blocks, syn.block_len) == (3600, 160), name
             assert (syn.decoy_rate, syn.precursor_len_range) == (0.2, (10, 30)), name
+
+
+class TestShippedHardPreset:
+    def test_hard_preset_carries_exactly_the_configuration_chosen_in_rehearsal(self):
+        config = DignityConfig.from_yaml(ROOT / "config" / "synthetic_hard.yaml")
+        # chosen in rehearsal stage 3, DGNTY-54
+        assert config.train.forecast_warm_start is True
+        assert config.train.forecast_pos_weight_cap == 3.0
+        assert config.train.lr == 3e-4
+        assert config.model.hidden_size == 256
+        assert config.policy.multiplier_lr == 0.1
+
+    def test_the_rehearsal_choice_does_not_touch_the_data_block(self):
+        from eval.gates import DEFAULT_PRESETS, preset_config_hash
+
+        presets = {k: str(ROOT / v) for k, v in DEFAULT_PRESETS.items()}
+        gate = json.loads((ROOT / "results/v1.0/data_gate.json").read_text())
+        assert preset_config_hash(presets) == gate["preset_config_hash"]
